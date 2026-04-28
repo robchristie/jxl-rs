@@ -38,8 +38,15 @@ pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
     pub color_channels: usize,
+    pub alpha: Option<AlphaInfo>,
     pub bit_depth: u32,
     pub pixels: PixelData,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AlphaInfo {
+    pub bit_depth: u32,
+    pub premultiplied: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,9 +80,7 @@ pub fn decode(input: &[u8]) -> Result<DecodedImage> {
     if codestream.basic_info.have_animation {
         return Err(Error::Unsupported("animated image decode"));
     }
-    if !codestream.metadata.extra_channels.is_empty() {
-        return Err(Error::Unsupported("extra-channel image decode"));
-    }
+    let alpha = decode_alpha_info(&codestream.metadata)?;
     let frame = codestream
         .first_frame
         .as_ref()
@@ -92,7 +97,8 @@ pub fn decode(input: &[u8]) -> Result<DecodedImage> {
         .as_ref()
         .ok_or(Error::Unsupported("modular pixel reconstruction"))?;
     let color_channels = codestream.metadata.num_color_channels() as usize;
-    if image.channels.len() != color_channels {
+    let output_channels = color_channels + usize::from(alpha.is_some());
+    if image.channels.len() != output_channels {
         return Err(Error::Unsupported("non-color modular channel output"));
     }
     if image
@@ -112,26 +118,54 @@ pub fn decode(input: &[u8]) -> Result<DecodedImage> {
             width: image.width,
             height: image.height,
             color_channels,
+            alpha,
             bit_depth,
-            pixels: PixelData::U8(interleave_u8(image, color_channels, bit_depth)?),
+            pixels: PixelData::U8(interleave_u8(image, output_channels, bit_depth)?),
         })
     } else if bit_depth <= 16 {
         Ok(DecodedImage {
             width: image.width,
             height: image.height,
             color_channels,
+            alpha,
             bit_depth,
-            pixels: PixelData::U16(interleave_u16(image, color_channels, bit_depth)?),
+            pixels: PixelData::U16(interleave_u16(image, output_channels, bit_depth)?),
         })
     } else {
         Err(Error::Unsupported("integer sample depths above 16 bits"))
     }
 }
 
-fn interleave_u8(image: &ModularImage, color_channels: usize, bit_depth: u32) -> Result<Vec<u8>> {
+fn decode_alpha_info(metadata: &ImageMetadata) -> Result<Option<AlphaInfo>> {
+    if metadata.extra_channels.is_empty() {
+        return Ok(None);
+    }
+    if metadata.extra_channels.len() != 1 {
+        return Err(Error::Unsupported("multiple extra-channel image decode"));
+    }
+    let alpha = &metadata.extra_channels[0];
+    if alpha.channel_type != ExtraChannelType::Alpha {
+        return Err(Error::Unsupported("non-alpha extra-channel image decode"));
+    }
+    if alpha.dim_shift != 0 {
+        return Err(Error::Unsupported("subsampled alpha image decode"));
+    }
+    if alpha.bit_depth.floating_point_sample {
+        return Err(Error::Unsupported("floating-point alpha output"));
+    }
+    if alpha.bit_depth.bits_per_sample != metadata.bit_depth.bits_per_sample {
+        return Err(Error::Unsupported("mixed bit-depth alpha output"));
+    }
+    Ok(Some(AlphaInfo {
+        bit_depth: alpha.bit_depth.bits_per_sample,
+        premultiplied: alpha.alpha_associated,
+    }))
+}
+
+fn interleave_u8(image: &ModularImage, output_channels: usize, bit_depth: u32) -> Result<Vec<u8>> {
     let max_sample = max_sample_value(bit_depth)?;
     let pixels = image_sample_count(image)?
-        .checked_mul(color_channels)
+        .checked_mul(output_channels)
         .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
     let mut output = Vec::with_capacity(pixels);
     for index in 0..image_sample_count(image)? {
@@ -143,10 +177,14 @@ fn interleave_u8(image: &ModularImage, color_channels: usize, bit_depth: u32) ->
     Ok(output)
 }
 
-fn interleave_u16(image: &ModularImage, color_channels: usize, bit_depth: u32) -> Result<Vec<u16>> {
+fn interleave_u16(
+    image: &ModularImage,
+    output_channels: usize,
+    bit_depth: u32,
+) -> Result<Vec<u16>> {
     let max_sample = max_sample_value(bit_depth)?;
     let pixels = image_sample_count(image)?
-        .checked_mul(color_channels)
+        .checked_mul(output_channels)
         .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
     let mut output = Vec::with_capacity(pixels);
     for index in 0..image_sample_count(image)? {
@@ -201,6 +239,7 @@ mod tests {
         assert_eq!(image.width, 64);
         assert_eq!(image.height, 64);
         assert_eq!(image.color_channels, 3);
+        assert_eq!(image.alpha, None);
         assert_eq!(image.bit_depth, 16);
         let PixelData::U16(pixels) = image.pixels else {
             panic!("expected 16-bit pixels");
@@ -221,6 +260,7 @@ mod tests {
         assert_eq!(image.width, 1088);
         assert_eq!(image.height, 64);
         assert_eq!(image.color_channels, 1);
+        assert_eq!(image.alpha, None);
         assert_eq!(image.bit_depth, 16);
         let PixelData::U16(pixels) = image.pixels else {
             panic!("expected 16-bit pixels");
@@ -327,6 +367,67 @@ mod tests {
         assert_eq!(decoded.width, reference.width);
         assert_eq!(decoded.height, reference.height);
         assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.alpha, None);
+        assert_eq!(decoded.bit_depth, 8);
+        assert_eq!(decoded_samples_u16(&decoded), reference.samples);
+    }
+
+    #[test]
+    fn decode_generated_alpha_pixels_match_reference_djxl_when_available() {
+        let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+            eprintln!(
+                "skipping public decode generated alpha comparison; reference tools are not built"
+            );
+            return;
+        };
+
+        let input = unique_temp_path("jxl-decode-alpha-source", "pam");
+        let encoded = unique_temp_path("jxl-decode-alpha", "jxl");
+        let reference_output = unique_temp_path("jxl-decode-alpha-reference", "pam");
+        write_alpha_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "0", "-m", "1", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let djxl_output = Command::new(&djxl)
+            .arg(&encoded)
+            .arg(&reference_output)
+            .arg("--quiet")
+            .output()
+            .unwrap();
+        assert!(
+            djxl_output.status.success(),
+            "reference djxl failed: {}",
+            String::from_utf8_lossy(&djxl_output.stderr)
+        );
+
+        let reference = std::fs::read(&reference_output).unwrap();
+        let reference = parse_pam_rgba(&reference);
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let _ = std::fs::remove_file(&reference_output);
+        let decoded = decode(&encoded_bytes).unwrap();
+
+        assert_eq!(decoded.width, reference.width);
+        assert_eq!(decoded.height, reference.height);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(
+            decoded.alpha,
+            Some(AlphaInfo {
+                bit_depth: 8,
+                premultiplied: false,
+            })
+        );
         assert_eq!(decoded.bit_depth, 8);
         assert_eq!(decoded_samples_u16(&decoded), reference.samples);
     }
@@ -372,6 +473,44 @@ mod tests {
         }
     }
 
+    fn parse_pam_rgba(bytes: &[u8]) -> PpmRgb {
+        let header_end = bytes
+            .windows(7)
+            .position(|window| window == b"ENDHDR\n")
+            .map(|index| index + 7)
+            .expect("PAM header did not contain ENDHDR");
+        let header = std::str::from_utf8(&bytes[..header_end]).unwrap();
+        assert!(header.starts_with("P7\n"));
+        let mut width = None;
+        let mut height = None;
+        let mut depth = None;
+        let mut maxval = None;
+        let mut tupltype = None;
+        for line in header.lines() {
+            let mut fields = line.splitn(2, ' ');
+            match (fields.next(), fields.next()) {
+                (Some("WIDTH"), Some(value)) => width = Some(value.parse::<u32>().unwrap()),
+                (Some("HEIGHT"), Some(value)) => height = Some(value.parse::<u32>().unwrap()),
+                (Some("DEPTH"), Some(value)) => depth = Some(value.parse::<u32>().unwrap()),
+                (Some("MAXVAL"), Some(value)) => maxval = Some(value.parse::<u32>().unwrap()),
+                (Some("TUPLTYPE"), Some(value)) => tupltype = Some(value),
+                _ => {}
+            }
+        }
+        assert_eq!(depth, Some(4));
+        assert_eq!(maxval, Some(255));
+        assert_eq!(tupltype, Some("RGB_ALPHA"));
+        let width = width.unwrap();
+        let height = height.unwrap();
+        let data = &bytes[header_end..];
+        assert_eq!(data.len(), width as usize * height as usize * 4);
+        PpmRgb {
+            width,
+            height,
+            samples: data.iter().copied().map(u16::from).collect(),
+        }
+    }
+
     fn netpbm_token(bytes: &[u8], mut offset: usize) -> (&[u8], usize) {
         loop {
             while offset < bytes.len() && bytes[offset].is_ascii_whitespace() {
@@ -409,6 +548,21 @@ mod tests {
         let mut state = 2u32;
         let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
         for _ in 0..width * height * 3 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            bytes.push((state >> 24) as u8);
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn write_alpha_source_pam(path: &Path) {
+        let width = 64u32;
+        let height = 64u32;
+        let mut state = 3u32;
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+        )
+        .into_bytes();
+        for _ in 0..width * height * 4 {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             bytes.push((state >> 24) as u8);
         }
