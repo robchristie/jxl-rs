@@ -19,14 +19,16 @@ decoder needs:
 - First-frame header parsing: frame type, modular/VarDCT encoding selection,
   color transform, frame crop/origin, passes, blending, animation timing,
   loop-filter parameters, and group layout.
+- First-frame data table-of-contents parsing and section payload traversal,
+  including DC/global and AC group section classification.
 - A small public inspection API through the `jxl` crate.
 - A `jxlinfo-rs` CLI for metadata inspection.
 - Fixture tests against `reference/libjxl/testdata`, with optional comparison
   to the built libjxl `jxlinfo` reference tool.
 
 Pixel reconstruction is not implemented yet. The next decoder slices should add
-frame-data TOC parsing, group payload traversal, modular image decoding, and
-then VarDCT.
+modular stream headers/global tree parsing, modular image decoding, and then
+VarDCT.
 
 ## Workspace
 

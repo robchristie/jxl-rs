@@ -10,6 +10,7 @@ pub mod codestream;
 pub mod container;
 pub mod error;
 pub mod frame;
+pub mod frame_data;
 pub mod metadata;
 pub mod transform;
 
@@ -26,6 +27,7 @@ pub use frame::{
     FrameGroupLayout, FrameHeader, FrameOrigin, FrameSize, FrameType, LoopFilter, Passes,
     YCbCrChromaSubsampling,
 };
+pub use frame_data::{FrameData, FrameSection, FrameSectionKind, FrameToc, TocEntry};
 pub use metadata::{
     AnimationHeader, BitDepth, ColorEncoding, ColorSpace, ExtraChannelInfo, ExtraChannelType,
     ImageMetadata, Orientation, PreviewHeader, Primaries, RenderingIntent, ToneMapping,

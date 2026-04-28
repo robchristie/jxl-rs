@@ -19,6 +19,14 @@ impl<'a> BitReader<'a> {
         self.bit_pos
     }
 
+    pub fn bytes_consumed_floor(&self) -> usize {
+        self.bit_pos / 8
+    }
+
+    pub fn is_byte_aligned(&self) -> bool {
+        self.bit_pos.is_multiple_of(8)
+    }
+
     pub fn read_bool(&mut self) -> Result<bool> {
         Ok(self.read_bits(1)? != 0)
     }
@@ -150,6 +158,16 @@ impl<'a> BitReader<'a> {
         }
         self.bit_pos = end;
         Ok(())
+    }
+
+    pub fn skip_aligned_bytes(&mut self, bytes: usize) -> Result<()> {
+        if !self.is_byte_aligned() {
+            return Err(Error::InvalidCodestream("reader is not byte-aligned"));
+        }
+        let bits = bytes
+            .checked_mul(8)
+            .ok_or(Error::InvalidCodestream("byte skip overflow"))?;
+        self.skip_bits(bits)
     }
 }
 

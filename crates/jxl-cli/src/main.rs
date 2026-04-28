@@ -124,6 +124,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         if frame.animation_frame.duration != 0 {
             println!("First frame duration: {}", frame.animation_frame.duration);
         }
+        if let Some(frame_data) = &info.first_frame_data {
+            println!(
+                "First frame data: sections={}, payload={} bytes",
+                frame_data.sections.len(),
+                frame_data.payload_size
+            );
+        }
     } else {
         println!("First frame: not parsed");
     }
@@ -189,9 +196,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 frame.group_layout.groups_y
             );
             println!(
+                "First frame DC group layout: dim={} groups={}x{}",
+                frame.group_layout.dc_group_dim,
+                frame.group_layout.dc_groups_x,
+                frame.group_layout.dc_groups_y
+            );
+            println!(
                 "First frame loop filter: gaborish={} epf_iters={}",
                 frame.loop_filter.gab, frame.loop_filter.epf_iters
             );
+        }
+        if let Some(frame_data) = &info.first_frame_data {
+            println!(
+                "First frame TOC: entries={} permutation={} payload_start={}",
+                frame_data.toc.entries.len(),
+                frame_data.toc.has_permutation,
+                frame_data.payload_start_offset
+            );
+            for section in &frame_data.sections {
+                println!(
+                    "First frame section {}: logical={} kind={:?} offset={} size={}",
+                    section.physical_index,
+                    section.logical_id,
+                    section.kind,
+                    section.codestream_offset,
+                    section.size
+                );
+            }
         }
     }
 

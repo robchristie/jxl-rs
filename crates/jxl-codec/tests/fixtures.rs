@@ -4,8 +4,8 @@ use std::{
 };
 
 use jxl_codec::{
-    BlendMode, ColorSpace, ColorTransform, ExtraChannelType, FileFormat, FrameEncoding, FrameType,
-    TransferFunction, parse_file,
+    BlendMode, ColorSpace, ColorTransform, ExtraChannelType, FileFormat, FrameEncoding,
+    FrameSectionKind, FrameType, TransferFunction, parse_file,
 };
 
 #[test]
@@ -69,6 +69,10 @@ fn parses_checked_in_fixture_dimensions() {
         assert!(
             codestream.first_frame.is_some(),
             "fixture first frame was not parsed: {path}"
+        );
+        assert!(
+            codestream.first_frame_data.is_some(),
+            "fixture first frame data was not parsed: {path}"
         );
     }
 }
@@ -183,6 +187,38 @@ fn parses_checked_in_fixture_first_frame_headers() {
 }
 
 #[test]
+fn parses_checked_in_fixture_first_frame_toc() {
+    let splines = parse_fixture("reference/libjxl/testdata/jxl/splines.jxl");
+    let frame_data = splines.first_frame_data.as_ref().unwrap();
+    assert_eq!(frame_data.toc.entries.len(), 7);
+    assert!(!frame_data.toc.has_permutation);
+    assert_eq!(frame_data.payload_size, 60);
+    assert_eq!(frame_data.sections[0].kind, FrameSectionKind::DcGlobal);
+    assert_eq!(frame_data.sections[0].size, 56);
+    assert_eq!(
+        frame_data.sections[3].kind,
+        FrameSectionKind::AcGroup { pass: 0, group: 0 }
+    );
+
+    let pq = parse_fixture("reference/libjxl/testdata/jxl/pq_gradient.jxl");
+    let frame_data = pq.first_frame_data.as_ref().unwrap();
+    assert_eq!(frame_data.toc.entries.len(), 6);
+    assert_eq!(frame_data.payload_size, 107);
+    assert_eq!(frame_data.sections[0].kind, FrameSectionKind::DcGlobal);
+    assert_eq!(
+        frame_data.sections[5].kind,
+        FrameSectionKind::AcGroup { pass: 0, group: 2 }
+    );
+
+    let container =
+        parse_fixture("reference/libjxl/testdata/jxl/boxes/square-extended-size-container.jxl");
+    let frame_data = container.first_frame_data.as_ref().unwrap();
+    assert_eq!(frame_data.toc.entries.len(), 1);
+    assert_eq!(frame_data.sections[0].kind, FrameSectionKind::Combined);
+    assert_eq!(frame_data.payload_size, 45);
+}
+
+#[test]
 fn parses_generated_icc_profile_and_continues_to_first_frame() {
     let image = parse_fixture("crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl");
     assert!(image.metadata.color_encoding.want_icc);
@@ -197,6 +233,11 @@ fn parses_generated_icc_profile_and_continues_to_first_frame() {
     assert_eq!(frame.frame_size.width, 64);
     assert_eq!(frame.frame_size.height, 64);
     assert_eq!(frame.group_layout.num_groups, 1);
+
+    let frame_data = image.first_frame_data.as_ref().unwrap();
+    assert_eq!(frame_data.toc.entries.len(), 1);
+    assert_eq!(frame_data.sections[0].kind, FrameSectionKind::Combined);
+    assert_eq!(frame_data.payload_size, 17_986);
 }
 
 fn workspace_path(relative: impl AsRef<Path>) -> PathBuf {

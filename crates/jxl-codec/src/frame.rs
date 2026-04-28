@@ -2,10 +2,10 @@ use std::fmt;
 
 use crate::bitstream::{BitReader, U32Distribution, bits_offset, val};
 use crate::error::{Error, Result};
+use crate::frame_data::compute_group_layout;
 use crate::metadata::{ImageMetadata, read_extensions, unpack_signed};
 
 const MAX_NUM_PASSES: usize = 11;
-const FRAME_GROUP_BASE_DIM: u32 = 128;
 const FLAG_USE_DC_FRAME: u64 = 32;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -128,6 +128,10 @@ pub struct FrameGroupLayout {
     pub groups_x: u32,
     pub groups_y: u32,
     pub num_groups: u32,
+    pub dc_group_dim: u32,
+    pub dc_groups_x: u32,
+    pub dc_groups_y: u32,
+    pub num_dc_groups: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -452,7 +456,15 @@ pub fn read_frame_header(
     let name = reader.read_name()?;
     let loop_filter = read_loop_filter(reader, is_modular)?;
     let extensions = read_extensions(reader)?;
-    let group_layout = compute_group_layout(frame_size, dc_level, group_size_shift);
+    let group_layout = compute_group_layout(
+        frame_size,
+        dc_level,
+        group_size_shift,
+        upsampling,
+        chroma_subsampling.max_h_shift,
+        chroma_subsampling.max_v_shift,
+        encoding == FrameEncoding::Modular,
+    );
 
     Ok(FrameHeader {
         encoding,
@@ -525,7 +537,7 @@ fn default_frame_header(
         name: String::new(),
         loop_filter: LoopFilter::default(),
         extensions: 0,
-        group_layout: compute_group_layout(frame_size, 0, 1),
+        group_layout: compute_group_layout(frame_size, 0, 1, 1, 0, 0, false),
     }
 }
 
@@ -754,28 +766,6 @@ fn read_frame_u32(reader: &mut BitReader<'_>) -> Result<u32> {
         bits_offset(14, 2304),
         bits_offset(30, 18_688),
     )
-}
-
-fn compute_group_layout(
-    mut frame_size: FrameSize,
-    dc_level: u32,
-    group_size_shift: u32,
-) -> FrameGroupLayout {
-    if dc_level != 0 {
-        let divisor = 1u32 << (3 * dc_level);
-        frame_size.width = frame_size.width.div_ceil(divisor);
-        frame_size.height = frame_size.height.div_ceil(divisor);
-    }
-
-    let group_dim = FRAME_GROUP_BASE_DIM << group_size_shift;
-    let groups_x = frame_size.width.div_ceil(group_dim);
-    let groups_y = frame_size.height.div_ceil(group_dim);
-    FrameGroupLayout {
-        group_dim,
-        groups_x,
-        groups_y,
-        num_groups: groups_x * groups_y,
-    }
 }
 
 #[cfg(test)]

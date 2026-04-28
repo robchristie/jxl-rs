@@ -1,6 +1,7 @@
 use crate::bitstream::{BitReader, bits_offset};
 use crate::error::{Error, Result};
 use crate::frame::{FrameHeader, read_frame_header};
+use crate::frame_data::{FrameData, read_frame_data};
 use crate::icc::read_icc_profile;
 use crate::metadata::{ImageMetadata, read_image_metadata};
 use crate::transform::{CustomTransformData, read_custom_transform_data};
@@ -14,6 +15,7 @@ pub struct Codestream {
     pub transform_data: CustomTransformData,
     pub icc_profile: Option<Vec<u8>>,
     pub first_frame: Option<FrameHeader>,
+    pub first_frame_data: Option<FrameData>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -66,6 +68,16 @@ pub fn parse_codestream(input: &[u8]) -> Result<Codestream> {
         size.height,
         &metadata,
     )?);
+    let header_bits_consumed = CODESTREAM_SIGNATURE.len() * 8 + reader.bits_consumed();
+    let first_frame_data = if let Some(frame) = &first_frame {
+        Some(read_frame_data(
+            &mut reader,
+            frame,
+            CODESTREAM_SIGNATURE.len(),
+        )?)
+    } else {
+        None
+    };
 
     Ok(Codestream {
         basic_info: BasicInfo {
@@ -94,12 +106,13 @@ pub fn parse_codestream(input: &[u8]) -> Result<Codestream> {
                 .intrinsic_size
                 .map(|size| size.height)
                 .unwrap_or(size.height),
-            header_bits_consumed: CODESTREAM_SIGNATURE.len() * 8 + reader.bits_consumed(),
+            header_bits_consumed,
         },
         metadata,
         transform_data,
         icc_profile,
         first_frame,
+        first_frame_data,
     })
 }
 
