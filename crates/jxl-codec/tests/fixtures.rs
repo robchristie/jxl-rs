@@ -267,6 +267,7 @@ fn parses_checked_in_fixture_modular_global_metadata() {
     assert_eq!(modular.groups[3].channels[0].x0, 1024);
     assert_eq!(modular.groups[3].channels[0].width, 64);
     assert_eq!(modular.groups[3].stream_id, 23);
+    assert!(modular.residuals.is_none());
 
     let icc = parse_fixture("crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl");
     let modular = icc.first_frame_modular.as_ref().unwrap();
@@ -284,6 +285,7 @@ fn parses_checked_in_fixture_modular_global_metadata() {
     assert_eq!(modular.channel_plan.channels.len(), 3);
     assert_eq!(modular.channel_plan.channels[0].width, 64);
     assert!(modular.groups.is_empty());
+    assert!(modular.residuals.as_ref().unwrap().groups.is_empty());
 
     let splines = parse_fixture("reference/libjxl/testdata/jxl/splines.jxl");
     assert!(splines.first_frame_modular.is_none());

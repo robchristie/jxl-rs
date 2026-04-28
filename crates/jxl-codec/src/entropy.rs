@@ -183,7 +183,7 @@ impl AnsSymbolReader {
         self.read_hybrid_uint_clustered(clustered_context, reader)
     }
 
-    fn read_hybrid_uint_clustered(
+    pub(crate) fn read_hybrid_uint_clustered(
         &mut self,
         context: usize,
         reader: &mut BitReader<'_>,

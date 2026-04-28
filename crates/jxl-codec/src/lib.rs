@@ -35,9 +35,9 @@ pub use metadata::{
     TransferFunction, WhitePoint,
 };
 pub use modular::{
-    MaTree, MaTreeNode, ModularChannel, ModularChannelPlan, ModularFrameMetadata,
-    ModularGlobalSection, ModularGroupChannelPlan, ModularGroupHeader, ModularPredictor,
-    ModularSectionMetadata, ModularTransform, ModularTreeMetadata, SqueezeParams, TransformId,
-    WeightedPredictorHeader,
+    MaTree, MaTreeNode, ModularChannel, ModularChannelPlan, ModularDecodedChannel,
+    ModularDecodedGroup, ModularFrameMetadata, ModularGlobalSection, ModularGroupChannelPlan,
+    ModularGroupHeader, ModularPredictor, ModularResiduals, ModularSectionMetadata,
+    ModularTransform, ModularTreeMetadata, SqueezeParams, TransformId, WeightedPredictorHeader,
 };
 pub use transform::{CustomTransformData, OpsinInverseMatrix};

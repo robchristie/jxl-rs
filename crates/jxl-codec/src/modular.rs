@@ -1,5 +1,5 @@
 use crate::bitstream::{BitReader, bits_offset, val};
-use crate::entropy::{AnsSymbolReader, decode_histograms};
+use crate::entropy::{AnsCode, AnsSymbolReader, decode_histograms};
 use crate::error::{Error, Result};
 use crate::frame::{ColorTransform, FrameEncoding, FrameHeader};
 use crate::frame_data::{FrameData, FrameSection, FrameSectionKind};
@@ -15,6 +15,8 @@ const MULTIPLIER_BITS_CONTEXT: usize = 5;
 const MAX_TREE_SIZE: usize = 1 << 22;
 const TREE_HEIGHT_LIMIT: i32 = 2048;
 const NUM_QUANT_TABLES: usize = 17;
+const NUM_NONREF_PROPERTIES: usize = 16;
+const WP_PROPERTY: i16 = 15;
 const FLAG_NOISE: u64 = 1;
 const FLAG_PATCHES: u64 = 2;
 const FLAG_SPLINES: u64 = 16;
@@ -25,6 +27,28 @@ pub struct ModularFrameMetadata {
     pub global: ModularGlobalSection,
     pub channel_plan: ModularChannelPlan,
     pub groups: Vec<ModularSectionMetadata>,
+    pub residuals: Option<ModularResiduals>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModularResiduals {
+    pub groups: Vec<ModularDecodedGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModularDecodedGroup {
+    pub section_physical_index: usize,
+    pub stream_id: usize,
+    pub channels: Vec<ModularDecodedChannel>,
+    pub bits_consumed: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModularDecodedChannel {
+    pub channel_index: usize,
+    pub width: u32,
+    pub height: u32,
+    pub samples: Vec<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +97,7 @@ pub struct ModularSectionMetadata {
     pub section_logical_id: usize,
     pub section_physical_index: usize,
     pub section_kind: FrameSectionKind,
+    pub codestream_offset: usize,
     pub stream_id: usize,
     pub payload_size: u32,
     pub header: Option<ModularGroupHeader>,
@@ -86,6 +111,13 @@ pub struct ModularTreeMetadata {
     pub tree: MaTree,
     pub contexts: usize,
     pub context_map_size: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ModularTreeCoding {
+    tree: MaTree,
+    code: AnsCode,
+    context_map: Vec<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,10 +288,12 @@ pub fn read_modular_frame_metadata(
     let channel_plan = build_channel_plan(metadata, frame_header, &global.group_header)?;
     let groups =
         read_modular_group_sections(codestream, frame_header, frame_data, &global, &channel_plan)?;
+    let residuals = read_modular_residuals(codestream, frame_header, frame_data, &groups).ok();
     Ok(Some(ModularFrameMetadata {
         global,
         channel_plan,
         groups,
+        residuals,
     }))
 }
 
@@ -328,6 +362,54 @@ fn read_tree_metadata(
     })
 }
 
+fn read_tree_coding(
+    reader: &mut BitReader<'_>,
+    tree_size_limit: usize,
+) -> Result<ModularTreeCoding> {
+    let tree = decode_tree(reader, tree_size_limit)?;
+    let contexts = tree.nodes.len().div_ceil(2);
+    let (code, context_map) = decode_histograms(reader, contexts, false)?;
+    Ok(ModularTreeCoding {
+        tree,
+        code,
+        context_map,
+    })
+}
+
+fn read_global_tree_coding(
+    codestream: &[u8],
+    frame_header: &FrameHeader,
+    frame_data: &FrameData,
+) -> Result<ModularTreeCoding> {
+    let section = frame_data
+        .sections
+        .iter()
+        .find(|section| {
+            matches!(
+                section.kind,
+                FrameSectionKind::Combined | FrameSectionKind::DcGlobal
+            )
+        })
+        .ok_or(Error::InvalidCodestream(
+            "modular frame is missing global section",
+        ))?;
+    let payload = section_payload(codestream, section)?;
+    let mut reader = BitReader::new(payload);
+    skip_dc_dequant_matrices(&mut reader)?;
+    if !reader.read_bool()? {
+        return Err(Error::InvalidCodestream("modular frame has no global tree"));
+    }
+    let coding = read_tree_coding(&mut reader, MAX_TREE_SIZE)?;
+    let header = read_group_header(&mut reader)?;
+    if !header.use_global_tree {
+        return Err(Error::InvalidCodestream(
+            "global modular stream does not use its global tree",
+        ));
+    }
+    let _ = frame_header;
+    Ok(coding)
+}
+
 fn read_modular_group_sections(
     codestream: &[u8],
     frame_header: &FrameHeader,
@@ -368,6 +450,7 @@ fn read_modular_group_section(
             section_logical_id: section.logical_id,
             section_physical_index: section.physical_index,
             section_kind: section.kind,
+            codestream_offset: section.codestream_offset,
             stream_id,
             payload_size: section.size,
             header: None,
@@ -395,6 +478,7 @@ fn read_modular_group_section(
         section_logical_id: section.logical_id,
         section_physical_index: section.physical_index,
         section_kind: section.kind,
+        codestream_offset: section.codestream_offset,
         stream_id,
         payload_size: section.size,
         header: Some(header),
@@ -426,6 +510,279 @@ fn modular_stream_id(kind: FrameSectionKind, frame_header: &FrameHeader) -> Resu
         }
         _ => Err(Error::InvalidCodestream("section is not a modular group")),
     }
+}
+
+fn read_modular_residuals(
+    codestream: &[u8],
+    frame_header: &FrameHeader,
+    frame_data: &FrameData,
+    groups: &[ModularSectionMetadata],
+) -> Result<ModularResiduals> {
+    let global_tree = read_global_tree_coding(codestream, frame_header, frame_data)?;
+    let mut decoded_groups = Vec::new();
+    for group in groups {
+        if group.payload_size == 0 || group.channels.is_empty() {
+            continue;
+        }
+        decoded_groups.push(decode_group_residuals(codestream, group, &global_tree)?);
+    }
+    Ok(ModularResiduals {
+        groups: decoded_groups,
+    })
+}
+
+fn decode_group_residuals(
+    codestream: &[u8],
+    group: &ModularSectionMetadata,
+    global_tree: &ModularTreeCoding,
+) -> Result<ModularDecodedGroup> {
+    let payload = codestream
+        .get(group_payload_range(group)?)
+        .ok_or(Error::InvalidCodestream("modular group outside codestream"))?;
+    let mut reader = BitReader::new(payload);
+    let header = read_group_header(&mut reader)?;
+    let tree = if header.use_global_tree {
+        global_tree.clone()
+    } else {
+        read_tree_coding(&mut reader, MAX_TREE_SIZE)?
+    };
+    let mut symbol_reader = AnsSymbolReader::new(tree.code.clone(), &mut reader)?;
+    let mut decoded_channels = Vec::new();
+    for (local_channel, channel) in group.channels.iter().enumerate() {
+        decoded_channels.push(decode_channel_residuals(
+            &mut reader,
+            &mut symbol_reader,
+            &tree,
+            channel,
+            local_channel,
+            group.stream_id,
+        )?);
+    }
+    if !symbol_reader.check_final_state() {
+        return Err(Error::InvalidCodestream(
+            "invalid modular residual ANS state",
+        ));
+    }
+    Ok(ModularDecodedGroup {
+        section_physical_index: group.section_physical_index,
+        stream_id: group.stream_id,
+        channels: decoded_channels,
+        bits_consumed: reader.bits_consumed(),
+    })
+}
+
+fn group_payload_range(group: &ModularSectionMetadata) -> Result<std::ops::Range<usize>> {
+    let end = group
+        .codestream_offset
+        .checked_add(group.payload_size as usize)
+        .ok_or(Error::InvalidCodestream("modular group range overflow"))?;
+    Ok(group.codestream_offset..end)
+}
+
+fn decode_channel_residuals(
+    reader: &mut BitReader<'_>,
+    symbol_reader: &mut AnsSymbolReader,
+    tree: &ModularTreeCoding,
+    channel: &ModularGroupChannelPlan,
+    local_channel: usize,
+    stream_id: usize,
+) -> Result<ModularDecodedChannel> {
+    let sample_count = (channel.width as usize)
+        .checked_mul(channel.height as usize)
+        .ok_or(Error::InvalidCodestream("modular channel size overflow"))?;
+    let mut samples = vec![0i32; sample_count];
+    let mut properties = vec![0i32; NUM_NONREF_PROPERTIES];
+    properties[0] = local_channel as i32;
+    properties[1] = stream_id as i32;
+    for y in 0..channel.height as usize {
+        properties[2] = y as i32;
+        properties[9] = 0;
+        for x in 0..channel.width as usize {
+            fill_pixel_properties(&mut properties, &samples, channel.width as usize, x, y);
+            let leaf = lookup_tree_leaf(&tree.tree, &properties)?;
+            let context = usize::from(
+                *tree
+                    .context_map
+                    .get(leaf.lchild as usize)
+                    .ok_or(Error::InvalidCodestream("invalid modular residual context"))?,
+            );
+            let guess = predict_one(leaf.predictor, &samples, channel.width as usize, x, y)?;
+            let residual =
+                unpack_signed(symbol_reader.read_hybrid_uint_clustered(context, reader)?);
+            samples[y * channel.width as usize + x] = residual
+                .checked_mul(leaf.multiplier as i32)
+                .and_then(|value| value.checked_add(leaf.predictor_offset as i32))
+                .and_then(|value| value.checked_add(guess))
+                .ok_or(Error::InvalidCodestream("modular residual overflow"))?;
+        }
+    }
+    Ok(ModularDecodedChannel {
+        channel_index: channel.channel_index,
+        width: channel.width,
+        height: channel.height,
+        samples,
+    })
+}
+
+fn lookup_tree_leaf(tree: &MaTree, properties: &[i32]) -> Result<MaTreeNode> {
+    let mut index = 0usize;
+    loop {
+        let node = *tree
+            .nodes
+            .get(index)
+            .ok_or(Error::InvalidCodestream("invalid modular tree node"))?;
+        if node.property == -1 {
+            return Ok(node);
+        }
+        if node.property == WP_PROPERTY {
+            return Err(Error::InvalidCodestream(
+                "modular tree requires weighted-predictor properties",
+            ));
+        }
+        let property = *properties
+            .get(node.property as usize)
+            .ok_or(Error::InvalidCodestream(
+                "unsupported modular tree property",
+            ))?;
+        index = if property > node.splitval {
+            node.lchild as usize
+        } else {
+            node.rchild as usize
+        };
+    }
+}
+
+fn fill_pixel_properties(
+    properties: &mut [i32],
+    samples: &[i32],
+    width: usize,
+    x: usize,
+    y: usize,
+) {
+    let left = sample_left(samples, width, x, y);
+    let top = sample_top(samples, width, x, y, left);
+    let top_left = sample_top_left(samples, width, x, y, left);
+    let top_right = if x + 1 < width && y > 0 {
+        samples[(y - 1) * width + x + 1]
+    } else {
+        top
+    };
+    let left_left = if x > 1 {
+        samples[y * width + x - 2]
+    } else {
+        left
+    };
+    let top_top = if y > 1 {
+        samples[(y - 2) * width + x]
+    } else {
+        top
+    };
+    properties[3] = x as i32;
+    properties[4] = top.abs();
+    properties[5] = left.abs();
+    properties[6] = top;
+    properties[7] = left;
+    properties[8] = left - properties[9];
+    properties[9] = left + top - top_left;
+    properties[10] = left - top_left;
+    properties[11] = top_left - top;
+    properties[12] = top - top_right;
+    properties[13] = top - top_top;
+    properties[14] = left - left_left;
+}
+
+fn predict_one(
+    predictor: ModularPredictor,
+    samples: &[i32],
+    width: usize,
+    x: usize,
+    y: usize,
+) -> Result<i32> {
+    let left = sample_left(samples, width, x, y);
+    let top = sample_top(samples, width, x, y, left);
+    let top_left = sample_top_left(samples, width, x, y, left);
+    let top_right = if x + 1 < width && y > 0 {
+        samples[(y - 1) * width + x + 1]
+    } else {
+        top
+    };
+    let left_left = if x > 1 {
+        samples[y * width + x - 2]
+    } else {
+        left
+    };
+    let top_top = if y > 1 {
+        samples[(y - 2) * width + x]
+    } else {
+        top
+    };
+    let top_right_right = if x + 2 < width && y > 0 {
+        samples[(y - 1) * width + x + 2]
+    } else {
+        top_right
+    };
+    let prediction = match predictor {
+        ModularPredictor::Zero => 0,
+        ModularPredictor::Left => left,
+        ModularPredictor::Top => top,
+        ModularPredictor::Average0 => (left + top) / 2,
+        ModularPredictor::Select => select_predict(left, top, top_left),
+        ModularPredictor::Gradient => clamped_gradient(top, left, top_left),
+        ModularPredictor::TopRight => top_right,
+        ModularPredictor::TopLeft => top_left,
+        ModularPredictor::LeftLeft => left_left,
+        ModularPredictor::Average1 => (left + top_left) / 2,
+        ModularPredictor::Average2 => (top_left + top) / 2,
+        ModularPredictor::Average3 => (top + top_right) / 2,
+        ModularPredictor::Average4 => {
+            (6 * top - 2 * top_top + 7 * left + left_left + top_right_right + 3 * top_right + 8)
+                / 16
+        }
+        ModularPredictor::Weighted => {
+            return Err(Error::InvalidCodestream(
+                "unsupported weighted modular predictor",
+            ));
+        }
+    };
+    Ok(prediction)
+}
+
+fn sample_left(samples: &[i32], width: usize, x: usize, y: usize) -> i32 {
+    if x > 0 {
+        samples[y * width + x - 1]
+    } else if y > 0 {
+        samples[(y - 1) * width + x]
+    } else {
+        0
+    }
+}
+
+fn sample_top(samples: &[i32], width: usize, x: usize, y: usize, left: i32) -> i32 {
+    if y > 0 {
+        samples[(y - 1) * width + x]
+    } else {
+        left
+    }
+}
+
+fn sample_top_left(samples: &[i32], width: usize, x: usize, y: usize, left: i32) -> i32 {
+    if x > 0 && y > 0 {
+        samples[(y - 1) * width + x - 1]
+    } else {
+        left
+    }
+}
+
+fn select_predict(left: i32, top: i32, top_left: i32) -> i32 {
+    let prediction = left + top - top_left;
+    let left_error = (prediction - left).abs();
+    let top_error = (prediction - top).abs();
+    if left_error < top_error { left } else { top }
+}
+
+fn clamped_gradient(top: i32, left: i32, top_left: i32) -> i32 {
+    let guess = left + top - top_left;
+    guess.clamp(left.min(top), left.max(top))
 }
 
 fn build_channel_plan(

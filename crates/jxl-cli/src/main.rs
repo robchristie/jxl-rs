@@ -272,6 +272,36 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     channel.component
                 );
             }
+            if let Some(residuals) = &modular.residuals {
+                println!(
+                    "First frame modular residuals: groups={}",
+                    residuals.groups.len()
+                );
+                for group in &residuals.groups {
+                    println!(
+                        "First frame modular residual group {}: stream_id={} channels={} bits={}",
+                        group.section_physical_index,
+                        group.stream_id,
+                        group.channels.len(),
+                        group.bits_consumed
+                    );
+                    for channel in &group.channels {
+                        let min = channel.samples.iter().min().copied().unwrap_or_default();
+                        let max = channel.samples.iter().max().copied().unwrap_or_default();
+                        println!(
+                            "First frame modular residual channel {}: {}x{} samples={} min={} max={}",
+                            channel.channel_index,
+                            channel.width,
+                            channel.height,
+                            channel.samples.len(),
+                            min,
+                            max
+                        );
+                    }
+                }
+            } else {
+                println!("First frame modular residuals: unsupported");
+            }
             for (index, transform) in global.group_header.transforms.iter().enumerate() {
                 println!(
                     "First frame modular transform {}: id={:?} begin_c={} rct_type={:?} num_c={:?} colors={:?} deltas={:?} squeezes={}",
