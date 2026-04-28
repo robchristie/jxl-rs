@@ -131,6 +131,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 frame_data.payload_size
             );
         }
+        if let Some(modular) = &info.first_frame_modular {
+            println!(
+                "First frame modular global: tree={} transforms={}",
+                modular.global.has_global_tree,
+                modular.global.group_header.transforms.len()
+            );
+        }
     } else {
         println!("First frame: not parsed");
     }
@@ -221,6 +228,40 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     section.kind,
                     section.codestream_offset,
                     section.size
+                );
+            }
+        }
+        if let Some(modular) = &info.first_frame_modular {
+            let global = &modular.global;
+            println!(
+                "First frame modular global section: logical={} kind={:?} bits={}",
+                global.section_logical_id, global.section_kind, global.bits_consumed
+            );
+            if let Some(tree) = &global.global_tree {
+                println!(
+                    "First frame modular global tree: nodes={} contexts={} context_map={}",
+                    tree.nodes.len(),
+                    global.global_tree_contexts.unwrap_or_default(),
+                    global.global_tree_context_map_size.unwrap_or_default()
+                );
+            }
+            println!(
+                "First frame modular group header: use_global_tree={} wp_default={} transforms={}",
+                global.group_header.use_global_tree,
+                global.group_header.weighted_predictor.all_default,
+                global.group_header.transforms.len()
+            );
+            for (index, transform) in global.group_header.transforms.iter().enumerate() {
+                println!(
+                    "First frame modular transform {}: id={:?} begin_c={} rct_type={:?} num_c={:?} colors={:?} deltas={:?} squeezes={}",
+                    index,
+                    transform.id,
+                    transform.begin_c,
+                    transform.rct_type,
+                    transform.num_c,
+                    transform.nb_colors,
+                    transform.nb_deltas,
+                    transform.squeezes.len()
                 );
             }
         }

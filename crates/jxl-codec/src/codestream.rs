@@ -4,6 +4,7 @@ use crate::frame::{FrameHeader, read_frame_header};
 use crate::frame_data::{FrameData, read_frame_data};
 use crate::icc::read_icc_profile;
 use crate::metadata::{ImageMetadata, read_image_metadata};
+use crate::modular::{ModularFrameMetadata, read_modular_frame_metadata};
 use crate::transform::{CustomTransformData, read_custom_transform_data};
 
 pub const CODESTREAM_SIGNATURE: [u8; 2] = [0xff, 0x0a];
@@ -16,6 +17,7 @@ pub struct Codestream {
     pub icc_profile: Option<Vec<u8>>,
     pub first_frame: Option<FrameHeader>,
     pub first_frame_data: Option<FrameData>,
+    pub first_frame_modular: Option<ModularFrameMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -78,6 +80,12 @@ pub fn parse_codestream(input: &[u8]) -> Result<Codestream> {
     } else {
         None
     };
+    let first_frame_modular = match (&first_frame, &first_frame_data) {
+        (Some(frame), Some(frame_data)) => {
+            read_modular_frame_metadata(input, &metadata, frame, frame_data)?
+        }
+        _ => None,
+    };
 
     Ok(Codestream {
         basic_info: BasicInfo {
@@ -113,6 +121,7 @@ pub fn parse_codestream(input: &[u8]) -> Result<Codestream> {
         icc_profile,
         first_frame,
         first_frame_data,
+        first_frame_modular,
     })
 }
 

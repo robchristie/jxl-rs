@@ -5,7 +5,7 @@ use std::{
 
 use jxl_codec::{
     BlendMode, ColorSpace, ColorTransform, ExtraChannelType, FileFormat, FrameEncoding,
-    FrameSectionKind, FrameType, TransferFunction, parse_file,
+    FrameSectionKind, FrameType, TransferFunction, TransformId, parse_file,
 };
 
 #[test]
@@ -216,6 +216,41 @@ fn parses_checked_in_fixture_first_frame_toc() {
     assert_eq!(frame_data.toc.entries.len(), 1);
     assert_eq!(frame_data.sections[0].kind, FrameSectionKind::Combined);
     assert_eq!(frame_data.payload_size, 45);
+}
+
+#[test]
+fn parses_checked_in_fixture_modular_global_metadata() {
+    let pq = parse_fixture("reference/libjxl/testdata/jxl/pq_gradient.jxl");
+    let modular = pq.first_frame_modular.as_ref().unwrap();
+    assert_eq!(modular.global.section_kind, FrameSectionKind::DcGlobal);
+    assert!(modular.global.has_global_tree);
+    assert_eq!(modular.global.global_tree.as_ref().unwrap().nodes.len(), 3);
+    assert_eq!(modular.global.global_tree_contexts, Some(2));
+    assert!(modular.global.group_header.use_global_tree);
+    assert!(modular.global.group_header.weighted_predictor.all_default);
+    assert_eq!(modular.global.group_header.transforms.len(), 1);
+    let transform = &modular.global.group_header.transforms[0];
+    assert_eq!(transform.id, TransformId::Palette);
+    assert_eq!(transform.begin_c, 0);
+    assert_eq!(transform.num_c, Some(1));
+    assert_eq!(transform.nb_colors, Some(17));
+    assert_eq!(transform.nb_deltas, Some(0));
+
+    let icc = parse_fixture("crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl");
+    let modular = icc.first_frame_modular.as_ref().unwrap();
+    assert_eq!(modular.global.section_kind, FrameSectionKind::Combined);
+    assert_eq!(
+        modular.global.global_tree.as_ref().unwrap().nodes.len(),
+        309
+    );
+    assert_eq!(modular.global.global_tree_contexts, Some(155));
+    assert_eq!(modular.global.group_header.transforms.len(), 1);
+    let transform = &modular.global.group_header.transforms[0];
+    assert_eq!(transform.id, TransformId::Rct);
+    assert_eq!(transform.rct_type, Some(10));
+
+    let splines = parse_fixture("reference/libjxl/testdata/jxl/splines.jxl");
+    assert!(splines.first_frame_modular.is_none());
 }
 
 #[test]

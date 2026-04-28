@@ -21,13 +21,16 @@ decoder needs:
   loop-filter parameters, and group layout.
 - First-frame data table-of-contents parsing and section payload traversal,
   including DC/global and AC group section classification.
+- First-frame modular global metadata parsing for frames without optional
+  patch/spline/noise preambles, including the DC dequant preamble, global MA
+  tree, weighted-predictor header, and modular transforms.
 - A small public inspection API through the `jxl` crate.
 - A `jxlinfo-rs` CLI for metadata inspection.
 - Fixture tests against `reference/libjxl/testdata`, with optional comparison
   to the built libjxl `jxlinfo` reference tool.
 
 Pixel reconstruction is not implemented yet. The next decoder slices should add
-modular stream headers/global tree parsing, modular image decoding, and then
+modular group stream headers and local trees, modular image decoding, and then
 VarDCT.
 
 ## Workspace

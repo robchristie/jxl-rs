@@ -12,6 +12,7 @@ pub mod error;
 pub mod frame;
 pub mod frame_data;
 pub mod metadata;
+pub mod modular;
 pub mod transform;
 
 pub(crate) mod entropy;
@@ -32,5 +33,9 @@ pub use metadata::{
     AnimationHeader, BitDepth, ColorEncoding, ColorSpace, ExtraChannelInfo, ExtraChannelType,
     ImageMetadata, Orientation, PreviewHeader, Primaries, RenderingIntent, ToneMapping,
     TransferFunction, WhitePoint,
+};
+pub use modular::{
+    MaTree, MaTreeNode, ModularFrameMetadata, ModularGlobalSection, ModularGroupHeader,
+    ModularPredictor, ModularTransform, SqueezeParams, TransformId, WeightedPredictorHeader,
 };
 pub use transform::{CustomTransformData, OpsinInverseMatrix};
