@@ -23,7 +23,37 @@ const UNSUPPORTED_DC_GLOBAL_FEATURES: u64 = FLAG_NOISE | FLAG_PATCHES | FLAG_SPL
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModularFrameMetadata {
     pub global: ModularGlobalSection,
+    pub channel_plan: ModularChannelPlan,
     pub groups: Vec<ModularSectionMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModularChannelPlan {
+    pub width: u32,
+    pub height: u32,
+    pub bit_depth: u32,
+    pub nb_meta_channels: usize,
+    pub channels: Vec<ModularChannel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModularChannel {
+    pub width: u32,
+    pub height: u32,
+    pub hshift: i32,
+    pub vshift: i32,
+    pub component: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModularGroupChannelPlan {
+    pub channel_index: usize,
+    pub width: u32,
+    pub height: u32,
+    pub x0: u32,
+    pub y0: u32,
+    pub hshift: i32,
+    pub vshift: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +77,7 @@ pub struct ModularSectionMetadata {
     pub payload_size: u32,
     pub header: Option<ModularGroupHeader>,
     pub local_tree: Option<ModularTreeMetadata>,
+    pub channels: Vec<ModularGroupChannelPlan>,
     pub bits_consumed: usize,
 }
 
@@ -222,9 +253,14 @@ pub fn read_modular_frame_metadata(
     let payload = section_payload(codestream, section)?;
     let mut reader = BitReader::new(payload);
     let global = read_global_section(&mut reader, metadata, frame_header, section)?;
+    let channel_plan = build_channel_plan(metadata, frame_header, &global.group_header)?;
     let groups =
-        read_modular_group_sections(codestream, frame_header, frame_data, global.has_global_tree)?;
-    Ok(Some(ModularFrameMetadata { global, groups }))
+        read_modular_group_sections(codestream, frame_header, frame_data, &global, &channel_plan)?;
+    Ok(Some(ModularFrameMetadata {
+        global,
+        channel_plan,
+        groups,
+    }))
 }
 
 fn section_payload<'a>(codestream: &'a [u8], section: &FrameSection) -> Result<&'a [u8]> {
@@ -296,7 +332,8 @@ fn read_modular_group_sections(
     codestream: &[u8],
     frame_header: &FrameHeader,
     frame_data: &FrameData,
-    has_global_tree: bool,
+    global: &ModularGlobalSection,
+    channel_plan: &ModularChannelPlan,
 ) -> Result<Vec<ModularSectionMetadata>> {
     let mut groups = Vec::new();
     for section in &frame_data.sections {
@@ -310,7 +347,8 @@ fn read_modular_group_sections(
             codestream,
             frame_header,
             section,
-            has_global_tree,
+            global.has_global_tree,
+            channel_plan,
         )?);
     }
     Ok(groups)
@@ -321,8 +359,10 @@ fn read_modular_group_section(
     frame_header: &FrameHeader,
     section: &FrameSection,
     has_global_tree: bool,
+    channel_plan: &ModularChannelPlan,
 ) -> Result<ModularSectionMetadata> {
     let stream_id = modular_stream_id(section.kind, frame_header)?;
+    let channels = group_channel_plan(section.kind, frame_header, channel_plan)?;
     if section.size == 0 {
         return Ok(ModularSectionMetadata {
             section_logical_id: section.logical_id,
@@ -332,6 +372,7 @@ fn read_modular_group_section(
             payload_size: section.size,
             header: None,
             local_tree: None,
+            channels,
             bits_consumed: 0,
         });
     }
@@ -358,6 +399,7 @@ fn read_modular_group_section(
         payload_size: section.size,
         header: Some(header),
         local_tree,
+        channels,
         bits_consumed: reader.bits_consumed(),
     })
 }
@@ -384,6 +426,477 @@ fn modular_stream_id(kind: FrameSectionKind, frame_header: &FrameHeader) -> Resu
         }
         _ => Err(Error::InvalidCodestream("section is not a modular group")),
     }
+}
+
+fn build_channel_plan(
+    metadata: &ImageMetadata,
+    frame_header: &FrameHeader,
+    global_header: &ModularGroupHeader,
+) -> Result<ModularChannelPlan> {
+    let width = frame_header
+        .frame_size
+        .width
+        .div_ceil(frame_header.upsampling);
+    let height = frame_header
+        .frame_size
+        .height
+        .div_ceil(frame_header.upsampling);
+    let mut channels = initial_channels(metadata, frame_header, width, height)?;
+    let mut nb_meta_channels = 0usize;
+    for transform in &global_header.transforms {
+        apply_transform_metadata(transform, &mut channels, &mut nb_meta_channels)?;
+    }
+    Ok(ModularChannelPlan {
+        width,
+        height,
+        bit_depth: metadata.bit_depth.bits_per_sample,
+        nb_meta_channels,
+        channels,
+    })
+}
+
+fn initial_channels(
+    metadata: &ImageMetadata,
+    frame_header: &FrameHeader,
+    width: u32,
+    height: u32,
+) -> Result<Vec<ModularChannel>> {
+    let color_channels = if metadata.color_encoding.color_space == crate::metadata::ColorSpace::Gray
+        && frame_header.color_transform == ColorTransform::None
+    {
+        1usize
+    } else {
+        3usize
+    };
+    let mut channels = Vec::with_capacity(color_channels + metadata.extra_channels.len());
+    for component in 0..color_channels {
+        let (hshift, vshift) = if frame_header.color_transform == ColorTransform::YCbCr {
+            chroma_shift(&frame_header.chroma_subsampling, component)?
+        } else {
+            (0, 0)
+        };
+        channels.push(ModularChannel {
+            width: shifted_size(width, hshift)?,
+            height: shifted_size(height, vshift)?,
+            hshift,
+            vshift,
+            component: Some(component),
+        });
+    }
+
+    let frame_upsampling_log = ceil_log2_nonzero_u32(frame_header.upsampling)?;
+    for (index, extra) in metadata.extra_channels.iter().enumerate() {
+        let upsampling =
+            *frame_header
+                .extra_channel_upsampling
+                .get(index)
+                .ok_or(Error::InvalidCodestream(
+                    "missing extra-channel upsampling factor",
+                ))?;
+        let shift = ceil_log2_nonzero_u32(upsampling)? - frame_upsampling_log;
+        channels.push(ModularChannel {
+            width: frame_header.frame_size.width.div_ceil(upsampling),
+            height: frame_header.frame_size.height.div_ceil(upsampling),
+            hshift: shift,
+            vshift: shift,
+            component: Some(color_channels + index),
+        });
+        if extra.dim_shift > 30 {
+            return Err(Error::InvalidCodestream("invalid extra-channel shift"));
+        }
+    }
+    Ok(channels)
+}
+
+fn chroma_shift(
+    subsampling: &crate::frame::YCbCrChromaSubsampling,
+    channel: usize,
+) -> Result<(i32, i32)> {
+    const H_SHIFT: [i32; 4] = [0, 1, 1, 0];
+    const V_SHIFT: [i32; 4] = [0, 1, 0, 1];
+    let mode = *subsampling
+        .channel_mode
+        .get(channel)
+        .ok_or(Error::InvalidCodestream("invalid chroma channel"))? as usize;
+    let hshift = i32::from(subsampling.max_h_shift) - H_SHIFT[mode];
+    let vshift = i32::from(subsampling.max_v_shift) - V_SHIFT[mode];
+    Ok((hshift, vshift))
+}
+
+fn apply_transform_metadata(
+    transform: &ModularTransform,
+    channels: &mut Vec<ModularChannel>,
+    nb_meta_channels: &mut usize,
+) -> Result<()> {
+    match transform.id {
+        TransformId::Rct => {
+            check_equal_channels(channels, *nb_meta_channels, transform.begin_c as usize, 3)?;
+        }
+        TransformId::Palette => {
+            let num_c = transform.num_c.ok_or(Error::InvalidCodestream(
+                "palette transform missing channel count",
+            ))? as usize;
+            let nb_colors = transform.nb_colors.ok_or(Error::InvalidCodestream(
+                "palette transform missing color count",
+            ))?;
+            let nb_deltas = transform.nb_deltas.ok_or(Error::InvalidCodestream(
+                "palette transform missing delta count",
+            ))?;
+            apply_palette_metadata(
+                channels,
+                nb_meta_channels,
+                transform.begin_c as usize,
+                num_c,
+                nb_colors,
+                nb_deltas,
+            )?;
+        }
+        TransformId::Squeeze => {
+            let squeezes = if transform.squeezes.is_empty() {
+                default_squeeze_parameters(channels, *nb_meta_channels)?
+            } else {
+                transform.squeezes.clone()
+            };
+            for squeeze in &squeezes {
+                apply_squeeze_metadata(channels, nb_meta_channels, squeeze)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_equal_channels(
+    channels: &[ModularChannel],
+    nb_meta_channels: usize,
+    begin_c: usize,
+    num_c: usize,
+) -> Result<()> {
+    let end_c = begin_c
+        .checked_add(num_c)
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(Error::InvalidCodestream("invalid modular channel range"))?;
+    if begin_c > channels.len() || end_c >= channels.len() || end_c < begin_c {
+        return Err(Error::InvalidCodestream("invalid modular channel range"));
+    }
+    if begin_c < nb_meta_channels && end_c >= nb_meta_channels {
+        return Err(Error::InvalidCodestream(
+            "transform mixes meta and non-meta channels",
+        ));
+    }
+    let first = &channels[begin_c];
+    if num_c > 1
+        && channels[begin_c + 1..=end_c].iter().any(|channel| {
+            channel.width != first.width
+                || channel.height != first.height
+                || channel.hshift != first.hshift
+                || channel.vshift != first.vshift
+        })
+    {
+        return Err(Error::InvalidCodestream(
+            "modular channel dimensions differ",
+        ));
+    }
+    Ok(())
+}
+
+fn apply_palette_metadata(
+    channels: &mut Vec<ModularChannel>,
+    nb_meta_channels: &mut usize,
+    begin_c: usize,
+    num_c: usize,
+    nb_colors: u32,
+    nb_deltas: u32,
+) -> Result<()> {
+    check_equal_channels(channels, *nb_meta_channels, begin_c, num_c)?;
+    let end_c = begin_c + num_c - 1;
+    if begin_c >= *nb_meta_channels {
+        *nb_meta_channels += 1;
+    } else {
+        if end_c >= *nb_meta_channels {
+            return Err(Error::InvalidCodestream("invalid meta palette transform"));
+        }
+        *nb_meta_channels = nb_meta_channels
+            .checked_add(2)
+            .and_then(|value| value.checked_sub(num_c))
+            .ok_or(Error::InvalidCodestream(
+                "invalid meta palette channel count",
+            ))?;
+    }
+    channels.drain(begin_c + 1..end_c + 1);
+    channels.insert(
+        0,
+        ModularChannel {
+            width: nb_colors
+                .checked_add(nb_deltas)
+                .ok_or(Error::InvalidCodestream("palette channel width overflow"))?,
+            height: num_c as u32,
+            hshift: -1,
+            vshift: -1,
+            component: None,
+        },
+    );
+    Ok(())
+}
+
+fn default_squeeze_parameters(
+    channels: &[ModularChannel],
+    nb_meta_channels: usize,
+) -> Result<Vec<SqueezeParams>> {
+    let nb_channels = channels
+        .len()
+        .checked_sub(nb_meta_channels)
+        .ok_or(Error::InvalidCodestream("invalid meta channel count"))?;
+    if nb_channels == 0 {
+        return Ok(Vec::new());
+    }
+    let mut result = Vec::new();
+    let mut width = channels[nb_meta_channels].width;
+    let mut height = channels[nb_meta_channels].height;
+    let wide = width > height;
+
+    if nb_channels > 2
+        && channels[nb_meta_channels + 1].width == width
+        && channels[nb_meta_channels + 1].height == height
+    {
+        result.push(SqueezeParams {
+            horizontal: true,
+            in_place: false,
+            begin_c: (nb_meta_channels + 1) as u32,
+            num_c: 2,
+        });
+        result.push(SqueezeParams {
+            horizontal: false,
+            in_place: false,
+            begin_c: (nb_meta_channels + 1) as u32,
+            num_c: 2,
+        });
+    }
+
+    let mut params = SqueezeParams {
+        horizontal: false,
+        in_place: true,
+        begin_c: nb_meta_channels as u32,
+        num_c: nb_channels as u32,
+    };
+    if !wide && height > 8 {
+        params.horizontal = false;
+        result.push(params);
+        height = height.div_ceil(2);
+    }
+    while width > 8 || height > 8 {
+        if width > 8 {
+            params.horizontal = true;
+            result.push(params);
+            width = width.div_ceil(2);
+        }
+        if height > 8 {
+            params.horizontal = false;
+            result.push(params);
+            height = height.div_ceil(2);
+        }
+    }
+    Ok(result)
+}
+
+fn apply_squeeze_metadata(
+    channels: &mut Vec<ModularChannel>,
+    nb_meta_channels: &mut usize,
+    squeeze: &SqueezeParams,
+) -> Result<()> {
+    let begin_c = squeeze.begin_c as usize;
+    let num_c = squeeze.num_c as usize;
+    let end_c = begin_c
+        .checked_add(num_c)
+        .and_then(|value| value.checked_sub(1))
+        .ok_or(Error::InvalidCodestream("invalid squeeze channel range"))?;
+    if end_c >= channels.len() {
+        return Err(Error::InvalidCodestream("invalid squeeze channel range"));
+    }
+    if begin_c < *nb_meta_channels {
+        if end_c >= *nb_meta_channels {
+            return Err(Error::InvalidCodestream(
+                "squeeze mixes meta and non-meta channels",
+            ));
+        }
+        if !squeeze.in_place {
+            return Err(Error::InvalidCodestream(
+                "meta squeeze requires in-place residuals",
+            ));
+        }
+        *nb_meta_channels = nb_meta_channels
+            .checked_add(num_c)
+            .ok_or(Error::InvalidCodestream("meta squeeze channel overflow"))?;
+    }
+    let offset = if squeeze.in_place {
+        end_c + 1
+    } else {
+        channels.len()
+    };
+    for channel_index in begin_c..=end_c {
+        let mut residual = channels[channel_index].clone();
+        if residual.width == 0 || residual.height == 0 {
+            return Err(Error::InvalidCodestream("squeezing empty channel"));
+        }
+        if residual.hshift > 30 || residual.vshift > 30 {
+            return Err(Error::InvalidCodestream("too many squeezes"));
+        }
+        if squeeze.horizontal {
+            let low_width = residual.width.div_ceil(2);
+            channels[channel_index].width = low_width;
+            channels[channel_index].hshift += 1;
+            residual.width -= low_width;
+            residual.hshift = channels[channel_index].hshift;
+        } else {
+            let low_height = residual.height.div_ceil(2);
+            channels[channel_index].height = low_height;
+            channels[channel_index].vshift += 1;
+            residual.height -= low_height;
+            residual.vshift = channels[channel_index].vshift;
+        }
+        channels.insert(offset + (channel_index - begin_c), residual);
+    }
+    Ok(())
+}
+
+fn group_channel_plan(
+    kind: FrameSectionKind,
+    frame_header: &FrameHeader,
+    channel_plan: &ModularChannelPlan,
+) -> Result<Vec<ModularGroupChannelPlan>> {
+    let (rect_x, rect_y, rect_w, rect_h, min_shift, max_shift) = match kind {
+        FrameSectionKind::DcGroup { group } => {
+            let groups_x = frame_header.group_layout.dc_groups_x;
+            let gx = group as u32 % groups_x;
+            let gy = group as u32 / groups_x;
+            (
+                gx * frame_header.group_layout.dc_group_dim,
+                gy * frame_header.group_layout.dc_group_dim,
+                frame_header.group_layout.dc_group_dim,
+                frame_header.group_layout.dc_group_dim,
+                3,
+                1000,
+            )
+        }
+        FrameSectionKind::AcGroup { pass, group } => {
+            let groups_x = frame_header.group_layout.groups_x;
+            let gx = group as u32 % groups_x;
+            let gy = group as u32 / groups_x;
+            let (min_shift, max_shift) = pass_downsampling_bracket(&frame_header.passes, pass)?;
+            (
+                gx * frame_header.group_layout.group_dim,
+                gy * frame_header.group_layout.group_dim,
+                frame_header.group_layout.group_dim,
+                frame_header.group_layout.group_dim,
+                min_shift,
+                max_shift,
+            )
+        }
+        _ => return Ok(Vec::new()),
+    };
+
+    let begin_channel = channel_plan
+        .channels
+        .iter()
+        .enumerate()
+        .skip(channel_plan.nb_meta_channels)
+        .find(|(_, channel)| {
+            channel.width > frame_header.group_layout.group_dim
+                || channel.height > frame_header.group_layout.group_dim
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(channel_plan.channels.len());
+
+    let mut result = Vec::new();
+    for (index, channel) in channel_plan.channels.iter().enumerate().skip(begin_channel) {
+        let shift = channel.hshift.min(channel.vshift);
+        if shift > max_shift || shift < min_shift {
+            continue;
+        }
+        if let Some((x0, y0, width, height)) =
+            shifted_group_rect(rect_x, rect_y, rect_w, rect_h, channel)?
+        {
+            result.push(ModularGroupChannelPlan {
+                channel_index: index,
+                width,
+                height,
+                x0,
+                y0,
+                hshift: channel.hshift,
+                vshift: channel.vshift,
+            });
+        }
+    }
+    Ok(result)
+}
+
+fn shifted_group_rect(
+    rect_x: u32,
+    rect_y: u32,
+    rect_w: u32,
+    rect_h: u32,
+    channel: &ModularChannel,
+) -> Result<Option<(u32, u32, u32, u32)>> {
+    if channel.hshift < 0 || channel.vshift < 0 {
+        return Err(Error::InvalidCodestream(
+            "negative shifts are only valid for meta channels",
+        ));
+    }
+    let hshift = channel.hshift as u32;
+    let vshift = channel.vshift as u32;
+    let x0 = rect_x >> hshift;
+    let y0 = rect_y >> vshift;
+    if x0 >= channel.width || y0 >= channel.height {
+        return Ok(None);
+    }
+    let width = (rect_w >> hshift).min(channel.width - x0);
+    let height = (rect_h >> vshift).min(channel.height - y0);
+    if width == 0 || height == 0 {
+        return Ok(None);
+    }
+    Ok(Some((x0, y0, width, height)))
+}
+
+fn pass_downsampling_bracket(passes: &crate::frame::Passes, pass: usize) -> Result<(i32, i32)> {
+    if pass >= passes.num_passes as usize {
+        return Err(Error::InvalidCodestream("invalid pass index"));
+    }
+    let mut max_shift = 2;
+    let mut min_shift = 3;
+    for index in 0.. {
+        for downsample_index in 0..passes.num_downsample as usize {
+            if index == passes.last_pass[downsample_index] as usize {
+                min_shift = match passes.downsample[downsample_index] {
+                    8 => 3,
+                    4 => 2,
+                    2 => 1,
+                    1 => 0,
+                    _ => return Err(Error::InvalidCodestream("invalid pass downsample")),
+                };
+            }
+        }
+        if index == passes.num_passes as usize - 1 {
+            min_shift = 0;
+        }
+        if index == pass {
+            return Ok((min_shift, max_shift));
+        }
+        max_shift = min_shift - 1;
+    }
+    unreachable!()
+}
+
+fn shifted_size(size: u32, shift: i32) -> Result<u32> {
+    if shift < 0 {
+        return Err(Error::InvalidCodestream("negative non-meta channel shift"));
+    }
+    Ok(size.div_ceil(1u32 << shift as u32))
+}
+
+fn ceil_log2_nonzero_u32(value: u32) -> Result<i32> {
+    if value == 0 {
+        return Err(Error::InvalidCodestream("zero upsampling factor"));
+    }
+    Ok((u32::BITS - (value - 1).leading_zeros()) as i32)
 }
 
 fn skip_dc_dequant_matrices(reader: &mut BitReader<'_>) -> Result<()> {

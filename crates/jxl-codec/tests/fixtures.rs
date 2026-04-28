@@ -235,8 +235,18 @@ fn parses_checked_in_fixture_modular_global_metadata() {
     assert_eq!(transform.num_c, Some(1));
     assert_eq!(transform.nb_colors, Some(17));
     assert_eq!(transform.nb_deltas, Some(0));
+    assert_eq!(modular.channel_plan.width, 1088);
+    assert_eq!(modular.channel_plan.height, 64);
+    assert_eq!(modular.channel_plan.nb_meta_channels, 1);
+    assert_eq!(modular.channel_plan.channels.len(), 2);
+    assert_eq!(modular.channel_plan.channels[0].width, 17);
+    assert_eq!(modular.channel_plan.channels[0].height, 1);
+    assert_eq!(modular.channel_plan.channels[0].hshift, -1);
+    assert_eq!(modular.channel_plan.channels[1].width, 1088);
+    assert_eq!(modular.channel_plan.channels[1].height, 64);
     assert_eq!(modular.groups.len(), 4);
     assert!(modular.groups[0].header.is_none());
+    assert!(modular.groups[0].channels.is_empty());
     assert_eq!(
         modular.groups[0].section_kind,
         FrameSectionKind::DcGroup { group: 0 }
@@ -250,6 +260,12 @@ fn parses_checked_in_fixture_modular_global_metadata() {
     assert_eq!(modular.groups[1].bits_consumed, 4);
     assert!(modular.groups[1].header.as_ref().unwrap().use_global_tree);
     assert!(modular.groups[1].local_tree.is_none());
+    assert_eq!(modular.groups[1].channels.len(), 1);
+    assert_eq!(modular.groups[1].channels[0].channel_index, 1);
+    assert_eq!(modular.groups[1].channels[0].width, 512);
+    assert_eq!(modular.groups[1].channels[0].height, 64);
+    assert_eq!(modular.groups[3].channels[0].x0, 1024);
+    assert_eq!(modular.groups[3].channels[0].width, 64);
     assert_eq!(modular.groups[3].stream_id, 23);
 
     let icc = parse_fixture("crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl");
@@ -264,6 +280,9 @@ fn parses_checked_in_fixture_modular_global_metadata() {
     let transform = &modular.global.group_header.transforms[0];
     assert_eq!(transform.id, TransformId::Rct);
     assert_eq!(transform.rct_type, Some(10));
+    assert_eq!(modular.channel_plan.nb_meta_channels, 0);
+    assert_eq!(modular.channel_plan.channels.len(), 3);
+    assert_eq!(modular.channel_plan.channels[0].width, 64);
     assert!(modular.groups.is_empty());
 
     let splines = parse_fixture("reference/libjxl/testdata/jxl/splines.jxl");

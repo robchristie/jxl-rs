@@ -133,9 +133,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(modular) = &info.first_frame_modular {
             println!(
-                "First frame modular global: tree={} transforms={} groups={}",
+                "First frame modular global: tree={} transforms={} channels={} groups={}",
                 modular.global.has_global_tree,
                 modular.global.group_header.transforms.len(),
+                modular.channel_plan.channels.len(),
                 modular.groups.len()
             );
         }
@@ -252,6 +253,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 global.group_header.weighted_predictor.all_default,
                 global.group_header.transforms.len()
             );
+            println!(
+                "First frame modular channel plan: {}x{} bit_depth={} meta={} channels={}",
+                modular.channel_plan.width,
+                modular.channel_plan.height,
+                modular.channel_plan.bit_depth,
+                modular.channel_plan.nb_meta_channels,
+                modular.channel_plan.channels.len()
+            );
+            for (index, channel) in modular.channel_plan.channels.iter().enumerate() {
+                println!(
+                    "First frame modular channel {}: {}x{} shift={}x{} component={:?}",
+                    index,
+                    channel.width,
+                    channel.height,
+                    channel.hshift,
+                    channel.vshift,
+                    channel.component
+                );
+            }
             for (index, transform) in global.group_header.transforms.iter().enumerate() {
                 println!(
                     "First frame modular transform {}: id={:?} begin_c={} rct_type={:?} num_c={:?} colors={:?} deltas={:?} squeezes={}",
@@ -277,6 +297,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     group.header.is_some(),
                     group.local_tree.is_some()
                 );
+                for channel in &group.channels {
+                    println!(
+                        "First frame modular group section {} channel {}: rect={}x{} at ({},{}) shift={}x{}",
+                        group.section_physical_index,
+                        channel.channel_index,
+                        channel.width,
+                        channel.height,
+                        channel.x0,
+                        channel.y0,
+                        channel.hshift,
+                        channel.vshift
+                    );
+                }
                 if let Some(header) = &group.header {
                     println!(
                         "First frame modular group header {}: use_global_tree={} wp_default={} transforms={}",
