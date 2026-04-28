@@ -94,6 +94,123 @@ pub enum ChannelData {
     U16(Vec<u16>),
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Decoder {
+    options: DecodeOptions,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct DecodeOptions {
+    pub output: DecodeOutput,
+    pub roi: Option<Rect>,
+    pub threads: ThreadingMode,
+    pub memory_limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecodeOutput {
+    #[default]
+    Channels,
+    Interleaved,
+    Rgba8,
+    Rgba16,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ThreadingMode {
+    #[default]
+    Auto,
+    Single,
+    Threads(usize),
+}
+
+impl Default for Decoder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Decoder {
+    pub fn new() -> Self {
+        Self {
+            options: DecodeOptions::default(),
+        }
+    }
+
+    pub fn with_options(options: DecodeOptions) -> Self {
+        Self { options }
+    }
+
+    pub fn options(&self) -> &DecodeOptions {
+        &self.options
+    }
+
+    pub fn options_mut(&mut self) -> &mut DecodeOptions {
+        &mut self.options
+    }
+
+    pub fn output(mut self, output: DecodeOutput) -> Self {
+        self.options.output = output;
+        self
+    }
+
+    pub fn roi(mut self, roi: Rect) -> Self {
+        self.options.roi = Some(roi);
+        self
+    }
+
+    pub fn threads(mut self, threads: ThreadingMode) -> Self {
+        self.options.threads = threads;
+        self
+    }
+
+    pub fn memory_limit(mut self, bytes: usize) -> Self {
+        self.options.memory_limit = Some(bytes);
+        self
+    }
+
+    pub fn decode_channels(&self, input: &[u8]) -> Result<DecodedChannels> {
+        self.validate_options()?;
+        decode_channels_buffered(input)
+    }
+
+    pub fn decode(&self, input: &[u8]) -> Result<DecodedImage> {
+        self.validate_options()?;
+        decode_buffered(input)
+    }
+
+    pub fn decode_rgba8(&self, input: &[u8]) -> Result<RgbaImage> {
+        self.validate_options()?;
+        decode_rgba8_buffered(input)
+    }
+
+    pub fn decode_rgba16(&self, input: &[u8]) -> Result<Rgba16Image> {
+        self.validate_options()?;
+        decode_rgba16_buffered(input)
+    }
+
+    fn validate_options(&self) -> Result<()> {
+        if self.options.roi.is_some() {
+            return Err(Error::Unsupported("region-of-interest decode"));
+        }
+        if self.options.memory_limit.is_some() {
+            return Err(Error::Unsupported("memory-limited decode"));
+        }
+        if self.options.threads == ThreadingMode::Threads(0) {
+            return Err(Error::Unsupported("zero decoder threads"));
+        }
+        Ok(())
+    }
+}
+
 pub fn inspect(input: &[u8]) -> Result<ImageInfo> {
     let (extracted, codestream) = jxl_codec::parse_file(input)?;
     Ok(ImageInfo {
@@ -115,6 +232,22 @@ pub fn inspect(input: &[u8]) -> Result<ImageInfo> {
 }
 
 pub fn decode_channels(input: &[u8]) -> Result<DecodedChannels> {
+    Decoder::new().decode_channels(input)
+}
+
+pub fn decode(input: &[u8]) -> Result<DecodedImage> {
+    Decoder::new().decode(input)
+}
+
+pub fn decode_rgba8(input: &[u8]) -> Result<RgbaImage> {
+    Decoder::new().decode_rgba8(input)
+}
+
+pub fn decode_rgba16(input: &[u8]) -> Result<Rgba16Image> {
+    Decoder::new().decode_rgba16(input)
+}
+
+fn decode_channels_buffered(input: &[u8]) -> Result<DecodedChannels> {
     let (_, codestream) = jxl_codec::parse_file(input)?;
     if codestream.basic_info.have_animation {
         return Err(Error::Unsupported("animated image decode"));
@@ -158,8 +291,8 @@ pub fn decode_channels(input: &[u8]) -> Result<DecodedChannels> {
     })
 }
 
-pub fn decode(input: &[u8]) -> Result<DecodedImage> {
-    let channels = decode_channels(input)?;
+fn decode_buffered(input: &[u8]) -> Result<DecodedImage> {
+    let channels = decode_channels_buffered(input)?;
     let alpha = decode_interleaved_alpha(&channels)?;
     let output_channels = channels.color_channels + usize::from(alpha.is_some());
     if channels.channels.len() != output_channels {
@@ -194,8 +327,8 @@ pub fn decode(input: &[u8]) -> Result<DecodedImage> {
     }
 }
 
-pub fn decode_rgba8(input: &[u8]) -> Result<RgbaImage> {
-    let decoded = decode(input)?;
+fn decode_rgba8_buffered(input: &[u8]) -> Result<RgbaImage> {
+    let decoded = decode_buffered(input)?;
     let pixels = match &decoded.pixels {
         PixelData::U8(samples) => rgba8_from_u8(&decoded, samples)?,
         PixelData::U16(samples) => rgba8_from_u16(&decoded, samples)?,
@@ -207,8 +340,8 @@ pub fn decode_rgba8(input: &[u8]) -> Result<RgbaImage> {
     })
 }
 
-pub fn decode_rgba16(input: &[u8]) -> Result<Rgba16Image> {
-    let decoded = decode(input)?;
+fn decode_rgba16_buffered(input: &[u8]) -> Result<Rgba16Image> {
+    let decoded = decode_buffered(input)?;
     let pixels = match &decoded.pixels {
         PixelData::U8(samples) => rgba16_from_u8(&decoded, samples)?,
         PixelData::U16(samples) => rgba16_from_u16(&decoded, samples)?,
@@ -536,6 +669,61 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn decoder_defaults_are_buffered_channel_decode() {
+        let decoder = Decoder::new();
+
+        assert_eq!(decoder.options().output, DecodeOutput::Channels);
+        assert_eq!(decoder.options().roi, None);
+        assert_eq!(decoder.options().threads, ThreadingMode::Auto);
+        assert_eq!(decoder.options().memory_limit, None);
+    }
+
+    #[test]
+    fn decoder_methods_match_convenience_functions() {
+        let bytes = std::fs::read(workspace_path(
+            "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
+        ))
+        .unwrap();
+        let decoder = Decoder::new().threads(ThreadingMode::Threads(2));
+
+        assert_eq!(decoder.decode_channels(&bytes), decode_channels(&bytes));
+        assert_eq!(decoder.decode(&bytes), decode(&bytes));
+        assert_eq!(decoder.decode_rgba8(&bytes), decode_rgba8(&bytes));
+        assert_eq!(decoder.decode_rgba16(&bytes), decode_rgba16(&bytes));
+    }
+
+    #[test]
+    fn decoder_rejects_unsupported_options() {
+        let bytes = std::fs::read(workspace_path(
+            "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
+        ))
+        .unwrap();
+
+        let roi_decoder = Decoder::new().roi(Rect {
+            x: 0,
+            y: 0,
+            width: 8,
+            height: 8,
+        });
+        assert_eq!(
+            roi_decoder.decode_channels(&bytes),
+            Err(Error::Unsupported("region-of-interest decode"))
+        );
+
+        let memory_decoder = Decoder::new().memory_limit(1024);
+        assert_eq!(
+            memory_decoder.decode(&bytes),
+            Err(Error::Unsupported("memory-limited decode"))
+        );
+
+        let zero_threads_decoder = Decoder::new().threads(ThreadingMode::Threads(0));
+        assert_eq!(
+            zero_threads_decoder.decode_rgba8(&bytes),
+            Err(Error::Unsupported("zero decoder threads"))
+        );
+    }
 
     #[test]
     fn decodes_generated_rgb_modular_fixture() {
