@@ -589,7 +589,9 @@ fn decode_global_residuals(
             0,
         )?);
     }
-    let _ = symbol_reader;
+    if !symbol_reader.check_final_state() {
+        return Err(Error::InvalidCodestream("invalid modular global ANS state"));
+    }
 
     Ok((
         Some(ModularDecodedGroup {
@@ -1148,7 +1150,16 @@ impl WeightedPredictorState {
         let te_ne = i64::from(self.error[pos_ne]);
         let sum_wn = te_n + te_w;
 
-        let wp_property = te_w.abs().max(te_n.abs()).max(te_nw.abs()).max(te_ne.abs());
+        let mut wp_property = te_w;
+        if te_n.abs() > wp_property.abs() {
+            wp_property = te_n;
+        }
+        if te_nw.abs() > wp_property.abs() {
+            wp_property = te_nw;
+        }
+        if te_ne.abs() > wp_property.abs() {
+            wp_property = te_ne;
+        }
         properties[WP_PROPERTY as usize] =
             wp_property.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
 
