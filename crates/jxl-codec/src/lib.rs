@@ -37,7 +37,8 @@ pub use metadata::{
 pub use modular::{
     MaTree, MaTreeNode, ModularChannel, ModularChannelPlan, ModularDecodedChannel,
     ModularDecodedGroup, ModularFrameMetadata, ModularGlobalSection, ModularGroupChannelPlan,
-    ModularGroupHeader, ModularPredictor, ModularResiduals, ModularSectionMetadata,
-    ModularTransform, ModularTreeMetadata, SqueezeParams, TransformId, WeightedPredictorHeader,
+    ModularGroupHeader, ModularImage, ModularImageChannel, ModularPredictor, ModularResiduals,
+    ModularSectionMetadata, ModularTransform, ModularTreeMetadata, SqueezeParams, TransformId,
+    WeightedPredictorHeader,
 };
 pub use transform::{CustomTransformData, OpsinInverseMatrix};

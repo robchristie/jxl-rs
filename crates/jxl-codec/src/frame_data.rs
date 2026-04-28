@@ -273,7 +273,7 @@ fn section_kind(
 
 fn decode_permutation(reader: &mut BitReader<'_>, size: usize) -> Result<Vec<usize>> {
     let (code, context_map) = decode_histograms(reader, PERMUTATION_CONTEXTS, false)?;
-    let mut symbol_reader = AnsSymbolReader::new(code, reader)?;
+    let mut symbol_reader = AnsSymbolReader::new(code, reader, 0)?;
     let mut lehmer = vec![0u32; size];
     let end =
         symbol_reader.read_hybrid_uint(coeff_order_context(size), reader, &context_map)? as usize;

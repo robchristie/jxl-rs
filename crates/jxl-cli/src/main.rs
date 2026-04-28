@@ -274,9 +274,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             if let Some(residuals) = &modular.residuals {
                 println!(
-                    "First frame modular residuals: groups={}",
+                    "First frame modular residuals: global={} groups={}",
+                    residuals.global.is_some(),
                     residuals.groups.len()
                 );
+                if let Some(global) = &residuals.global {
+                    println!(
+                        "First frame modular residual global: stream_id={} channels={} bits={}",
+                        global.stream_id,
+                        global.channels.len(),
+                        global.bits_consumed
+                    );
+                    for channel in &global.channels {
+                        let min = channel.samples.iter().min().copied().unwrap_or_default();
+                        let max = channel.samples.iter().max().copied().unwrap_or_default();
+                        println!(
+                            "First frame modular residual global channel {}: {}x{} at ({},{}) samples={} min={} max={}",
+                            channel.channel_index,
+                            channel.width,
+                            channel.height,
+                            channel.x0,
+                            channel.y0,
+                            channel.samples.len(),
+                            min,
+                            max
+                        );
+                    }
+                }
                 for group in &residuals.groups {
                     println!(
                         "First frame modular residual group {}: stream_id={} channels={} bits={}",
@@ -289,10 +313,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         let min = channel.samples.iter().min().copied().unwrap_or_default();
                         let max = channel.samples.iter().max().copied().unwrap_or_default();
                         println!(
-                            "First frame modular residual channel {}: {}x{} samples={} min={} max={}",
+                            "First frame modular residual channel {}: {}x{} at ({},{}) samples={} min={} max={}",
                             channel.channel_index,
                             channel.width,
                             channel.height,
+                            channel.x0,
+                            channel.y0,
                             channel.samples.len(),
                             min,
                             max
@@ -301,6 +327,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else {
                 println!("First frame modular residuals: unsupported");
+            }
+            if let Some(image) = &modular.image {
+                println!(
+                    "First frame modular image: {}x{} channels={}",
+                    image.width,
+                    image.height,
+                    image.channels.len()
+                );
+                for (index, channel) in image.channels.iter().enumerate() {
+                    let min = channel.samples.iter().min().copied().unwrap_or_default();
+                    let max = channel.samples.iter().max().copied().unwrap_or_default();
+                    println!(
+                        "First frame modular image channel {}: {}x{} samples={} min={} max={}",
+                        index,
+                        channel.width,
+                        channel.height,
+                        channel.samples.len(),
+                        min,
+                        max
+                    );
+                }
+            } else {
+                println!("First frame modular image: unsupported");
             }
             for (index, transform) in global.group_header.transforms.iter().enumerate() {
                 println!(

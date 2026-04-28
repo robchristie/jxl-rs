@@ -268,8 +268,19 @@ fn parses_checked_in_fixture_modular_global_metadata() {
     assert_eq!(modular.groups[3].channels[0].width, 64);
     assert_eq!(modular.groups[3].stream_id, 23);
     let residuals = modular.residuals.as_ref().unwrap();
+    let global = residuals.global.as_ref().unwrap();
+    assert_eq!(global.stream_id, 0);
+    assert_eq!(global.channels.len(), 1);
+    assert_eq!(global.channels[0].channel_index, 0);
+    assert_eq!(global.channels[0].x0, 0);
+    assert_eq!(global.channels[0].y0, 0);
+    assert_eq!(global.channels[0].samples.len(), 17);
+    assert_eq!(global.channels[0].samples.iter().min(), Some(&6682));
+    assert_eq!(global.channels[0].samples.iter().max(), Some(&6682));
     assert_eq!(residuals.groups.len(), 3);
     assert_eq!(residuals.groups[0].stream_id, 21);
+    assert_eq!(residuals.groups[0].channels[0].x0, 0);
+    assert_eq!(residuals.groups[0].channels[0].y0, 0);
     assert_eq!(residuals.groups[0].channels[0].samples.len(), 512 * 64);
     assert_eq!(
         residuals.groups[0].channels[0].samples.iter().min(),
@@ -280,6 +291,8 @@ fn parses_checked_in_fixture_modular_global_metadata() {
         Some(&7)
     );
     assert_eq!(residuals.groups[1].stream_id, 22);
+    assert_eq!(residuals.groups[1].channels[0].x0, 512);
+    assert_eq!(residuals.groups[1].channels[0].y0, 0);
     assert_eq!(
         residuals.groups[1].channels[0].samples.iter().min(),
         Some(&8)
@@ -289,6 +302,8 @@ fn parses_checked_in_fixture_modular_global_metadata() {
         Some(&15)
     );
     assert_eq!(residuals.groups[2].stream_id, 23);
+    assert_eq!(residuals.groups[2].channels[0].x0, 1024);
+    assert_eq!(residuals.groups[2].channels[0].y0, 0);
     assert_eq!(residuals.groups[2].channels[0].samples.len(), 64 * 64);
     assert!(
         residuals.groups[2].channels[0]
@@ -296,6 +311,15 @@ fn parses_checked_in_fixture_modular_global_metadata() {
             .iter()
             .all(|sample| *sample == 16)
     );
+    let image = modular.image.as_ref().unwrap();
+    assert_eq!(image.width, 1088);
+    assert_eq!(image.height, 64);
+    assert_eq!(image.channels.len(), 1);
+    assert_eq!(image.channels[0].width, 1088);
+    assert_eq!(image.channels[0].height, 64);
+    assert_eq!(image.channels[0].samples.len(), 1088 * 64);
+    assert_eq!(image.channels[0].samples.iter().min(), Some(&6682));
+    assert_eq!(image.channels[0].samples.iter().max(), Some(&6682));
 
     let icc = parse_fixture("crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl");
     let modular = icc.first_frame_modular.as_ref().unwrap();
@@ -313,7 +337,8 @@ fn parses_checked_in_fixture_modular_global_metadata() {
     assert_eq!(modular.channel_plan.channels.len(), 3);
     assert_eq!(modular.channel_plan.channels[0].width, 64);
     assert!(modular.groups.is_empty());
-    assert!(modular.residuals.as_ref().unwrap().groups.is_empty());
+    assert!(modular.residuals.is_none());
+    assert!(modular.image.is_none());
 
     let splines = parse_fixture("reference/libjxl/testdata/jxl/splines.jxl");
     assert!(splines.first_frame_modular.is_none());

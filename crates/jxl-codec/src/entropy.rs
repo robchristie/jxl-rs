@@ -11,6 +11,129 @@ const PREFIX_MAX_ALPHABET_SIZE: usize = 1 << PREFIX_MAX_BITS;
 const HUFFMAN_TABLE_BITS: usize = 8;
 const WINDOW_SIZE: usize = 1 << 20;
 const WINDOW_MASK: usize = WINDOW_SIZE - 1;
+const NUM_SPECIAL_DISTANCES: usize = 120;
+const SPECIAL_DISTANCES: [(i32, i32); NUM_SPECIAL_DISTANCES] = [
+    (0, 1),
+    (1, 0),
+    (1, 1),
+    (-1, 1),
+    (0, 2),
+    (2, 0),
+    (1, 2),
+    (-1, 2),
+    (2, 1),
+    (-2, 1),
+    (2, 2),
+    (-2, 2),
+    (0, 3),
+    (3, 0),
+    (1, 3),
+    (-1, 3),
+    (3, 1),
+    (-3, 1),
+    (2, 3),
+    (-2, 3),
+    (3, 2),
+    (-3, 2),
+    (0, 4),
+    (4, 0),
+    (1, 4),
+    (-1, 4),
+    (4, 1),
+    (-4, 1),
+    (3, 3),
+    (-3, 3),
+    (2, 4),
+    (-2, 4),
+    (4, 2),
+    (-4, 2),
+    (0, 5),
+    (3, 4),
+    (-3, 4),
+    (4, 3),
+    (-4, 3),
+    (5, 0),
+    (1, 5),
+    (-1, 5),
+    (5, 1),
+    (-5, 1),
+    (2, 5),
+    (-2, 5),
+    (5, 2),
+    (-5, 2),
+    (4, 4),
+    (-4, 4),
+    (3, 5),
+    (-3, 5),
+    (5, 3),
+    (-5, 3),
+    (0, 6),
+    (6, 0),
+    (1, 6),
+    (-1, 6),
+    (6, 1),
+    (-6, 1),
+    (2, 6),
+    (-2, 6),
+    (6, 2),
+    (-6, 2),
+    (4, 5),
+    (-4, 5),
+    (5, 4),
+    (-5, 4),
+    (3, 6),
+    (-3, 6),
+    (6, 3),
+    (-6, 3),
+    (0, 7),
+    (7, 0),
+    (1, 7),
+    (-1, 7),
+    (5, 5),
+    (-5, 5),
+    (7, 1),
+    (-7, 1),
+    (4, 6),
+    (-4, 6),
+    (6, 4),
+    (-6, 4),
+    (2, 7),
+    (-2, 7),
+    (7, 2),
+    (-7, 2),
+    (3, 7),
+    (-3, 7),
+    (7, 3),
+    (-7, 3),
+    (5, 6),
+    (-5, 6),
+    (6, 5),
+    (-6, 5),
+    (8, 0),
+    (4, 7),
+    (-4, 7),
+    (7, 4),
+    (-7, 4),
+    (8, 1),
+    (8, 2),
+    (6, 6),
+    (-6, 6),
+    (8, 3),
+    (5, 7),
+    (-5, 7),
+    (7, 5),
+    (-7, 5),
+    (8, 4),
+    (6, 7),
+    (-6, 7),
+    (7, 6),
+    (-7, 6),
+    (8, 5),
+    (7, 7),
+    (-7, 7),
+    (8, 6),
+    (8, 7),
+];
 
 #[derive(Debug, Clone)]
 pub(crate) struct HybridUintConfig {
@@ -131,10 +254,16 @@ pub(crate) struct AnsSymbolReader {
     copy_pos: usize,
     lz77_threshold: usize,
     lz77_min_length: usize,
+    special_distances: [usize; NUM_SPECIAL_DISTANCES],
+    num_special_distances: usize,
 }
 
 impl AnsSymbolReader {
-    pub(crate) fn new(code: AnsCode, reader: &mut BitReader<'_>) -> Result<Self> {
+    pub(crate) fn new(
+        code: AnsCode,
+        reader: &mut BitReader<'_>,
+        distance_multiplier: usize,
+    ) -> Result<Self> {
         let state = if code.use_prefix_code {
             ANS_SIGNATURE << 16
         } else {
@@ -154,6 +283,16 @@ impl AnsSymbolReader {
             usize::MAX
         };
         let lz77_min_length = code.lz77.min_length as usize;
+        let num_special_distances = if distance_multiplier == 0 {
+            0
+        } else {
+            NUM_SPECIAL_DISTANCES
+        };
+        let mut special_distances = [0; NUM_SPECIAL_DISTANCES];
+        for (index, (offset, multiplier)) in SPECIAL_DISTANCES.iter().copied().enumerate() {
+            let distance = i64::from(offset) + distance_multiplier as i64 * i64::from(multiplier);
+            special_distances[index] = distance.max(1) as usize;
+        }
 
         Ok(Self {
             code,
@@ -166,6 +305,8 @@ impl AnsSymbolReader {
             copy_pos: 0,
             lz77_threshold,
             lz77_min_length,
+            special_distances,
+            num_special_distances,
         })
     }
 
@@ -205,7 +346,11 @@ impl AnsSymbolReader {
             let distance_token = self.read_symbol(distance_context, reader)?;
             let mut distance = self.code.uint_config[distance_context]
                 .decode_token(distance_token, reader)? as usize;
-            distance += 1;
+            if distance < self.num_special_distances {
+                distance = self.special_distances[distance];
+            } else {
+                distance = distance + 1 - self.num_special_distances;
+            }
             distance = distance.min(self.num_decoded).min(WINDOW_SIZE);
             self.copy_pos = self.num_decoded.saturating_sub(distance);
             if distance == 0
@@ -407,7 +552,7 @@ fn decode_context_map(reader: &mut BitReader<'_>, context_map: &mut [u8]) -> Res
     } else {
         let use_mtf = reader.read_bool()?;
         let (code, nested_context_map) = decode_histograms(reader, 1, context_map.len() <= 2)?;
-        let mut symbol_reader = AnsSymbolReader::new(code, reader)?;
+        let mut symbol_reader = AnsSymbolReader::new(code, reader, 0)?;
         let mut max_symbol = 0;
         for entry in context_map.iter_mut() {
             let symbol = symbol_reader.read_hybrid_uint(0, reader, &nested_context_map)?;

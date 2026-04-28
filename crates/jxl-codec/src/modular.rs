@@ -40,11 +40,27 @@ pub struct ModularFrameMetadata {
     pub channel_plan: ModularChannelPlan,
     pub groups: Vec<ModularSectionMetadata>,
     pub residuals: Option<ModularResiduals>,
+    pub image: Option<ModularImage>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModularResiduals {
+    pub global: Option<ModularDecodedGroup>,
     pub groups: Vec<ModularDecodedGroup>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModularImage {
+    pub width: u32,
+    pub height: u32,
+    pub channels: Vec<ModularImageChannel>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModularImageChannel {
+    pub width: u32,
+    pub height: u32,
+    pub samples: Vec<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +74,8 @@ pub struct ModularDecodedGroup {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModularDecodedChannel {
     pub channel_index: usize,
+    pub x0: u32,
+    pub y0: u32,
     pub width: u32,
     pub height: u32,
     pub samples: Vec<i32>,
@@ -300,12 +318,17 @@ pub fn read_modular_frame_metadata(
     let channel_plan = build_channel_plan(metadata, frame_header, &global.group_header)?;
     let groups =
         read_modular_group_sections(codestream, frame_header, frame_data, &global, &channel_plan)?;
-    let residuals = read_modular_residuals(codestream, frame_header, frame_data, &groups).ok();
+    let residuals =
+        read_modular_residuals(codestream, frame_header, frame_data, &channel_plan, &groups).ok();
+    let image = residuals.as_ref().and_then(|residuals| {
+        assemble_modular_image(&channel_plan, &global.group_header, residuals).ok()
+    });
     Ok(Some(ModularFrameMetadata {
         global,
         channel_plan,
         groups,
         residuals,
+        image,
     }))
 }
 
@@ -386,40 +409,6 @@ fn read_tree_coding(
         code,
         context_map,
     })
-}
-
-fn read_global_tree_coding(
-    codestream: &[u8],
-    frame_header: &FrameHeader,
-    frame_data: &FrameData,
-) -> Result<ModularTreeCoding> {
-    let section = frame_data
-        .sections
-        .iter()
-        .find(|section| {
-            matches!(
-                section.kind,
-                FrameSectionKind::Combined | FrameSectionKind::DcGlobal
-            )
-        })
-        .ok_or(Error::InvalidCodestream(
-            "modular frame is missing global section",
-        ))?;
-    let payload = section_payload(codestream, section)?;
-    let mut reader = BitReader::new(payload);
-    skip_dc_dequant_matrices(&mut reader)?;
-    if !reader.read_bool()? {
-        return Err(Error::InvalidCodestream("modular frame has no global tree"));
-    }
-    let coding = read_tree_coding(&mut reader, MAX_TREE_SIZE)?;
-    let header = read_group_header(&mut reader)?;
-    if !header.use_global_tree {
-        return Err(Error::InvalidCodestream(
-            "global modular stream does not use its global tree",
-        ));
-    }
-    let _ = frame_header;
-    Ok(coding)
 }
 
 fn read_modular_group_sections(
@@ -528,9 +517,11 @@ fn read_modular_residuals(
     codestream: &[u8],
     frame_header: &FrameHeader,
     frame_data: &FrameData,
+    channel_plan: &ModularChannelPlan,
     groups: &[ModularSectionMetadata],
 ) -> Result<ModularResiduals> {
-    let global_tree = read_global_tree_coding(codestream, frame_header, frame_data)?;
+    let (global, global_tree) =
+        decode_global_residuals(codestream, frame_header, frame_data, channel_plan)?;
     let mut decoded_groups = Vec::new();
     for group in groups {
         if group.payload_size == 0 || group.channels.is_empty() {
@@ -539,8 +530,262 @@ fn read_modular_residuals(
         decoded_groups.push(decode_group_residuals(codestream, group, &global_tree)?);
     }
     Ok(ModularResiduals {
+        global,
         groups: decoded_groups,
     })
+}
+
+fn decode_global_residuals(
+    codestream: &[u8],
+    frame_header: &FrameHeader,
+    frame_data: &FrameData,
+    channel_plan: &ModularChannelPlan,
+) -> Result<(Option<ModularDecodedGroup>, ModularTreeCoding)> {
+    let section = frame_data
+        .sections
+        .iter()
+        .find(|section| {
+            matches!(
+                section.kind,
+                FrameSectionKind::Combined | FrameSectionKind::DcGlobal
+            )
+        })
+        .ok_or(Error::InvalidCodestream(
+            "modular frame is missing global section",
+        ))?;
+    let payload = section_payload(codestream, section)?;
+    let mut reader = BitReader::new(payload);
+    skip_dc_dequant_matrices(&mut reader)?;
+    if !reader.read_bool()? {
+        return Err(Error::InvalidCodestream("modular frame has no global tree"));
+    }
+    let tree = read_tree_coding(&mut reader, MAX_TREE_SIZE)?;
+    let header = read_group_header(&mut reader)?;
+    if !header.use_global_tree {
+        return Err(Error::InvalidCodestream(
+            "global modular stream does not use its global tree",
+        ));
+    }
+
+    let channels = global_channel_plan(frame_header, channel_plan);
+    if channels.is_empty() {
+        return Ok((None, tree));
+    }
+
+    let mut symbol_reader = AnsSymbolReader::new(
+        tree.code.clone(),
+        &mut reader,
+        channel_distance_multiplier(&channels),
+    )?;
+    let mut decoded_channels = Vec::with_capacity(channels.len());
+    for channel in &channels {
+        decoded_channels.push(decode_channel_residuals(
+            &mut reader,
+            &mut symbol_reader,
+            &tree,
+            &header.weighted_predictor,
+            channel,
+            channel.channel_index,
+            0,
+        )?);
+    }
+    let _ = symbol_reader;
+
+    Ok((
+        Some(ModularDecodedGroup {
+            section_physical_index: section.physical_index,
+            stream_id: 0,
+            channels: decoded_channels,
+            bits_consumed: reader.bits_consumed(),
+        }),
+        tree,
+    ))
+}
+
+fn global_channel_plan(
+    frame_header: &FrameHeader,
+    channel_plan: &ModularChannelPlan,
+) -> Vec<ModularGroupChannelPlan> {
+    let max_size = frame_header.group_layout.group_dim;
+    let mut channels = Vec::new();
+    for (index, channel) in channel_plan.channels.iter().enumerate() {
+        if index >= channel_plan.nb_meta_channels
+            && (channel.width > max_size || channel.height > max_size)
+        {
+            break;
+        }
+        channels.push(ModularGroupChannelPlan {
+            channel_index: index,
+            width: channel.width,
+            height: channel.height,
+            x0: 0,
+            y0: 0,
+            hshift: channel.hshift,
+            vshift: channel.vshift,
+        });
+    }
+    channels
+}
+
+fn assemble_modular_image(
+    channel_plan: &ModularChannelPlan,
+    global_header: &ModularGroupHeader,
+    residuals: &ModularResiduals,
+) -> Result<ModularImage> {
+    let mut channels = channel_plan
+        .channels
+        .iter()
+        .map(|channel| {
+            let samples = channel_sample_count(channel.width, channel.height)
+                .map(|count| vec![0i32; count])?;
+            Ok(ModularImageChannel {
+                width: channel.width,
+                height: channel.height,
+                samples,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    if let Some(global) = &residuals.global {
+        copy_decoded_group(&mut channels, global)?;
+    }
+    for group in &residuals.groups {
+        copy_decoded_group(&mut channels, group)?;
+    }
+
+    inverse_transforms(channel_plan, global_header, channels)
+}
+
+fn copy_decoded_group(
+    channels: &mut [ModularImageChannel],
+    group: &ModularDecodedGroup,
+) -> Result<()> {
+    for decoded in &group.channels {
+        let dst = channels
+            .get_mut(decoded.channel_index)
+            .ok_or(Error::InvalidCodestream("invalid modular decoded channel"))?;
+        if decoded.x0 > dst.width
+            || decoded.y0 > dst.height
+            || decoded.width > dst.width - decoded.x0
+            || decoded.height > dst.height - decoded.y0
+        {
+            return Err(Error::InvalidCodestream(
+                "modular decoded channel is outside destination",
+            ));
+        }
+        let expected = channel_sample_count(decoded.width, decoded.height)?;
+        if decoded.samples.len() != expected {
+            return Err(Error::InvalidCodestream(
+                "modular decoded channel sample count mismatch",
+            ));
+        }
+        let dst_width = dst.width as usize;
+        let decoded_width = decoded.width as usize;
+        let x0 = decoded.x0 as usize;
+        let y0 = decoded.y0 as usize;
+        for y in 0..decoded.height as usize {
+            let src_start = y * decoded_width;
+            let dst_start = (y0 + y) * dst_width + x0;
+            dst.samples[dst_start..dst_start + decoded_width]
+                .copy_from_slice(&decoded.samples[src_start..src_start + decoded_width]);
+        }
+    }
+    Ok(())
+}
+
+fn inverse_transforms(
+    channel_plan: &ModularChannelPlan,
+    global_header: &ModularGroupHeader,
+    mut channels: Vec<ModularImageChannel>,
+) -> Result<ModularImage> {
+    let mut nb_meta_channels = channel_plan.nb_meta_channels;
+    for transform in global_header.transforms.iter().rev() {
+        match transform.id {
+            TransformId::Palette => {
+                channels = inverse_palette_transform(transform, channels)?;
+                nb_meta_channels =
+                    nb_meta_channels
+                        .checked_sub(1)
+                        .ok_or(Error::InvalidCodestream(
+                            "invalid modular meta channel count",
+                        ))?;
+            }
+            TransformId::Rct | TransformId::Squeeze => {
+                return Err(Error::InvalidCodestream(
+                    "unsupported modular inverse transform",
+                ));
+            }
+        }
+    }
+
+    let output_channels = channels
+        .into_iter()
+        .skip(nb_meta_channels)
+        .collect::<Vec<_>>();
+    Ok(ModularImage {
+        width: channel_plan.width,
+        height: channel_plan.height,
+        channels: output_channels,
+    })
+}
+
+fn inverse_palette_transform(
+    transform: &ModularTransform,
+    mut channels: Vec<ModularImageChannel>,
+) -> Result<Vec<ModularImageChannel>> {
+    let begin_c = transform.begin_c as usize;
+    let num_c = transform.num_c.ok_or(Error::InvalidCodestream(
+        "palette transform missing channel count",
+    ))? as usize;
+    let nb_colors = transform.nb_colors.ok_or(Error::InvalidCodestream(
+        "palette transform missing color count",
+    ))? as usize;
+    let nb_deltas = transform.nb_deltas.ok_or(Error::InvalidCodestream(
+        "palette transform missing delta count",
+    ))? as usize;
+    if nb_deltas != 0 {
+        return Err(Error::InvalidCodestream(
+            "palette deltas are not supported yet",
+        ));
+    }
+    if begin_c != 0 || num_c != 1 {
+        return Err(Error::InvalidCodestream(
+            "only single-channel palette inverse is supported",
+        ));
+    }
+    if channels.len() < 2 {
+        return Err(Error::InvalidCodestream(
+            "palette transform has too few channels",
+        ));
+    }
+
+    let palette = channels.remove(0);
+    if palette.width as usize != nb_colors || palette.height != num_c as u32 {
+        return Err(Error::InvalidCodestream("invalid palette channel shape"));
+    }
+    let indices = channels
+        .get_mut(begin_c)
+        .ok_or(Error::InvalidCodestream("missing palette index channel"))?;
+    for index in &mut indices.samples {
+        let palette_index = (*index).clamp(0, nb_colors.saturating_sub(1) as i32) as usize;
+        *index = palette.samples[palette_index];
+    }
+    Ok(channels)
+}
+
+fn channel_sample_count(width: u32, height: u32) -> Result<usize> {
+    (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(Error::InvalidCodestream("modular channel size overflow"))
+}
+
+fn channel_distance_multiplier(channels: &[ModularGroupChannelPlan]) -> usize {
+    channels
+        .iter()
+        .filter(|channel| channel.width != 0 && channel.height != 0)
+        .map(|channel| channel.width as usize)
+        .max()
+        .unwrap_or(0)
 }
 
 fn decode_group_residuals(
@@ -558,7 +803,11 @@ fn decode_group_residuals(
     } else {
         read_tree_coding(&mut reader, MAX_TREE_SIZE)?
     };
-    let mut symbol_reader = AnsSymbolReader::new(tree.code.clone(), &mut reader)?;
+    let mut symbol_reader = AnsSymbolReader::new(
+        tree.code.clone(),
+        &mut reader,
+        channel_distance_multiplier(&group.channels),
+    )?;
     let mut decoded_channels = Vec::new();
     for (local_channel, channel) in group.channels.iter().enumerate() {
         decoded_channels.push(decode_channel_residuals(
@@ -643,6 +892,8 @@ fn decode_channel_residuals(
     }
     Ok(ModularDecodedChannel {
         channel_index: channel.channel_index,
+        x0: channel.x0,
+        y0: channel.y0,
         width: channel.width,
         height: channel.height,
         samples,
@@ -1586,7 +1837,7 @@ fn read_squeeze_params(reader: &mut BitReader<'_>) -> Result<SqueezeParams> {
 
 fn decode_tree(reader: &mut BitReader<'_>, tree_size_limit: usize) -> Result<MaTree> {
     let (code, context_map) = decode_histograms(reader, TREE_CONTEXTS, false)?;
-    let mut symbol_reader = AnsSymbolReader::new(code, reader)?;
+    let mut symbol_reader = AnsSymbolReader::new(code, reader, 0)?;
     let mut nodes = Vec::new();
     let mut leaf_id = 0u32;
     let mut to_decode = 1usize;

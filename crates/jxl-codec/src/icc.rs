@@ -13,7 +13,7 @@ pub fn read_icc_profile(reader: &mut BitReader<'_>) -> Result<Vec<u8>> {
     }
 
     let (code, context_map) = decode_histograms(reader, NUM_ICC_CONTEXTS, false)?;
-    let mut symbol_reader = AnsSymbolReader::new(code, reader)?;
+    let mut symbol_reader = AnsSymbolReader::new(code, reader, 0)?;
     let mut decompressed = Vec::with_capacity(encoded_size);
     for index in 0..encoded_size {
         let previous = if index > 0 {
