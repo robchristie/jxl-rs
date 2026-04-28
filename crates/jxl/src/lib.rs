@@ -10,9 +10,10 @@ pub use jxl_codec::{
     CustomTransformData, Error, ExtraChannelInfo, ExtraChannelType, FileFormat, FrameData,
     FrameEncoding, FrameGroupLayout, FrameHeader, FrameSection, FrameSectionKind, FrameToc,
     FrameType, ImageMetadata, MaTree, MaTreeNode, ModularFrameMetadata, ModularGlobalSection,
-    ModularGroupHeader, ModularPredictor, ModularTransform, OpsinInverseMatrix, Orientation,
-    Primaries, RenderingIntent, Result, SqueezeParams, TocEntry, ToneMapping, TransferFunction,
-    TransformId, WeightedPredictorHeader, WhitePoint,
+    ModularGroupHeader, ModularPredictor, ModularSectionMetadata, ModularTransform,
+    ModularTreeMetadata, OpsinInverseMatrix, Orientation, Primaries, RenderingIntent, Result,
+    SqueezeParams, TocEntry, ToneMapping, TransferFunction, TransformId, WeightedPredictorHeader,
+    WhitePoint,
 };
 
 #[derive(Debug, Clone, PartialEq)]

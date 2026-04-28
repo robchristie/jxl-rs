@@ -36,6 +36,7 @@ pub use metadata::{
 };
 pub use modular::{
     MaTree, MaTreeNode, ModularFrameMetadata, ModularGlobalSection, ModularGroupHeader,
-    ModularPredictor, ModularTransform, SqueezeParams, TransformId, WeightedPredictorHeader,
+    ModularPredictor, ModularSectionMetadata, ModularTransform, ModularTreeMetadata, SqueezeParams,
+    TransformId, WeightedPredictorHeader,
 };
 pub use transform::{CustomTransformData, OpsinInverseMatrix};

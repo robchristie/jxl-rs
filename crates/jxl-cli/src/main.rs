@@ -133,9 +133,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(modular) = &info.first_frame_modular {
             println!(
-                "First frame modular global: tree={} transforms={}",
+                "First frame modular global: tree={} transforms={} groups={}",
                 modular.global.has_global_tree,
-                modular.global.group_header.transforms.len()
+                modular.global.group_header.transforms.len(),
+                modular.groups.len()
             );
         }
     } else {
@@ -263,6 +264,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     transform.nb_deltas,
                     transform.squeezes.len()
                 );
+            }
+            for group in &modular.groups {
+                println!(
+                    "First frame modular group section {}: logical={} kind={:?} stream_id={} size={} bits={} header={} local_tree={}",
+                    group.section_physical_index,
+                    group.section_logical_id,
+                    group.section_kind,
+                    group.stream_id,
+                    group.payload_size,
+                    group.bits_consumed,
+                    group.header.is_some(),
+                    group.local_tree.is_some()
+                );
+                if let Some(header) = &group.header {
+                    println!(
+                        "First frame modular group header {}: use_global_tree={} wp_default={} transforms={}",
+                        group.section_physical_index,
+                        header.use_global_tree,
+                        header.weighted_predictor.all_default,
+                        header.transforms.len()
+                    );
+                }
+                if let Some(tree) = &group.local_tree {
+                    println!(
+                        "First frame modular group local tree {}: nodes={} contexts={} context_map={}",
+                        group.section_physical_index,
+                        tree.tree.nodes.len(),
+                        tree.contexts,
+                        tree.context_map_size
+                    );
+                }
             }
         }
     }

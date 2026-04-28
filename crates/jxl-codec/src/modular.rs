@@ -14,6 +14,7 @@ const MULTIPLIER_LOG_CONTEXT: usize = 4;
 const MULTIPLIER_BITS_CONTEXT: usize = 5;
 const MAX_TREE_SIZE: usize = 1 << 22;
 const TREE_HEIGHT_LIMIT: i32 = 2048;
+const NUM_QUANT_TABLES: usize = 17;
 const FLAG_NOISE: u64 = 1;
 const FLAG_PATCHES: u64 = 2;
 const FLAG_SPLINES: u64 = 16;
@@ -22,6 +23,7 @@ const UNSUPPORTED_DC_GLOBAL_FEATURES: u64 = FLAG_NOISE | FLAG_PATCHES | FLAG_SPL
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModularFrameMetadata {
     pub global: ModularGlobalSection,
+    pub groups: Vec<ModularSectionMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,6 +36,25 @@ pub struct ModularGlobalSection {
     pub global_tree_context_map_size: Option<usize>,
     pub group_header: ModularGroupHeader,
     pub bits_consumed: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModularSectionMetadata {
+    pub section_logical_id: usize,
+    pub section_physical_index: usize,
+    pub section_kind: FrameSectionKind,
+    pub stream_id: usize,
+    pub payload_size: u32,
+    pub header: Option<ModularGroupHeader>,
+    pub local_tree: Option<ModularTreeMetadata>,
+    pub bits_consumed: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModularTreeMetadata {
+    pub tree: MaTree,
+    pub contexts: usize,
+    pub context_map_size: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -201,7 +222,9 @@ pub fn read_modular_frame_metadata(
     let payload = section_payload(codestream, section)?;
     let mut reader = BitReader::new(payload);
     let global = read_global_section(&mut reader, metadata, frame_header, section)?;
-    Ok(Some(ModularFrameMetadata { global }))
+    let groups =
+        read_modular_group_sections(codestream, frame_header, frame_data, global.has_global_tree)?;
+    Ok(Some(ModularFrameMetadata { global, groups }))
 }
 
 fn section_payload<'a>(codestream: &'a [u8], section: &FrameSection) -> Result<&'a [u8]> {
@@ -222,13 +245,13 @@ fn read_global_section(
 ) -> Result<ModularGlobalSection> {
     skip_dc_dequant_matrices(reader)?;
     let has_global_tree = reader.read_bool()?;
-    let (global_tree, global_tree_contexts, global_tree_context_map_size) = if has_global_tree {
-        let tree = decode_tree(reader, global_tree_size_limit(metadata, frame_header)?)?;
-        let tree_contexts = tree.nodes.len().div_ceil(2);
-        let (_, context_map) = decode_histograms(reader, tree_contexts, false)?;
-        (Some(tree), Some(tree_contexts), Some(context_map.len()))
+    let global_tree_metadata = if has_global_tree {
+        Some(read_tree_metadata(
+            reader,
+            global_tree_size_limit(metadata, frame_header)?,
+        )?)
     } else {
-        (None, None, None)
+        None
     };
     let group_header = read_group_header(reader)?;
     if group_header.use_global_tree && !has_global_tree {
@@ -241,12 +264,126 @@ fn read_global_section(
         section_logical_id: section.logical_id,
         section_kind: section.kind,
         has_global_tree,
-        global_tree,
-        global_tree_contexts,
-        global_tree_context_map_size,
+        global_tree: global_tree_metadata
+            .as_ref()
+            .map(|metadata| metadata.tree.clone()),
+        global_tree_contexts: global_tree_metadata
+            .as_ref()
+            .map(|metadata| metadata.contexts),
+        global_tree_context_map_size: global_tree_metadata
+            .as_ref()
+            .map(|metadata| metadata.context_map_size),
         group_header,
         bits_consumed: reader.bits_consumed(),
     })
+}
+
+fn read_tree_metadata(
+    reader: &mut BitReader<'_>,
+    tree_size_limit: usize,
+) -> Result<ModularTreeMetadata> {
+    let tree = decode_tree(reader, tree_size_limit)?;
+    let contexts = tree.nodes.len().div_ceil(2);
+    let (_, context_map) = decode_histograms(reader, contexts, false)?;
+    Ok(ModularTreeMetadata {
+        tree,
+        contexts,
+        context_map_size: context_map.len(),
+    })
+}
+
+fn read_modular_group_sections(
+    codestream: &[u8],
+    frame_header: &FrameHeader,
+    frame_data: &FrameData,
+    has_global_tree: bool,
+) -> Result<Vec<ModularSectionMetadata>> {
+    let mut groups = Vec::new();
+    for section in &frame_data.sections {
+        if !matches!(
+            section.kind,
+            FrameSectionKind::DcGroup { .. } | FrameSectionKind::AcGroup { .. }
+        ) {
+            continue;
+        }
+        groups.push(read_modular_group_section(
+            codestream,
+            frame_header,
+            section,
+            has_global_tree,
+        )?);
+    }
+    Ok(groups)
+}
+
+fn read_modular_group_section(
+    codestream: &[u8],
+    frame_header: &FrameHeader,
+    section: &FrameSection,
+    has_global_tree: bool,
+) -> Result<ModularSectionMetadata> {
+    let stream_id = modular_stream_id(section.kind, frame_header)?;
+    if section.size == 0 {
+        return Ok(ModularSectionMetadata {
+            section_logical_id: section.logical_id,
+            section_physical_index: section.physical_index,
+            section_kind: section.kind,
+            stream_id,
+            payload_size: section.size,
+            header: None,
+            local_tree: None,
+            bits_consumed: 0,
+        });
+    }
+
+    let payload = section_payload(codestream, section)?;
+    let mut reader = BitReader::new(payload);
+    let header = read_group_header(&mut reader)?;
+    let local_tree = if header.use_global_tree {
+        if !has_global_tree {
+            return Err(Error::InvalidCodestream(
+                "modular group references a missing global tree",
+            ));
+        }
+        None
+    } else {
+        Some(read_tree_metadata(&mut reader, MAX_TREE_SIZE)?)
+    };
+
+    Ok(ModularSectionMetadata {
+        section_logical_id: section.logical_id,
+        section_physical_index: section.physical_index,
+        section_kind: section.kind,
+        stream_id,
+        payload_size: section.size,
+        header: Some(header),
+        local_tree,
+        bits_consumed: reader.bits_consumed(),
+    })
+}
+
+fn modular_stream_id(kind: FrameSectionKind, frame_header: &FrameHeader) -> Result<usize> {
+    let layout = &frame_header.group_layout;
+    match kind {
+        FrameSectionKind::DcGroup { group } => {
+            if group >= layout.num_dc_groups as usize {
+                return Err(Error::InvalidCodestream("invalid modular DC group id"));
+            }
+            Ok(1 + layout.num_dc_groups as usize + group)
+        }
+        FrameSectionKind::AcGroup { pass, group } => {
+            if pass >= frame_header.passes.num_passes as usize
+                || group >= layout.num_groups as usize
+            {
+                return Err(Error::InvalidCodestream("invalid modular AC group id"));
+            }
+            Ok(1 + 3 * layout.num_dc_groups as usize
+                + NUM_QUANT_TABLES
+                + layout.num_groups as usize * pass
+                + group)
+        }
+        _ => Err(Error::InvalidCodestream("section is not a modular group")),
+    }
 }
 
 fn skip_dc_dequant_matrices(reader: &mut BitReader<'_>) -> Result<()> {

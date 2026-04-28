@@ -235,6 +235,22 @@ fn parses_checked_in_fixture_modular_global_metadata() {
     assert_eq!(transform.num_c, Some(1));
     assert_eq!(transform.nb_colors, Some(17));
     assert_eq!(transform.nb_deltas, Some(0));
+    assert_eq!(modular.groups.len(), 4);
+    assert!(modular.groups[0].header.is_none());
+    assert_eq!(
+        modular.groups[0].section_kind,
+        FrameSectionKind::DcGroup { group: 0 }
+    );
+    assert_eq!(modular.groups[0].stream_id, 2);
+    assert_eq!(
+        modular.groups[1].section_kind,
+        FrameSectionKind::AcGroup { pass: 0, group: 0 }
+    );
+    assert_eq!(modular.groups[1].stream_id, 21);
+    assert_eq!(modular.groups[1].bits_consumed, 4);
+    assert!(modular.groups[1].header.as_ref().unwrap().use_global_tree);
+    assert!(modular.groups[1].local_tree.is_none());
+    assert_eq!(modular.groups[3].stream_id, 23);
 
     let icc = parse_fixture("crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl");
     let modular = icc.first_frame_modular.as_ref().unwrap();
@@ -248,6 +264,7 @@ fn parses_checked_in_fixture_modular_global_metadata() {
     let transform = &modular.global.group_header.transforms[0];
     assert_eq!(transform.id, TransformId::Rct);
     assert_eq!(transform.rct_type, Some(10));
+    assert!(modular.groups.is_empty());
 
     let splines = parse_fixture("reference/libjxl/testdata/jxl/splines.jxl");
     assert!(splines.first_frame_modular.is_none());
