@@ -50,6 +50,14 @@ struct ModularDecodePlan {
     groups: Vec<ModularSectionMetadata>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ImageRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModularResiduals {
     pub global: Option<ModularDecodedGroup>,
@@ -547,24 +555,85 @@ fn decode_modular_residuals_serial(
 ) -> Result<ModularResiduals> {
     let (global, global_tree) =
         decode_global_residuals(codestream, frame_header, frame_data, &plan.channel_plan)?;
+    let full_image = ImageRect {
+        x: 0,
+        y: 0,
+        width: plan.channel_plan.width,
+        height: plan.channel_plan.height,
+    };
+    let groups = select_modular_groups_for_rect(&plan.groups, full_image);
     let decoded_groups =
-        decode_modular_group_residuals_serial(codestream, &plan.groups, &global_tree)?;
+        decode_modular_group_residuals_serial(codestream, groups.iter().copied(), &global_tree)?;
     Ok(ModularResiduals {
         global,
         groups: decoded_groups,
     })
 }
 
-fn decode_modular_group_residuals_serial(
-    codestream: &[u8],
+fn select_modular_groups_for_rect(
     groups: &[ModularSectionMetadata],
+    rect: ImageRect,
+) -> Vec<&ModularSectionMetadata> {
+    groups
+        .iter()
+        .filter(|group| modular_group_intersects_rect(group, rect))
+        .collect()
+}
+
+fn modular_group_intersects_rect(group: &ModularSectionMetadata, rect: ImageRect) -> bool {
+    group.payload_size != 0
+        && group
+            .channels
+            .iter()
+            .any(|channel| modular_channel_intersects_rect(channel, rect))
+}
+
+fn modular_channel_intersects_rect(channel: &ModularGroupChannelPlan, rect: ImageRect) -> bool {
+    let Some(channel_rect) = modular_channel_image_rect(channel) else {
+        return true;
+    };
+    image_rects_intersect(channel_rect, rect)
+}
+
+fn modular_channel_image_rect(channel: &ModularGroupChannelPlan) -> Option<ImageRect> {
+    if channel.hshift < 0 || channel.vshift < 0 {
+        return None;
+    }
+    let x = channel.x0.checked_shl(channel.hshift as u32)?;
+    let y = channel.y0.checked_shl(channel.vshift as u32)?;
+    let width = channel.width.checked_shl(channel.hshift as u32)?;
+    let height = channel.height.checked_shl(channel.vshift as u32)?;
+    Some(ImageRect {
+        x,
+        y,
+        width,
+        height,
+    })
+}
+
+fn image_rects_intersect(a: ImageRect, b: ImageRect) -> bool {
+    let Some(a_right) = a.x.checked_add(a.width) else {
+        return true;
+    };
+    let Some(a_bottom) = a.y.checked_add(a.height) else {
+        return true;
+    };
+    let Some(b_right) = b.x.checked_add(b.width) else {
+        return true;
+    };
+    let Some(b_bottom) = b.y.checked_add(b.height) else {
+        return true;
+    };
+    a.x < b_right && b.x < a_right && a.y < b_bottom && b.y < a_bottom
+}
+
+fn decode_modular_group_residuals_serial<'a>(
+    codestream: &[u8],
+    groups: impl IntoIterator<Item = &'a ModularSectionMetadata>,
     global_tree: &ModularTreeCoding,
 ) -> Result<Vec<ModularDecodedGroup>> {
     let mut decoded_groups = Vec::new();
     for group in groups {
-        if group.payload_size == 0 || group.channels.is_empty() {
-            continue;
-        }
         decoded_groups.push(decode_group_residuals(codestream, group, global_tree)?);
     }
     Ok(decoded_groups)
@@ -2442,11 +2511,121 @@ mod tests {
         assert_eq!(inverse_rct_pixel(6, 100, 20, 10).unwrap(), (105, 105, 85));
     }
 
+    #[test]
+    fn selects_modular_groups_for_roi_in_plan_order() {
+        let groups = pq_gradient_like_groups();
+
+        assert_eq!(
+            selected_streams(&groups, image_rect(10, 0, 32, 32)),
+            vec![21]
+        );
+        assert_eq!(
+            selected_streams(&groups, image_rect(600, 0, 32, 32)),
+            vec![22]
+        );
+        assert_eq!(
+            selected_streams(&groups, image_rect(1040, 0, 32, 32)),
+            vec![23]
+        );
+        assert_eq!(
+            selected_streams(&groups, image_rect(500, 0, 40, 32)),
+            vec![21, 22]
+        );
+        assert_eq!(
+            selected_streams(&groups, image_rect(2000, 0, 16, 16)),
+            vec![]
+        );
+    }
+
+    #[test]
+    fn shifted_modular_group_channels_are_selected_in_image_space() {
+        let groups = vec![
+            group_section(30, 0, &[group_channel(0, 0, 0, 32, 32, 1, 1)]),
+            group_section(31, 1, &[group_channel(0, 0, 32, 32, 32, 1, 1)]),
+        ];
+
+        assert_eq!(
+            selected_streams(&groups, image_rect(10, 10, 20, 20)),
+            vec![30]
+        );
+        assert_eq!(
+            selected_streams(&groups, image_rect(10, 70, 20, 20)),
+            vec![31]
+        );
+    }
+
     fn image_channel(width: u32, height: u32, samples: &[i32]) -> ModularImageChannel {
         ModularImageChannel {
             width,
             height,
             samples: samples.to_vec(),
+        }
+    }
+
+    fn selected_streams(groups: &[ModularSectionMetadata], rect: ImageRect) -> Vec<usize> {
+        select_modular_groups_for_rect(groups, rect)
+            .iter()
+            .map(|group| group.stream_id)
+            .collect()
+    }
+
+    fn pq_gradient_like_groups() -> Vec<ModularSectionMetadata> {
+        vec![
+            group_section(2, 0, &[]),
+            group_section(21, 1, &[group_channel(1, 0, 0, 512, 64, 0, 0)]),
+            group_section(22, 2, &[group_channel(1, 512, 0, 512, 64, 0, 0)]),
+            group_section(23, 3, &[group_channel(1, 1024, 0, 64, 64, 0, 0)]),
+        ]
+    }
+
+    fn group_section(
+        stream_id: usize,
+        section_physical_index: usize,
+        channels: &[ModularGroupChannelPlan],
+    ) -> ModularSectionMetadata {
+        ModularSectionMetadata {
+            section_logical_id: section_physical_index,
+            section_physical_index,
+            section_kind: FrameSectionKind::AcGroup {
+                pass: 0,
+                group: section_physical_index,
+            },
+            codestream_offset: 0,
+            stream_id,
+            payload_size: 1,
+            header: None,
+            local_tree: None,
+            channels: channels.to_vec(),
+            bits_consumed: 0,
+        }
+    }
+
+    fn group_channel(
+        channel_index: usize,
+        x0: u32,
+        y0: u32,
+        width: u32,
+        height: u32,
+        hshift: i32,
+        vshift: i32,
+    ) -> ModularGroupChannelPlan {
+        ModularGroupChannelPlan {
+            channel_index,
+            width,
+            height,
+            x0,
+            y0,
+            hshift,
+            vshift,
+        }
+    }
+
+    fn image_rect(x: u32, y: u32, width: u32, height: u32) -> ImageRect {
+        ImageRect {
+            x,
+            y,
+            width,
+            height,
         }
     }
 }
