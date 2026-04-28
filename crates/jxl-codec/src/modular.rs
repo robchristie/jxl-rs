@@ -314,8 +314,8 @@ pub fn read_modular_frame_metadata(
         ))?;
     let payload = section_payload(codestream, section)?;
     let mut reader = BitReader::new(payload);
-    let global = read_global_section(&mut reader, metadata, frame_header, section)?;
-    let channel_plan = build_channel_plan(metadata, frame_header, &global.group_header)?;
+    let mut global = read_global_section(&mut reader, metadata, frame_header, section)?;
+    let channel_plan = build_channel_plan(metadata, frame_header, &mut global.group_header)?;
     let groups =
         read_modular_group_sections(codestream, frame_header, frame_data, &global, &channel_plan)?;
     let residuals =
@@ -712,9 +712,8 @@ fn inverse_transforms(
                 inverse_rct_transform(transform, &mut channels)?;
             }
             TransformId::Squeeze => {
-                return Err(Error::InvalidCodestream(
-                    "unsupported modular inverse transform",
-                ));
+                nb_meta_channels =
+                    inverse_squeeze_transform(transform, &mut channels, nb_meta_channels)?;
             }
         }
     }
@@ -925,6 +924,214 @@ fn inverse_rct_pixel(
         _ => return Err(Error::InvalidCodestream("invalid RCT transform type")),
     }
     Ok((first, second, third))
+}
+
+fn inverse_squeeze_transform(
+    transform: &ModularTransform,
+    channels: &mut Vec<ModularImageChannel>,
+    mut nb_meta_channels: usize,
+) -> Result<usize> {
+    if transform.squeezes.is_empty() {
+        return Err(Error::InvalidCodestream("missing squeeze parameters"));
+    }
+    for squeeze in transform.squeezes.iter().rev() {
+        let begin_c = squeeze.begin_c as usize;
+        let num_c = squeeze.num_c as usize;
+        let end_c = begin_c
+            .checked_add(num_c)
+            .and_then(|value| value.checked_sub(1))
+            .ok_or(Error::InvalidCodestream("invalid squeeze channel range"))?;
+        if end_c >= channels.len() {
+            return Err(Error::InvalidCodestream("invalid squeeze channel range"));
+        }
+        let offset = if squeeze.in_place {
+            end_c
+                .checked_add(1)
+                .ok_or(Error::InvalidCodestream("invalid squeeze channel range"))?
+        } else {
+            channels
+                .len()
+                .checked_sub(num_c)
+                .ok_or(Error::InvalidCodestream("invalid squeeze channel range"))?
+        };
+        if offset
+            .checked_add(num_c)
+            .is_none_or(|end| end > channels.len())
+        {
+            return Err(Error::InvalidCodestream("invalid squeeze residual range"));
+        }
+        if begin_c < nb_meta_channels {
+            nb_meta_channels =
+                nb_meta_channels
+                    .checked_sub(num_c)
+                    .ok_or(Error::InvalidCodestream(
+                        "invalid modular meta channel count",
+                    ))?;
+        }
+
+        for channel_index in begin_c..=end_c {
+            let residual_index = offset + channel_index - begin_c;
+            if channels[channel_index].width < channels[residual_index].width
+                || channels[channel_index].height < channels[residual_index].height
+            {
+                return Err(Error::InvalidCodestream("corrupted squeeze transform"));
+            }
+            let unsqueezed = if squeeze.horizontal {
+                inverse_horizontal_squeeze(&channels[channel_index], &channels[residual_index])?
+            } else {
+                inverse_vertical_squeeze(&channels[channel_index], &channels[residual_index])?
+            };
+            channels[channel_index] = unsqueezed;
+        }
+        channels.drain(offset..offset + num_c);
+    }
+    Ok(nb_meta_channels)
+}
+
+fn inverse_horizontal_squeeze(
+    low: &ModularImageChannel,
+    residual: &ModularImageChannel,
+) -> Result<ModularImageChannel> {
+    if low.width != (low.width + residual.width).div_ceil(2) || low.height != residual.height {
+        return Err(Error::InvalidCodestream("invalid horizontal squeeze shape"));
+    }
+    let width = low
+        .width
+        .checked_add(residual.width)
+        .ok_or(Error::InvalidCodestream("modular channel size overflow"))?;
+    let height = low.height;
+    if residual.width == 0 {
+        return Ok(low.clone());
+    }
+    validate_channel_samples(low)?;
+    validate_channel_samples(residual)?;
+    let mut output = ModularImageChannel {
+        width,
+        height,
+        samples: vec![0; channel_sample_count(width, height)?],
+    };
+    let low_width = low.width as usize;
+    let residual_width = residual.width as usize;
+    let output_width = width as usize;
+    for y in 0..height as usize {
+        let low_row = y * low_width;
+        let residual_row = y * residual_width;
+        let output_row = y * output_width;
+        for x in 0..residual_width {
+            let diff_minus_tendency = residual.samples[residual_row + x];
+            let avg = low.samples[low_row + x];
+            let next_avg = if x + 1 < low_width {
+                low.samples[low_row + x + 1]
+            } else {
+                avg
+            };
+            let left = if x > 0 {
+                output.samples[output_row + (x << 1) - 1]
+            } else {
+                avg
+            };
+            let diff = diff_minus_tendency + smooth_tendency(left, avg, next_avg);
+            let first = avg + diff / 2;
+            output.samples[output_row + (x << 1)] = first;
+            output.samples[output_row + (x << 1) + 1] = first - diff;
+        }
+        if width & 1 != 0 {
+            output.samples[output_row + output_width - 1] = low.samples[low_row + low_width - 1];
+        }
+    }
+    Ok(output)
+}
+
+fn inverse_vertical_squeeze(
+    low: &ModularImageChannel,
+    residual: &ModularImageChannel,
+) -> Result<ModularImageChannel> {
+    if low.height != (low.height + residual.height).div_ceil(2) || low.width != residual.width {
+        return Err(Error::InvalidCodestream("invalid vertical squeeze shape"));
+    }
+    let width = low.width;
+    let height = low
+        .height
+        .checked_add(residual.height)
+        .ok_or(Error::InvalidCodestream("modular channel size overflow"))?;
+    if residual.height == 0 {
+        return Ok(low.clone());
+    }
+    validate_channel_samples(low)?;
+    validate_channel_samples(residual)?;
+    let mut output = ModularImageChannel {
+        width,
+        height,
+        samples: vec![0; channel_sample_count(width, height)?],
+    };
+    let width = width as usize;
+    for y in 0..residual.height as usize {
+        let low_row = y * width;
+        let residual_row = y * width;
+        let next_low_row = if y + 1 < low.height as usize {
+            (y + 1) * width
+        } else {
+            low_row
+        };
+        let prev_output_row = if y > 0 {
+            ((y << 1) - 1) * width
+        } else {
+            low_row
+        };
+        let output_row = (y << 1) * width;
+        let next_output_row = ((y << 1) + 1) * width;
+        for x in 0..width {
+            let avg = low.samples[low_row + x];
+            let next_avg = low.samples[next_low_row + x];
+            let top = if y > 0 {
+                output.samples[prev_output_row + x]
+            } else {
+                avg
+            };
+            let diff = residual.samples[residual_row + x] + smooth_tendency(top, avg, next_avg);
+            let first = avg + diff / 2;
+            output.samples[output_row + x] = first;
+            output.samples[next_output_row + x] = first - diff;
+        }
+    }
+    if height & 1 != 0 {
+        let low_row = (low.height as usize - 1) * width;
+        let output_row = (height as usize - 1) * width;
+        output.samples[output_row..output_row + width]
+            .copy_from_slice(&low.samples[low_row..low_row + width]);
+    }
+    Ok(output)
+}
+
+fn smooth_tendency(previous: i32, average: i32, next_average: i32) -> i32 {
+    let mut diff = 0;
+    if previous >= average && average >= next_average {
+        diff = (4 * previous - 3 * next_average - average + 6) / 12;
+        if diff - (diff & 1) > 2 * (previous - average) {
+            diff = 2 * (previous - average) + 1;
+        }
+        if diff + (diff & 1) > 2 * (average - next_average) {
+            diff = 2 * (average - next_average);
+        }
+    } else if previous <= average && average <= next_average {
+        diff = (4 * previous - 3 * next_average - average - 6) / 12;
+        if diff + (diff & 1) < 2 * (previous - average) {
+            diff = 2 * (previous - average) - 1;
+        }
+        if diff - (diff & 1) < 2 * (average - next_average) {
+            diff = 2 * (average - next_average);
+        }
+    }
+    diff
+}
+
+fn validate_channel_samples(channel: &ModularImageChannel) -> Result<()> {
+    if channel.samples.len() != channel_sample_count(channel.width, channel.height)? {
+        return Err(Error::InvalidCodestream(
+            "modular channel sample count mismatch",
+        ));
+    }
+    Ok(())
 }
 
 fn channel_sample_count(width: u32, height: u32) -> Result<usize> {
@@ -1364,7 +1571,7 @@ fn clamped_gradient(top: i32, left: i32, top_left: i32) -> i32 {
 fn build_channel_plan(
     metadata: &ImageMetadata,
     frame_header: &FrameHeader,
-    global_header: &ModularGroupHeader,
+    global_header: &mut ModularGroupHeader,
 ) -> Result<ModularChannelPlan> {
     let width = frame_header
         .frame_size
@@ -1376,7 +1583,7 @@ fn build_channel_plan(
         .div_ceil(frame_header.upsampling);
     let mut channels = initial_channels(metadata, frame_header, width, height)?;
     let mut nb_meta_channels = 0usize;
-    for transform in &global_header.transforms {
+    for transform in &mut global_header.transforms {
         apply_transform_metadata(transform, &mut channels, &mut nb_meta_channels)?;
     }
     Ok(ModularChannelPlan {
@@ -1457,7 +1664,7 @@ fn chroma_shift(
 }
 
 fn apply_transform_metadata(
-    transform: &ModularTransform,
+    transform: &mut ModularTransform,
     channels: &mut Vec<ModularChannel>,
     nb_meta_channels: &mut usize,
 ) -> Result<()> {
@@ -1485,12 +1692,10 @@ fn apply_transform_metadata(
             )?;
         }
         TransformId::Squeeze => {
-            let squeezes = if transform.squeezes.is_empty() {
-                default_squeeze_parameters(channels, *nb_meta_channels)?
-            } else {
-                transform.squeezes.clone()
-            };
-            for squeeze in &squeezes {
+            if transform.squeezes.is_empty() {
+                transform.squeezes = default_squeeze_parameters(channels, *nb_meta_channels)?;
+            }
+            for squeeze in &transform.squeezes {
                 apply_squeeze_metadata(channels, nb_meta_channels, squeeze)?;
             }
         }

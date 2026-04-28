@@ -145,7 +145,7 @@ fn assembled_rgb_modular_pixels_match_reference_djxl_when_available() {
 
     let reference = std::fs::read(&output).unwrap();
     let _ = std::fs::remove_file(&output);
-    let reference = parse_ppm16_rgb(&reference);
+    let reference = parse_ppm_rgb(&reference);
     assert_eq!(reference.width, 64);
     assert_eq!(reference.height, 64);
 
@@ -165,19 +165,89 @@ fn assembled_rgb_modular_pixels_match_reference_djxl_when_available() {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct Ppm16Rgb {
+struct PpmRgb {
     width: u32,
     height: u32,
     samples: Vec<u16>,
 }
 
-fn parse_ppm16_rgb(bytes: &[u8]) -> Ppm16Rgb {
+#[test]
+fn generated_progressive_squeeze_pixels_match_reference_djxl_when_available() {
+    let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+        eprintln!("skipping generated squeeze djxl comparison; reference tools are not built");
+        return;
+    };
+
+    let input = unique_temp_path("jxl-rs-squeeze-source", "ppm");
+    let encoded = unique_temp_path("jxl-rs-squeeze", "jxl");
+    let reference_output = unique_temp_path("jxl-rs-squeeze-reference", "ppm");
+    write_progressive_squeeze_source_ppm(&input);
+
+    let cjxl_output = Command::new(&cjxl)
+        .arg(&input)
+        .arg(&encoded)
+        .args(["-d", "0", "-m", "1", "-p", "--container=0", "--quiet"])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&input);
+    assert!(
+        cjxl_output.status.success(),
+        "reference cjxl failed: {}",
+        String::from_utf8_lossy(&cjxl_output.stderr)
+    );
+
+    let djxl_output = Command::new(&djxl)
+        .arg(&encoded)
+        .arg(&reference_output)
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        djxl_output.status.success(),
+        "reference djxl failed: {}",
+        String::from_utf8_lossy(&djxl_output.stderr)
+    );
+
+    let reference = std::fs::read(&reference_output).unwrap();
+    let reference = parse_ppm_rgb(&reference);
+    let encoded_bytes = std::fs::read(&encoded).unwrap();
+    let _ = std::fs::remove_file(&encoded);
+    let _ = std::fs::remove_file(&reference_output);
+    let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+    let modular = codestream.first_frame_modular.as_ref().unwrap();
+    assert!(
+        modular
+            .global
+            .group_header
+            .transforms
+            .iter()
+            .any(|transform| {
+                transform.id == TransformId::Squeeze && !transform.squeezes.is_empty()
+            })
+    );
+    let image = modular.image.as_ref().unwrap();
+    assert_eq!(image.width, reference.width);
+    assert_eq!(image.height, reference.height);
+    assert_eq!(image.channels.len(), 3);
+
+    let mut actual = Vec::with_capacity(reference.samples.len());
+    for index in 0..(image.width as usize * image.height as usize) {
+        for channel in &image.channels {
+            actual.push(u16::try_from(channel.samples[index]).unwrap());
+        }
+    }
+
+    assert_eq!(actual, reference.samples);
+}
+
+fn parse_ppm_rgb(bytes: &[u8]) -> PpmRgb {
     let (magic, offset) = netpbm_token(bytes, 0);
     assert_eq!(magic, b"P6");
     let (width, offset) = netpbm_token(bytes, offset);
     let (height, offset) = netpbm_token(bytes, offset);
     let (maxval, mut offset) = netpbm_token(bytes, offset);
-    assert_eq!(maxval, b"65535");
+    let maxval = parse_ascii_u32(maxval);
+    assert!(matches!(maxval, 255 | 65535));
     assert!(
         offset < bytes.len() && bytes[offset].is_ascii_whitespace(),
         "PPM header was not followed by binary sample data"
@@ -186,14 +256,18 @@ fn parse_ppm16_rgb(bytes: &[u8]) -> Ppm16Rgb {
 
     let width = parse_ascii_u32(width);
     let height = parse_ascii_u32(height);
-    let expected_bytes = width as usize * height as usize * 3 * 2;
+    let bytes_per_sample = if maxval > 255 { 2 } else { 1 };
+    let expected_bytes = width as usize * height as usize * 3 * bytes_per_sample;
     let data = &bytes[offset..];
     assert_eq!(data.len(), expected_bytes);
-    let samples = data
-        .chunks_exact(2)
-        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
-        .collect();
-    Ppm16Rgb {
+    let samples = if bytes_per_sample == 2 {
+        data.chunks_exact(2)
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .collect()
+    } else {
+        data.iter().copied().map(u16::from).collect()
+    };
+    PpmRgb {
         width,
         height,
         samples,
@@ -222,6 +296,18 @@ fn netpbm_token(bytes: &[u8], mut offset: usize) -> (&[u8], usize) {
 
 fn parse_ascii_u32(bytes: &[u8]) -> u32 {
     std::str::from_utf8(bytes).unwrap().parse().unwrap()
+}
+
+fn write_progressive_squeeze_source_ppm(path: &Path) {
+    let width = 128u32;
+    let height = 128u32;
+    let mut state = 2u32;
+    let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
+    for _ in 0..width * height * 3 {
+        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+        bytes.push((state >> 24) as u8);
+    }
+    std::fs::write(path, bytes).unwrap();
 }
 
 #[test]
@@ -517,6 +603,18 @@ fn reference_djxl() -> Option<PathBuf> {
     }
 
     let default = workspace_path("reference/libjxl/build-rs-oracle/tools/djxl");
+    default.is_file().then_some(default)
+}
+
+fn reference_cjxl() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("JXL_RS_REFERENCE_CJXL") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    let default = workspace_path("reference/libjxl/build-rs-oracle/tools/cjxl");
     default.is_file().then_some(default)
 }
 
