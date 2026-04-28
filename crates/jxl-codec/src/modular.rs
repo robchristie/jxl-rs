@@ -58,6 +58,11 @@ struct ImageRect {
     height: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModularGroupExecutor {
+    Serial,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModularResiduals {
     pub global: Option<ModularDecodedGroup>,
@@ -316,8 +321,14 @@ pub fn read_modular_frame_metadata(
     }
 
     let plan = read_modular_decode_plan(codestream, metadata, frame_header, frame_data)?;
-    let residuals =
-        decode_modular_residuals_serial(codestream, frame_header, frame_data, &plan).ok();
+    let residuals = decode_modular_residuals(
+        codestream,
+        frame_header,
+        frame_data,
+        &plan,
+        ModularGroupExecutor::Serial,
+    )
+    .ok();
     let image = residuals
         .as_ref()
         .and_then(|residuals| assemble_modular_image(&plan, residuals).ok());
@@ -547,11 +558,12 @@ fn modular_stream_id(kind: FrameSectionKind, frame_header: &FrameHeader) -> Resu
     }
 }
 
-fn decode_modular_residuals_serial(
+fn decode_modular_residuals(
     codestream: &[u8],
     frame_header: &FrameHeader,
     frame_data: &FrameData,
     plan: &ModularDecodePlan,
+    executor: ModularGroupExecutor,
 ) -> Result<ModularResiduals> {
     let (global, global_tree) =
         decode_global_residuals(codestream, frame_header, frame_data, &plan.channel_plan)?;
@@ -561,13 +573,36 @@ fn decode_modular_residuals_serial(
         width: plan.channel_plan.width,
         height: plan.channel_plan.height,
     };
-    let groups = select_modular_groups_for_rect(&plan.groups, full_image);
+    let groups = executor.select_groups_for_rect(&plan.groups, full_image);
     let decoded_groups =
-        decode_modular_group_residuals_serial(codestream, groups.iter().copied(), &global_tree)?;
+        executor.decode_groups(codestream, groups.iter().copied(), &global_tree)?;
     Ok(ModularResiduals {
         global,
         groups: decoded_groups,
     })
+}
+
+impl ModularGroupExecutor {
+    fn select_groups_for_rect(
+        self,
+        groups: &[ModularSectionMetadata],
+        rect: ImageRect,
+    ) -> Vec<&ModularSectionMetadata> {
+        match self {
+            Self::Serial => select_modular_groups_for_rect(groups, rect),
+        }
+    }
+
+    fn decode_groups<'a>(
+        self,
+        codestream: &[u8],
+        groups: impl IntoIterator<Item = &'a ModularSectionMetadata>,
+        global_tree: &ModularTreeCoding,
+    ) -> Result<Vec<ModularDecodedGroup>> {
+        match self {
+            Self::Serial => decode_modular_group_residuals_serial(codestream, groups, global_tree),
+        }
+    }
 }
 
 fn select_modular_groups_for_rect(
@@ -2551,6 +2586,21 @@ mod tests {
         assert_eq!(
             selected_streams(&groups, image_rect(10, 70, 20, 20)),
             vec![31]
+        );
+    }
+
+    #[test]
+    fn serial_group_executor_preserves_selected_group_order() {
+        let groups = pq_gradient_like_groups();
+        let executor = ModularGroupExecutor::Serial;
+        let selected = executor.select_groups_for_rect(&groups, image_rect(500, 0, 600, 64));
+
+        assert_eq!(
+            selected
+                .iter()
+                .map(|group| group.stream_id)
+                .collect::<Vec<_>>(),
+            vec![21, 22, 23]
         );
     }
 
