@@ -44,6 +44,13 @@ pub struct ModularFrameMetadata {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ModularDecodePlan {
+    global: ModularGlobalSection,
+    channel_plan: ModularChannelPlan,
+    groups: Vec<ModularSectionMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModularResiduals {
     pub global: Option<ModularDecodedGroup>,
     pub groups: Vec<ModularDecodedGroup>,
@@ -300,6 +307,32 @@ pub fn read_modular_frame_metadata(
         return Ok(None);
     }
 
+    let plan = read_modular_decode_plan(codestream, metadata, frame_header, frame_data)?;
+    let residuals =
+        decode_modular_residuals_serial(codestream, frame_header, frame_data, &plan).ok();
+    let image = residuals
+        .as_ref()
+        .and_then(|residuals| assemble_modular_image(&plan, residuals).ok());
+    let ModularDecodePlan {
+        global,
+        channel_plan,
+        groups,
+    } = plan;
+    Ok(Some(ModularFrameMetadata {
+        global,
+        channel_plan,
+        groups,
+        residuals,
+        image,
+    }))
+}
+
+fn read_modular_decode_plan(
+    codestream: &[u8],
+    metadata: &ImageMetadata,
+    frame_header: &FrameHeader,
+    frame_data: &FrameData,
+) -> Result<ModularDecodePlan> {
     let section = frame_data
         .sections
         .iter()
@@ -318,18 +351,11 @@ pub fn read_modular_frame_metadata(
     let channel_plan = build_channel_plan(metadata, frame_header, &mut global.group_header)?;
     let groups =
         read_modular_group_sections(codestream, frame_header, frame_data, &global, &channel_plan)?;
-    let residuals =
-        read_modular_residuals(codestream, frame_header, frame_data, &channel_plan, &groups).ok();
-    let image = residuals.as_ref().and_then(|residuals| {
-        assemble_modular_image(&channel_plan, &global.group_header, residuals).ok()
-    });
-    Ok(Some(ModularFrameMetadata {
+    Ok(ModularDecodePlan {
         global,
         channel_plan,
         groups,
-        residuals,
-        image,
-    }))
+    })
 }
 
 fn section_payload<'a>(codestream: &'a [u8], section: &FrameSection) -> Result<&'a [u8]> {
@@ -513,26 +539,35 @@ fn modular_stream_id(kind: FrameSectionKind, frame_header: &FrameHeader) -> Resu
     }
 }
 
-fn read_modular_residuals(
+fn decode_modular_residuals_serial(
     codestream: &[u8],
     frame_header: &FrameHeader,
     frame_data: &FrameData,
-    channel_plan: &ModularChannelPlan,
-    groups: &[ModularSectionMetadata],
+    plan: &ModularDecodePlan,
 ) -> Result<ModularResiduals> {
     let (global, global_tree) =
-        decode_global_residuals(codestream, frame_header, frame_data, channel_plan)?;
+        decode_global_residuals(codestream, frame_header, frame_data, &plan.channel_plan)?;
+    let decoded_groups =
+        decode_modular_group_residuals_serial(codestream, &plan.groups, &global_tree)?;
+    Ok(ModularResiduals {
+        global,
+        groups: decoded_groups,
+    })
+}
+
+fn decode_modular_group_residuals_serial(
+    codestream: &[u8],
+    groups: &[ModularSectionMetadata],
+    global_tree: &ModularTreeCoding,
+) -> Result<Vec<ModularDecodedGroup>> {
     let mut decoded_groups = Vec::new();
     for group in groups {
         if group.payload_size == 0 || group.channels.is_empty() {
             continue;
         }
-        decoded_groups.push(decode_group_residuals(codestream, group, &global_tree)?);
+        decoded_groups.push(decode_group_residuals(codestream, group, global_tree)?);
     }
-    Ok(ModularResiduals {
-        global,
-        groups: decoded_groups,
-    })
+    Ok(decoded_groups)
 }
 
 fn decode_global_residuals(
@@ -630,11 +665,11 @@ fn global_channel_plan(
 }
 
 fn assemble_modular_image(
-    channel_plan: &ModularChannelPlan,
-    global_header: &ModularGroupHeader,
+    plan: &ModularDecodePlan,
     residuals: &ModularResiduals,
 ) -> Result<ModularImage> {
-    let mut channels = channel_plan
+    let mut channels = plan
+        .channel_plan
         .channels
         .iter()
         .map(|channel| {
@@ -655,7 +690,7 @@ fn assemble_modular_image(
         copy_decoded_group(&mut channels, group)?;
     }
 
-    inverse_transforms(channel_plan, global_header, channels)
+    inverse_transforms(&plan.channel_plan, &plan.global.group_header, channels)
 }
 
 fn copy_decoded_group(

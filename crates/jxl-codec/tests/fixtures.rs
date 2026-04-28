@@ -458,6 +458,18 @@ fn parses_checked_in_fixture_modular_global_metadata() {
     assert_eq!(modular.groups[3].channels[0].width, 64);
     assert_eq!(modular.groups[3].stream_id, 23);
     let residuals = modular.residuals.as_ref().unwrap();
+    let planned_residual_streams = modular
+        .groups
+        .iter()
+        .filter(|group| group.payload_size != 0 && !group.channels.is_empty())
+        .map(|group| group.stream_id)
+        .collect::<Vec<_>>();
+    let decoded_residual_streams = residuals
+        .groups
+        .iter()
+        .map(|group| group.stream_id)
+        .collect::<Vec<_>>();
+    assert_eq!(decoded_residual_streams, planned_residual_streams);
     let global = residuals.global.as_ref().unwrap();
     assert_eq!(global.stream_id, 0);
     assert_eq!(global.channels.len(), 1);
