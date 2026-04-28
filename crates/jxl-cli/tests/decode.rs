@@ -26,15 +26,45 @@ fn decode_cli_writes_rgba8_pam() {
     let pam = parse_pam_rgba(&bytes);
     assert_eq!(pam.width, 64);
     assert_eq!(pam.height, 64);
-    assert_eq!(pam.pixels.len(), 64 * 64 * 4);
-    assert!(pam.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+    assert_eq!(pam.maxval, 255);
+    assert_eq!(pam.samples.len(), 64 * 64 * 4);
+    assert!(pam.samples.chunks_exact(4).all(|pixel| pixel[3] == 255));
+}
+
+#[test]
+fn decode_cli_writes_rgba16_pam() {
+    let input = workspace_path("crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl");
+    let output = unique_temp_path("jxl-cli-decode-16", "pam");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_jxl-decode-rs"))
+        .arg(&input)
+        .arg(&output)
+        .args(["--bits", "16"])
+        .output()
+        .unwrap();
+
+    assert!(
+        result.status.success(),
+        "jxl-decode-rs failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let bytes = std::fs::read(&output).unwrap();
+    let _ = std::fs::remove_file(&output);
+    let pam = parse_pam_rgba(&bytes);
+    assert_eq!(pam.width, 64);
+    assert_eq!(pam.height, 64);
+    assert_eq!(pam.maxval, 65535);
+    assert_eq!(pam.samples.len(), 64 * 64 * 4);
+    assert!(pam.samples.chunks_exact(4).all(|pixel| pixel[3] == 65535));
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PamRgba {
     width: u32,
     height: u32,
-    pixels: Vec<u8>,
+    maxval: u32,
+    samples: Vec<u16>,
 }
 
 fn parse_pam_rgba(bytes: &[u8]) -> PamRgba {
@@ -62,16 +92,26 @@ fn parse_pam_rgba(bytes: &[u8]) -> PamRgba {
         }
     }
     assert_eq!(depth, Some(4));
-    assert_eq!(maxval, Some(255));
+    let maxval = maxval.unwrap();
+    assert!(matches!(maxval, 255 | 65535));
     assert_eq!(tupltype, Some("RGB_ALPHA"));
     let width = width.unwrap();
     let height = height.unwrap();
-    let pixels = bytes[header_end..].to_vec();
-    assert_eq!(pixels.len(), width as usize * height as usize * 4);
+    let data = &bytes[header_end..];
+    let samples = if maxval > 255 {
+        assert_eq!(data.len(), width as usize * height as usize * 4 * 2);
+        data.chunks_exact(2)
+            .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+            .collect()
+    } else {
+        assert_eq!(data.len(), width as usize * height as usize * 4);
+        data.iter().copied().map(u16::from).collect()
+    };
     PamRgba {
         width,
         height,
-        pixels,
+        maxval,
+        samples,
     }
 }
 
