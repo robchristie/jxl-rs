@@ -267,7 +267,35 @@ fn parses_checked_in_fixture_modular_global_metadata() {
     assert_eq!(modular.groups[3].channels[0].x0, 1024);
     assert_eq!(modular.groups[3].channels[0].width, 64);
     assert_eq!(modular.groups[3].stream_id, 23);
-    assert!(modular.residuals.is_none());
+    let residuals = modular.residuals.as_ref().unwrap();
+    assert_eq!(residuals.groups.len(), 3);
+    assert_eq!(residuals.groups[0].stream_id, 21);
+    assert_eq!(residuals.groups[0].channels[0].samples.len(), 512 * 64);
+    assert_eq!(
+        residuals.groups[0].channels[0].samples.iter().min(),
+        Some(&0)
+    );
+    assert_eq!(
+        residuals.groups[0].channels[0].samples.iter().max(),
+        Some(&7)
+    );
+    assert_eq!(residuals.groups[1].stream_id, 22);
+    assert_eq!(
+        residuals.groups[1].channels[0].samples.iter().min(),
+        Some(&8)
+    );
+    assert_eq!(
+        residuals.groups[1].channels[0].samples.iter().max(),
+        Some(&15)
+    );
+    assert_eq!(residuals.groups[2].stream_id, 23);
+    assert_eq!(residuals.groups[2].channels[0].samples.len(), 64 * 64);
+    assert!(
+        residuals.groups[2].channels[0]
+            .samples
+            .iter()
+            .all(|sample| *sample == 16)
+    );
 
     let icc = parse_fixture("crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl");
     let modular = icc.first_frame_modular.as_ref().unwrap();

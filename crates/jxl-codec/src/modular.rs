@@ -17,6 +17,18 @@ const TREE_HEIGHT_LIMIT: i32 = 2048;
 const NUM_QUANT_TABLES: usize = 17;
 const NUM_NONREF_PROPERTIES: usize = 16;
 const WP_PROPERTY: i16 = 15;
+const WP_NUM_PREDICTORS: usize = 4;
+const WP_PRED_EXTRA_BITS: i64 = 3;
+const WP_PREDICTION_ROUND: i64 = ((1 << WP_PRED_EXTRA_BITS) >> 1) - 1;
+const WP_DIV_LOOKUP: [u32; 64] = [
+    16_777_216, 8_388_608, 5_592_405, 4_194_304, 3_355_443, 2_796_202, 2_396_745, 2_097_152,
+    1_864_135, 1_677_721, 1_525_201, 1_398_101, 1_290_555, 1_198_372, 1_118_481, 1_048_576,
+    986_895, 932_067, 883_011, 838_860, 798_915, 762_600, 729_444, 699_050, 671_088, 645_277,
+    621_378, 599_186, 578_524, 559_240, 541_200, 524_288, 508_400, 493_447, 479_349, 466_033,
+    453_438, 441_505, 430_185, 419_430, 409_200, 399_457, 390_167, 381_300, 372_827, 364_722,
+    356_962, 349_525, 342_392, 335_544, 328_965, 322_638, 316_551, 310_689, 305_040, 299_593,
+    294_337, 289_262, 284_359, 279_620, 275_036, 270_600, 266_305, 262_144,
+];
 const FLAG_NOISE: u64 = 1;
 const FLAG_PATCHES: u64 = 2;
 const FLAG_SPLINES: u64 = 16;
@@ -553,6 +565,7 @@ fn decode_group_residuals(
             &mut reader,
             &mut symbol_reader,
             &tree,
+            &header.weighted_predictor,
             channel,
             local_channel,
             group.stream_id,
@@ -583,6 +596,7 @@ fn decode_channel_residuals(
     reader: &mut BitReader<'_>,
     symbol_reader: &mut AnsSymbolReader,
     tree: &ModularTreeCoding,
+    wp_header: &WeightedPredictorHeader,
     channel: &ModularGroupChannelPlan,
     local_channel: usize,
     stream_id: usize,
@@ -592,6 +606,7 @@ fn decode_channel_residuals(
         .ok_or(Error::InvalidCodestream("modular channel size overflow"))?;
     let mut samples = vec![0i32; sample_count];
     let mut properties = vec![0i32; NUM_NONREF_PROPERTIES];
+    let mut wp_state = WeightedPredictorState::new(wp_header, channel.width as usize);
     properties[0] = local_channel as i32;
     properties[1] = stream_id as i32;
     for y in 0..channel.height as usize {
@@ -599,6 +614,7 @@ fn decode_channel_residuals(
         properties[9] = 0;
         for x in 0..channel.width as usize {
             fill_pixel_properties(&mut properties, &samples, channel.width as usize, x, y);
+            let wp_pred = wp_state.predict(&samples, channel.width as usize, x, y, &mut properties);
             let leaf = lookup_tree_leaf(&tree.tree, &properties)?;
             let context = usize::from(
                 *tree
@@ -606,14 +622,23 @@ fn decode_channel_residuals(
                     .get(leaf.lchild as usize)
                     .ok_or(Error::InvalidCodestream("invalid modular residual context"))?,
             );
-            let guess = predict_one(leaf.predictor, &samples, channel.width as usize, x, y)?;
+            let guess = predict_one(
+                leaf.predictor,
+                &samples,
+                channel.width as usize,
+                x,
+                y,
+                wp_pred,
+            )?;
             let residual =
                 unpack_signed(symbol_reader.read_hybrid_uint_clustered(context, reader)?);
-            samples[y * channel.width as usize + x] = residual
+            let sample = residual
                 .checked_mul(leaf.multiplier as i32)
                 .and_then(|value| value.checked_add(leaf.predictor_offset as i32))
                 .and_then(|value| value.checked_add(guess))
                 .ok_or(Error::InvalidCodestream("modular residual overflow"))?;
+            samples[y * channel.width as usize + x] = sample;
+            wp_state.update_errors(sample, channel.width as usize, x, y);
         }
     }
     Ok(ModularDecodedChannel {
@@ -634,11 +659,6 @@ fn lookup_tree_leaf(tree: &MaTree, properties: &[i32]) -> Result<MaTreeNode> {
         if node.property == -1 {
             return Ok(node);
         }
-        if node.property == WP_PROPERTY {
-            return Err(Error::InvalidCodestream(
-                "modular tree requires weighted-predictor properties",
-            ));
-        }
         let property = *properties
             .get(node.property as usize)
             .ok_or(Error::InvalidCodestream(
@@ -650,6 +670,151 @@ fn lookup_tree_leaf(tree: &MaTree, properties: &[i32]) -> Result<MaTreeNode> {
             node.rchild as usize
         };
     }
+}
+
+#[derive(Debug, Clone)]
+struct WeightedPredictorState {
+    header: WeightedPredictorHeader,
+    prediction: [i64; WP_NUM_PREDICTORS],
+    pred: i64,
+    pred_errors: [Vec<u32>; WP_NUM_PREDICTORS],
+    error: Vec<i32>,
+}
+
+impl WeightedPredictorState {
+    fn new(header: &WeightedPredictorHeader, width: usize) -> Self {
+        let len = (width + 2) * 2;
+        Self {
+            header: *header,
+            prediction: [0; WP_NUM_PREDICTORS],
+            pred: 0,
+            pred_errors: std::array::from_fn(|_| vec![0; len]),
+            error: vec![0; len],
+        }
+    }
+
+    fn predict(
+        &mut self,
+        samples: &[i32],
+        width: usize,
+        x: usize,
+        y: usize,
+        properties: &mut [i32],
+    ) -> i32 {
+        let left = i64::from(sample_left(samples, width, x, y));
+        let top = i64::from(sample_top(samples, width, x, y, left as i32));
+        let top_left = i64::from(sample_top_left(samples, width, x, y, left as i32));
+        let top_right = if x + 1 < width && y > 0 {
+            i64::from(samples[(y - 1) * width + x + 1])
+        } else {
+            top
+        };
+        let top_top = if y > 1 {
+            i64::from(samples[(y - 2) * width + x])
+        } else {
+            top
+        };
+
+        let cur_row = if y & 1 == 1 { 0 } else { width + 2 };
+        let prev_row = if y & 1 == 1 { width + 2 } else { 0 };
+        let pos_n = prev_row + x;
+        let pos_ne = if x < width - 1 { pos_n + 1 } else { pos_n };
+        let pos_nw = if x > 0 { pos_n - 1 } else { pos_n };
+
+        let mut weights = [0u32; WP_NUM_PREDICTORS];
+        for (index, weight) in weights.iter_mut().enumerate() {
+            let error = u64::from(self.pred_errors[index][pos_n])
+                + u64::from(self.pred_errors[index][pos_ne])
+                + u64::from(self.pred_errors[index][pos_nw]);
+            *weight = error_weight(error, self.header.weights[index]);
+        }
+
+        let n = add_prediction_bits(top);
+        let w = add_prediction_bits(left);
+        let ne = add_prediction_bits(top_right);
+        let nw = add_prediction_bits(top_left);
+        let nn = add_prediction_bits(top_top);
+
+        let te_w = if x == 0 {
+            0
+        } else {
+            i64::from(self.error[cur_row + x - 1])
+        };
+        let te_n = i64::from(self.error[pos_n]);
+        let te_nw = i64::from(self.error[pos_nw]);
+        let te_ne = i64::from(self.error[pos_ne]);
+        let sum_wn = te_n + te_w;
+
+        let wp_property = te_w.abs().max(te_n.abs()).max(te_nw.abs()).max(te_ne.abs());
+        properties[WP_PROPERTY as usize] =
+            wp_property.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+
+        self.prediction[0] = w + ne - n;
+        self.prediction[1] = n - (((sum_wn + te_ne) * i64::from(self.header.p1c)) >> 5);
+        self.prediction[2] = w - (((sum_wn + te_nw) * i64::from(self.header.p2c)) >> 5);
+        self.prediction[3] = n
+            - ((te_nw * i64::from(self.header.p3ca)
+                + te_n * i64::from(self.header.p3cb)
+                + te_ne * i64::from(self.header.p3cc)
+                + (nn - n) * i64::from(self.header.p3cd)
+                + (nw - w) * i64::from(self.header.p3ce))
+                >> 5);
+
+        self.pred = weighted_average(&self.prediction, weights);
+        if ((te_n ^ te_w) | (te_n ^ te_nw)) > 0 {
+            return ((self.pred + WP_PREDICTION_ROUND) >> WP_PRED_EXTRA_BITS) as i32;
+        }
+
+        let max = w.max(ne).max(n);
+        let min = w.min(ne).min(n);
+        self.pred = self.pred.clamp(min, max);
+        ((self.pred + WP_PREDICTION_ROUND) >> WP_PRED_EXTRA_BITS) as i32
+    }
+
+    fn update_errors(&mut self, value: i32, width: usize, x: usize, y: usize) {
+        let cur_row = if y & 1 == 1 { 0 } else { width + 2 };
+        let prev_row = if y & 1 == 1 { width + 2 } else { 0 };
+        let value = add_prediction_bits(i64::from(value));
+        self.error[cur_row + x] =
+            (self.pred - value).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+        for index in 0..WP_NUM_PREDICTORS {
+            let error = ((self.prediction[index] - value).abs() + WP_PREDICTION_ROUND)
+                >> WP_PRED_EXTRA_BITS;
+            let error = error.min(i64::from(u32::MAX)) as u32;
+            self.pred_errors[index][cur_row + x] = error;
+            self.pred_errors[index][prev_row + x + 1] =
+                self.pred_errors[index][prev_row + x + 1].saturating_add(error);
+        }
+    }
+}
+
+fn add_prediction_bits(value: i64) -> i64 {
+    value << WP_PRED_EXTRA_BITS
+}
+
+fn error_weight(error: u64, max_weight: u32) -> u32 {
+    let shift = (u64::BITS - (error + 1).leading_zeros()) as i32 - 1 - 5;
+    let shift = shift.max(0) as u32;
+    4 + ((u64::from(max_weight) * u64::from(WP_DIV_LOOKUP[(error >> shift) as usize])) >> shift)
+        as u32
+}
+
+fn weighted_average(
+    predictions: &[i64; WP_NUM_PREDICTORS],
+    mut weights: [u32; WP_NUM_PREDICTORS],
+) -> i64 {
+    let weight_sum: u32 = weights.iter().sum();
+    let log_weight = u32::BITS - weight_sum.leading_zeros() - 1;
+    let mut adjusted_sum = 0u32;
+    for weight in &mut weights {
+        *weight >>= log_weight - 4;
+        adjusted_sum += *weight;
+    }
+    let mut sum = i64::from(adjusted_sum / 2) - 1;
+    for (prediction, weight) in predictions.iter().zip(weights) {
+        sum += *prediction * i64::from(weight);
+    }
+    (sum * i64::from(WP_DIV_LOOKUP[(adjusted_sum - 1) as usize])) >> 24
 }
 
 fn fill_pixel_properties(
@@ -697,6 +862,7 @@ fn predict_one(
     width: usize,
     x: usize,
     y: usize,
+    weighted_prediction: i32,
 ) -> Result<i32> {
     let left = sample_left(samples, width, x, y);
     let top = sample_top(samples, width, x, y, left);
@@ -738,11 +904,7 @@ fn predict_one(
             (6 * top - 2 * top_top + 7 * left + left_left + top_right_right + 3 * top_right + 8)
                 / 16
         }
-        ModularPredictor::Weighted => {
-            return Err(Error::InvalidCodestream(
-                "unsupported weighted modular predictor",
-            ));
-        }
+        ModularPredictor::Weighted => weighted_prediction,
     };
     Ok(prediction)
 }

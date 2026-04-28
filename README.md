@@ -29,16 +29,16 @@ decoder needs:
   tree.
 - First-frame modular channel planning after global metadata transforms, with
   per-group channel rectangles for future residual token decoding.
-- A first modular residual token decoder for planned group channels whose MA
-  trees only require supported predictors/properties; unsupported weighted-tree
-  cases remain metadata-only for now.
+- A first modular residual token decoder for planned group channels, including
+  weighted predictor properties/state and sample decoding for simple modular
+  fixtures such as `pq_gradient.jxl`.
 - A small public inspection API through the `jxl` crate.
 - A `jxlinfo-rs` CLI for metadata inspection.
 - Fixture tests against `reference/libjxl/testdata`, with optional comparison
   to the built libjxl `jxlinfo` reference tool.
 
 Pixel reconstruction is not implemented yet. The next decoder slices should add
-weighted-predictor residual support, modular inverse transforms, and then VarDCT.
+modular inverse transforms and raw channel assembly, then VarDCT.
 
 ## Workspace
 
