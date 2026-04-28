@@ -702,15 +702,14 @@ fn inverse_transforms(
     for transform in global_header.transforms.iter().rev() {
         match transform.id {
             TransformId::Palette => {
-                channels = inverse_palette_transform(transform, channels)?;
-                nb_meta_channels =
-                    nb_meta_channels
-                        .checked_sub(1)
-                        .ok_or(Error::InvalidCodestream(
-                            "invalid modular meta channel count",
-                        ))?;
+                let result = inverse_palette_transform(transform, channels, nb_meta_channels)?;
+                channels = result.channels;
+                nb_meta_channels = result.nb_meta_channels;
             }
-            TransformId::Rct | TransformId::Squeeze => {
+            TransformId::Rct => {
+                inverse_rct_transform(transform, &mut channels)?;
+            }
+            TransformId::Squeeze => {
                 return Err(Error::InvalidCodestream(
                     "unsupported modular inverse transform",
                 ));
@@ -729,10 +728,16 @@ fn inverse_transforms(
     })
 }
 
+struct InverseTransformResult {
+    channels: Vec<ModularImageChannel>,
+    nb_meta_channels: usize,
+}
+
 fn inverse_palette_transform(
     transform: &ModularTransform,
     mut channels: Vec<ModularImageChannel>,
-) -> Result<Vec<ModularImageChannel>> {
+    nb_meta_channels: usize,
+) -> Result<InverseTransformResult> {
     let begin_c = transform.begin_c as usize;
     let num_c = transform.num_c.ok_or(Error::InvalidCodestream(
         "palette transform missing channel count",
@@ -748,29 +753,176 @@ fn inverse_palette_transform(
             "palette deltas are not supported yet",
         ));
     }
-    if begin_c != 0 || num_c != 1 {
-        return Err(Error::InvalidCodestream(
-            "only single-channel palette inverse is supported",
-        ));
+    if num_c == 0 {
+        return Err(Error::InvalidCodestream("empty palette transform"));
     }
-    if channels.len() < 2 {
+    let c0 = begin_c
+        .checked_add(1)
+        .ok_or(Error::InvalidCodestream("invalid palette channel index"))?;
+    if c0 >= channels.len() {
         return Err(Error::InvalidCodestream(
             "palette transform has too few channels",
         ));
     }
+    if c0 >= nb_meta_channels {
+        if nb_meta_channels == 0 {
+            return Err(Error::InvalidCodestream(
+                "palette transform without meta channel",
+            ));
+        }
+    } else if nb_meta_channels < 2usize.saturating_sub(num_c) || begin_c + num_c > nb_meta_channels
+    {
+        return Err(Error::InvalidCodestream(
+            "invalid meta palette channel count",
+        ));
+    }
 
-    let palette = channels.remove(0);
+    let palette = &channels[0];
     if palette.width as usize != nb_colors || palette.height != num_c as u32 {
         return Err(Error::InvalidCodestream("invalid palette channel shape"));
     }
-    let indices = channels
-        .get_mut(begin_c)
-        .ok_or(Error::InvalidCodestream("missing palette index channel"))?;
-    for index in &mut indices.samples {
-        let palette_index = (*index).clamp(0, nb_colors.saturating_sub(1) as i32) as usize;
-        *index = palette.samples[palette_index];
+
+    let index_channel = &channels[c0];
+    let width = index_channel.width;
+    let height = index_channel.height;
+    let mut decoded = Vec::with_capacity(num_c);
+    for component in 0..num_c {
+        let mut samples = Vec::with_capacity(index_channel.samples.len());
+        for index in &index_channel.samples {
+            let palette_index = (*index).clamp(0, nb_colors.saturating_sub(1) as i32) as usize;
+            samples.push(palette.samples[component * nb_colors + palette_index]);
+        }
+        decoded.push(ModularImageChannel {
+            width,
+            height,
+            samples,
+        });
     }
-    Ok(channels)
+
+    channels.splice(c0..c0 + 1, decoded);
+    channels.remove(0);
+    let nb_meta_channels = if c0 >= nb_meta_channels {
+        nb_meta_channels
+            .checked_sub(1)
+            .ok_or(Error::InvalidCodestream(
+                "invalid modular meta channel count",
+            ))?
+    } else {
+        nb_meta_channels
+            .checked_sub(2usize.saturating_sub(num_c))
+            .ok_or(Error::InvalidCodestream(
+                "invalid modular meta channel count",
+            ))?
+    };
+    Ok(InverseTransformResult {
+        channels,
+        nb_meta_channels,
+    })
+}
+
+fn inverse_rct_transform(
+    transform: &ModularTransform,
+    channels: &mut [ModularImageChannel],
+) -> Result<()> {
+    let begin_c = transform.begin_c as usize;
+    let rct_type = transform.rct_type.ok_or(Error::InvalidCodestream(
+        "RCT transform missing transform type",
+    ))? as usize;
+    if rct_type >= 42 {
+        return Err(Error::InvalidCodestream("invalid RCT transform type"));
+    }
+    if rct_type == 0 {
+        return Ok(());
+    }
+    let end = begin_c
+        .checked_add(3)
+        .ok_or(Error::InvalidCodestream("invalid RCT channel range"))?;
+    if end > channels.len() {
+        return Err(Error::InvalidCodestream("invalid RCT channel range"));
+    }
+    check_equal_image_channels(&channels[begin_c..end])?;
+    let permutation = rct_type / 7;
+    let custom = rct_type % 7;
+    let out_indices = rct_permutation_indices(begin_c, permutation)?;
+
+    let len = channels[begin_c].samples.len();
+    let in0 = channels[begin_c].samples.clone();
+    let in1 = channels[begin_c + 1].samples.clone();
+    let in2 = channels[begin_c + 2].samples.clone();
+    let mut out0 = vec![0; len];
+    let mut out1 = vec![0; len];
+    let mut out2 = vec![0; len];
+
+    for index in 0..len {
+        let (a, b, c) = inverse_rct_pixel(custom, in0[index], in1[index], in2[index])?;
+        out0[index] = a;
+        out1[index] = b;
+        out2[index] = c;
+    }
+
+    channels[out_indices[0]].samples = out0;
+    channels[out_indices[1]].samples = out1;
+    channels[out_indices[2]].samples = out2;
+    Ok(())
+}
+
+fn check_equal_image_channels(channels: &[ModularImageChannel]) -> Result<()> {
+    if channels.len() != 3 {
+        return Err(Error::InvalidCodestream("invalid RCT channel range"));
+    }
+    let first = &channels[0];
+    if channels[1..].iter().any(|channel| {
+        channel.width != first.width
+            || channel.height != first.height
+            || channel.samples.len() != first.samples.len()
+    }) {
+        return Err(Error::InvalidCodestream("RCT channel dimensions differ"));
+    }
+    Ok(())
+}
+
+fn rct_permutation_indices(begin_c: usize, permutation: usize) -> Result<[usize; 3]> {
+    if permutation >= 6 {
+        return Err(Error::InvalidCodestream("invalid RCT permutation"));
+    }
+    Ok([
+        begin_c + permutation % 3,
+        begin_c + (permutation + 1 + permutation / 3) % 3,
+        begin_c + (permutation + 2 - permutation / 3) % 3,
+    ])
+}
+
+fn inverse_rct_pixel(
+    custom: usize,
+    first: i32,
+    second: i32,
+    third: i32,
+) -> Result<(i32, i32, i32)> {
+    if custom == 6 {
+        let y = first;
+        let co = second;
+        let cg = third;
+        let tmp = y.wrapping_sub(cg >> 1);
+        let green = cg.wrapping_add(tmp);
+        let blue = tmp.wrapping_sub(co >> 1);
+        let red = blue.wrapping_add(co);
+        return Ok((red, green, blue));
+    }
+    if custom > 6 {
+        return Err(Error::InvalidCodestream("invalid RCT transform type"));
+    }
+    let mut second = second;
+    let mut third = third;
+    if custom & 1 != 0 {
+        third = third.wrapping_add(first);
+    }
+    match custom >> 1 {
+        0 => {}
+        1 => second = second.wrapping_add(first),
+        2 => second = second.wrapping_add(first.wrapping_add(third) >> 1),
+        _ => return Err(Error::InvalidCodestream("invalid RCT transform type")),
+    }
+    Ok((first, second, third))
 }
 
 fn channel_sample_count(width: u32, height: u32) -> Result<usize> {
@@ -1977,4 +2129,73 @@ fn validate_tree(tree: &[MaTreeNode]) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inverse_palette_expands_multi_channel_palette() {
+        let transform = ModularTransform {
+            id: TransformId::Palette,
+            begin_c: 0,
+            rct_type: None,
+            num_c: Some(3),
+            nb_colors: Some(2),
+            nb_deltas: Some(0),
+            predictor: Some(ModularPredictor::Zero),
+            squeezes: Vec::new(),
+        };
+        let channels = vec![
+            image_channel(2, 3, &[10, 20, 30, 40, 50, 60]),
+            image_channel(2, 2, &[0, 1, 1, 0]),
+        ];
+
+        let result = inverse_palette_transform(&transform, channels, 1).unwrap();
+
+        assert_eq!(result.nb_meta_channels, 0);
+        assert_eq!(result.channels.len(), 3);
+        assert_eq!(result.channels[0].samples, vec![10, 20, 20, 10]);
+        assert_eq!(result.channels[1].samples, vec![30, 40, 40, 30]);
+        assert_eq!(result.channels[2].samples, vec![50, 60, 60, 50]);
+    }
+
+    #[test]
+    fn inverse_rct_applies_custom_transform_and_permutation() {
+        let transform = ModularTransform {
+            id: TransformId::Rct,
+            begin_c: 0,
+            rct_type: Some(10),
+            num_c: None,
+            nb_colors: None,
+            nb_deltas: None,
+            predictor: None,
+            squeezes: Vec::new(),
+        };
+        let mut channels = vec![
+            image_channel(2, 1, &[10, 20]),
+            image_channel(2, 1, &[1, 2]),
+            image_channel(2, 1, &[5, 6]),
+        ];
+
+        inverse_rct_transform(&transform, &mut channels).unwrap();
+
+        assert_eq!(channels[0].samples, vec![15, 26]);
+        assert_eq!(channels[1].samples, vec![10, 20]);
+        assert_eq!(channels[2].samples, vec![11, 22]);
+    }
+
+    #[test]
+    fn inverse_rct_supports_ycocg() {
+        assert_eq!(inverse_rct_pixel(6, 100, 20, 10).unwrap(), (105, 105, 85));
+    }
+
+    fn image_channel(width: u32, height: u32, samples: &[i32]) -> ModularImageChannel {
+        ModularImageChannel {
+            width,
+            height,
+            samples: samples.to_vec(),
+        }
+    }
 }
