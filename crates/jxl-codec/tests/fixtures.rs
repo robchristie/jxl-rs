@@ -1,6 +1,7 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use jxl_codec::{
@@ -118,6 +119,109 @@ fn agrees_with_reference_jxlinfo_when_available() {
             path.display()
         );
     }
+}
+
+#[test]
+fn assembled_rgb_modular_pixels_match_reference_djxl_when_available() {
+    let Some(djxl) = reference_djxl() else {
+        eprintln!("skipping reference djxl comparison; tool is not built");
+        return;
+    };
+
+    let fixture = workspace_path("crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl");
+    let output = unique_temp_path("jxl-rs-reference", "ppm");
+    let djxl_output = Command::new(&djxl)
+        .arg(&fixture)
+        .arg(&output)
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        djxl_output.status.success(),
+        "reference djxl failed for {}: {}",
+        fixture.display(),
+        String::from_utf8_lossy(&djxl_output.stderr)
+    );
+
+    let reference = std::fs::read(&output).unwrap();
+    let _ = std::fs::remove_file(&output);
+    let reference = parse_ppm16_rgb(&reference);
+    assert_eq!(reference.width, 64);
+    assert_eq!(reference.height, 64);
+
+    let codestream = parse_fixture("crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl");
+    let modular = codestream.first_frame_modular.as_ref().unwrap();
+    let image = modular.image.as_ref().unwrap();
+    assert_eq!(image.channels.len(), 3);
+
+    let mut actual = Vec::with_capacity(reference.samples.len());
+    for index in 0..(image.width as usize * image.height as usize) {
+        for channel in &image.channels {
+            actual.push(u16::try_from(channel.samples[index]).unwrap());
+        }
+    }
+
+    assert_eq!(actual, reference.samples);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Ppm16Rgb {
+    width: u32,
+    height: u32,
+    samples: Vec<u16>,
+}
+
+fn parse_ppm16_rgb(bytes: &[u8]) -> Ppm16Rgb {
+    let (magic, offset) = netpbm_token(bytes, 0);
+    assert_eq!(magic, b"P6");
+    let (width, offset) = netpbm_token(bytes, offset);
+    let (height, offset) = netpbm_token(bytes, offset);
+    let (maxval, mut offset) = netpbm_token(bytes, offset);
+    assert_eq!(maxval, b"65535");
+    assert!(
+        offset < bytes.len() && bytes[offset].is_ascii_whitespace(),
+        "PPM header was not followed by binary sample data"
+    );
+    offset += 1;
+
+    let width = parse_ascii_u32(width);
+    let height = parse_ascii_u32(height);
+    let expected_bytes = width as usize * height as usize * 3 * 2;
+    let data = &bytes[offset..];
+    assert_eq!(data.len(), expected_bytes);
+    let samples = data
+        .chunks_exact(2)
+        .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+        .collect();
+    Ppm16Rgb {
+        width,
+        height,
+        samples,
+    }
+}
+
+fn netpbm_token(bytes: &[u8], mut offset: usize) -> (&[u8], usize) {
+    loop {
+        while offset < bytes.len() && bytes[offset].is_ascii_whitespace() {
+            offset += 1;
+        }
+        if offset < bytes.len() && bytes[offset] == b'#' {
+            while offset < bytes.len() && bytes[offset] != b'\n' {
+                offset += 1;
+            }
+            continue;
+        }
+        break;
+    }
+    let start = offset;
+    while offset < bytes.len() && !bytes[offset].is_ascii_whitespace() {
+        offset += 1;
+    }
+    (&bytes[start..offset], offset)
+}
+
+fn parse_ascii_u32(bytes: &[u8]) -> u32 {
+    std::str::from_utf8(bytes).unwrap().parse().unwrap()
 }
 
 #[test]
@@ -402,6 +506,29 @@ fn reference_jxlinfo() -> Option<PathBuf> {
 
     let default = workspace_path("reference/libjxl/build-rs-oracle/tools/jxlinfo");
     default.is_file().then_some(default)
+}
+
+fn reference_djxl() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("JXL_RS_REFERENCE_DJXL") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    let default = workspace_path("reference/libjxl/build-rs-oracle/tools/djxl");
+    default.is_file().then_some(default)
+}
+
+fn unique_temp_path(prefix: &str, extension: &str) -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "{prefix}-{}-{nanos}.{extension}",
+        std::process::id()
+    ))
 }
 
 fn parse_fixture(path: &str) -> jxl_codec::Codestream {
