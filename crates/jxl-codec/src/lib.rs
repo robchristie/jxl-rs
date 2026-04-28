@@ -10,6 +10,7 @@ pub mod codestream;
 pub mod container;
 pub mod error;
 pub mod metadata;
+pub mod transform;
 
 pub use codestream::{BasicInfo, Codestream, SizeHeader, parse_codestream};
 pub use container::{
@@ -21,3 +22,4 @@ pub use metadata::{
     ImageMetadata, Orientation, PreviewHeader, Primaries, RenderingIntent, ToneMapping,
     TransferFunction, WhitePoint,
 };
+pub use transform::{CustomTransformData, OpsinInverseMatrix};

@@ -12,15 +12,16 @@ decoder needs:
 - Top-level image metadata parsing: orientation, intrinsic/preview/animation
   flags, bit depth, extra channels, XYB/original-profile flag, color encoding,
   and tone mapping.
+- Custom transform-data parsing after basic info, including optional custom
+  opsin inverse matrix and upsampling kernel weights.
 - A small public inspection API through the `jxl` crate.
 - A `jxlinfo-rs` CLI for metadata inspection.
 - Fixture tests against `reference/libjxl/testdata`, with optional comparison
   to the built libjxl `jxlinfo` reference tool.
 
 Pixel reconstruction is not implemented yet. The next decoder slices should add
-transform-data parsing, ICC profile parsing when the header requests ICC, frame
-header parsing, TOC parsing, entropy readers, modular image decoding, and then
-VarDCT.
+ICC profile parsing when the header requests ICC, frame header parsing, TOC
+parsing, entropy readers, modular image decoding, and then VarDCT.
 
 ## Workspace
 

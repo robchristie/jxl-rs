@@ -6,9 +6,9 @@
 //! C-style event API.
 
 pub use jxl_codec::{
-    BasicInfo, BitDepth, BoxRecord, ColorEncoding, ColorSpace, Container, Error, ExtraChannelInfo,
-    ExtraChannelType, FileFormat, ImageMetadata, Orientation, Primaries, RenderingIntent, Result,
-    ToneMapping, TransferFunction, WhitePoint,
+    BasicInfo, BitDepth, BoxRecord, ColorEncoding, ColorSpace, Container, CustomTransformData,
+    Error, ExtraChannelInfo, ExtraChannelType, FileFormat, ImageMetadata, OpsinInverseMatrix,
+    Orientation, Primaries, RenderingIntent, Result, ToneMapping, TransferFunction, WhitePoint,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +18,7 @@ pub struct ImageInfo {
     pub height: u32,
     pub basic_info: BasicInfo,
     pub metadata: ImageMetadata,
+    pub transform_data: CustomTransformData,
     pub boxes: Vec<BoxRecord>,
 }
 
@@ -29,6 +30,7 @@ pub fn inspect(input: &[u8]) -> Result<ImageInfo> {
         height: codestream.basic_info.height,
         basic_info: codestream.basic_info,
         metadata: codestream.metadata,
+        transform_data: codestream.transform_data,
         boxes: extracted
             .container
             .map(|container| container.boxes)

@@ -135,6 +135,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 channel.name
             );
         }
+        println!(
+            "Custom transform data: {}",
+            if info.transform_data.is_default() {
+                "default".to_string()
+            } else {
+                format!(
+                    "custom_weights_mask=0x{:x}, custom_opsin_matrix={}",
+                    info.transform_data.custom_weights_mask,
+                    info.transform_data.opsin_inverse_matrix.is_some()
+                )
+            }
+        );
     }
 
     Ok(())

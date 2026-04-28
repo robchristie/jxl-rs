@@ -1,6 +1,7 @@
 use crate::bitstream::{BitReader, bits_offset};
 use crate::error::{Error, Result};
 use crate::metadata::{ImageMetadata, read_image_metadata};
+use crate::transform::{CustomTransformData, read_custom_transform_data};
 
 pub const CODESTREAM_SIGNATURE: [u8; 2] = [0xff, 0x0a];
 
@@ -8,6 +9,7 @@ pub const CODESTREAM_SIGNATURE: [u8; 2] = [0xff, 0x0a];
 pub struct Codestream {
     pub basic_info: BasicInfo,
     pub metadata: ImageMetadata,
+    pub transform_data: CustomTransformData,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -47,6 +49,7 @@ pub fn parse_codestream(input: &[u8]) -> Result<Codestream> {
     let mut reader = BitReader::new(payload);
     let size = read_size_header(&mut reader)?;
     let metadata = read_image_metadata(&mut reader)?;
+    let transform_data = read_custom_transform_data(&mut reader, metadata.xyb_encoded)?;
 
     Ok(Codestream {
         basic_info: BasicInfo {
@@ -78,6 +81,7 @@ pub fn parse_codestream(input: &[u8]) -> Result<Codestream> {
             header_bits_consumed: CODESTREAM_SIGNATURE.len() * 8 + reader.bits_consumed(),
         },
         metadata,
+        transform_data,
     })
 }
 

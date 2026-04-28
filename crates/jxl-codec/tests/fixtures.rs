@@ -53,6 +53,10 @@ fn parses_checked_in_fixture_dimensions() {
         assert_eq!(extracted.format, expected_format, "{path}");
         assert_eq!(codestream.basic_info.width, expected_width, "{path}");
         assert_eq!(codestream.basic_info.height, expected_height, "{path}");
+        assert!(
+            codestream.transform_data.is_default(),
+            "fixture unexpectedly uses custom transform data: {path}"
+        );
     }
 }
 
