@@ -50,6 +50,13 @@ pub struct AlphaInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RgbaImage {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PixelData {
     U8(Vec<u8>),
     U16(Vec<u16>),
@@ -136,6 +143,19 @@ pub fn decode(input: &[u8]) -> Result<DecodedImage> {
     }
 }
 
+pub fn decode_rgba8(input: &[u8]) -> Result<RgbaImage> {
+    let decoded = decode(input)?;
+    let pixels = match &decoded.pixels {
+        PixelData::U8(samples) => rgba8_from_u8(&decoded, samples)?,
+        PixelData::U16(samples) => rgba8_from_u16(&decoded, samples)?,
+    };
+    Ok(RgbaImage {
+        width: decoded.width,
+        height: decoded.height,
+        pixels,
+    })
+}
+
 fn decode_alpha_info(metadata: &ImageMetadata) -> Result<Option<AlphaInfo>> {
     if metadata.extra_channels.is_empty() {
         return Ok(None);
@@ -216,6 +236,85 @@ fn checked_sample(sample: i32, max_sample: u32) -> Result<u32> {
         ));
     }
     Ok(sample as u32)
+}
+
+fn rgba8_from_u8(image: &DecodedImage, samples: &[u8]) -> Result<Vec<u8>> {
+    let input_channels = image_output_channels(image);
+    let sample_count = decoded_sample_count(image)?;
+    if samples.len() != sample_count * input_channels {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+    let mut rgba = Vec::with_capacity(sample_count * 4);
+    for pixel in samples.chunks_exact(input_channels) {
+        append_rgba8_pixel(
+            &mut rgba,
+            image.color_channels,
+            image.alpha.is_some(),
+            |index| pixel[index],
+        )?;
+    }
+    Ok(rgba)
+}
+
+fn rgba8_from_u16(image: &DecodedImage, samples: &[u16]) -> Result<Vec<u8>> {
+    let input_channels = image_output_channels(image);
+    let sample_count = decoded_sample_count(image)?;
+    if samples.len() != sample_count * input_channels {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+    let mut rgba = Vec::with_capacity(sample_count * 4);
+    for pixel in samples.chunks_exact(input_channels) {
+        append_rgba8_pixel(
+            &mut rgba,
+            image.color_channels,
+            image.alpha.is_some(),
+            |index| scale_sample_to_u8(u32::from(pixel[index]), image.bit_depth),
+        )?;
+    }
+    Ok(rgba)
+}
+
+fn append_rgba8_pixel(
+    rgba: &mut Vec<u8>,
+    color_channels: usize,
+    has_alpha: bool,
+    sample: impl Fn(usize) -> u8,
+) -> Result<()> {
+    match color_channels {
+        1 => {
+            let gray = sample(0);
+            rgba.extend_from_slice(&[gray, gray, gray]);
+        }
+        3 => {
+            rgba.extend_from_slice(&[sample(0), sample(1), sample(2)]);
+        }
+        _ => return Err(Error::Unsupported("unsupported color channel count")),
+    }
+    rgba.push(if has_alpha {
+        sample(color_channels)
+    } else {
+        255
+    });
+    Ok(())
+}
+
+fn image_output_channels(image: &DecodedImage) -> usize {
+    image.color_channels + usize::from(image.alpha.is_some())
+}
+
+fn decoded_sample_count(image: &DecodedImage) -> Result<usize> {
+    (image.width as usize)
+        .checked_mul(image.height as usize)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))
+}
+
+fn scale_sample_to_u8(sample: u32, bit_depth: u32) -> u8 {
+    if bit_depth <= 8 {
+        sample as u8
+    } else {
+        let max = (1u32 << bit_depth) - 1;
+        ((sample * 255 + max / 2) / max) as u8
+    }
 }
 
 #[cfg(test)]
@@ -430,6 +529,116 @@ mod tests {
         );
         assert_eq!(decoded.bit_depth, 8);
         assert_eq!(decoded_samples_u16(&decoded), reference.samples);
+    }
+
+    #[test]
+    fn decode_rgba8_expands_gray_fixture() {
+        let bytes = std::fs::read(workspace_path(
+            "reference/libjxl/testdata/jxl/pq_gradient.jxl",
+        ))
+        .unwrap();
+        let raw = decode(&bytes).unwrap();
+        let rgba = decode_rgba8(&bytes).unwrap();
+
+        assert_eq!(rgba.width, 1088);
+        assert_eq!(rgba.height, 64);
+        assert_eq!(rgba.pixels.len(), 1088 * 64 * 4);
+        let PixelData::U16(samples) = raw.pixels else {
+            panic!("expected 16-bit raw samples");
+        };
+        let gray = scale_sample_to_u8(u32::from(samples[0]), raw.bit_depth);
+        assert_eq!(&rgba.pixels[..4], &[gray, gray, gray, 255]);
+    }
+
+    #[test]
+    fn decode_rgba8_converts_rgb_fixture() {
+        let bytes = std::fs::read(workspace_path(
+            "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
+        ))
+        .unwrap();
+        let raw = decode(&bytes).unwrap();
+        let rgba = decode_rgba8(&bytes).unwrap();
+
+        assert_eq!(rgba.width, 64);
+        assert_eq!(rgba.height, 64);
+        assert_eq!(rgba.pixels.len(), 64 * 64 * 4);
+        let PixelData::U16(samples) = raw.pixels else {
+            panic!("expected 16-bit raw samples");
+        };
+        assert_eq!(
+            &rgba.pixels[..4],
+            &[
+                scale_sample_to_u8(u32::from(samples[0]), raw.bit_depth),
+                scale_sample_to_u8(u32::from(samples[1]), raw.bit_depth),
+                scale_sample_to_u8(u32::from(samples[2]), raw.bit_depth),
+                255,
+            ]
+        );
+    }
+
+    #[test]
+    fn decode_rgba8_preserves_alpha_when_available() {
+        let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+            eprintln!("skipping rgba8 alpha comparison; reference tools are not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-rgba8-alpha-source", "pam");
+        let encoded = unique_temp_path("jxl-rgba8-alpha", "jxl");
+        let reference_output = unique_temp_path("jxl-rgba8-alpha-reference", "pam");
+        write_alpha_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "0", "-m", "1", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let djxl_output = Command::new(&djxl)
+            .arg(&encoded)
+            .arg(&reference_output)
+            .arg("--quiet")
+            .output()
+            .unwrap();
+        assert!(
+            djxl_output.status.success(),
+            "reference djxl failed: {}",
+            String::from_utf8_lossy(&djxl_output.stderr)
+        );
+
+        let reference = std::fs::read(&reference_output).unwrap();
+        let reference = parse_pam_rgba(&reference);
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let _ = std::fs::remove_file(&reference_output);
+        let rgba = decode_rgba8(&encoded_bytes).unwrap();
+
+        assert_eq!(rgba.width, reference.width);
+        assert_eq!(rgba.height, reference.height);
+        assert_eq!(
+            rgba.pixels,
+            reference
+                .samples
+                .iter()
+                .copied()
+                .map(|sample| sample as u8)
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn scales_samples_to_u8_with_rounding() {
+        assert_eq!(scale_sample_to_u8(0, 16), 0);
+        assert_eq!(scale_sample_to_u8(65_535, 16), 255);
+        assert_eq!(scale_sample_to_u8(32_768, 16), 128);
+        assert_eq!(scale_sample_to_u8(128, 8), 128);
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
