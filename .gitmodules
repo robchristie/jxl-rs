@@ -1,0 +1,3 @@
+[submodule "reference/libjxl"]
+	path = reference/libjxl
+	url = https://github.com/libjxl/libjxl.git
