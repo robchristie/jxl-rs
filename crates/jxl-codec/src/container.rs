@@ -1,4 +1,5 @@
-use crate::codestream::{CODESTREAM_SIGNATURE, Codestream, parse_codestream};
+use crate::codestream::{CODESTREAM_SIGNATURE, Codestream, parse_codestream_with_config};
+use crate::decode::DecodeConfig;
 use crate::error::{Error, Result};
 
 pub const CONTAINER_SIGNATURE: [u8; 12] = [
@@ -106,8 +107,15 @@ pub fn check_signature(input: &[u8]) -> Signature {
 }
 
 pub fn parse_file(input: &[u8]) -> Result<(ExtractedCodestream, Codestream)> {
+    parse_file_with_config(input, DecodeConfig::default())
+}
+
+pub fn parse_file_with_config(
+    input: &[u8],
+    config: DecodeConfig,
+) -> Result<(ExtractedCodestream, Codestream)> {
     let extracted = extract_codestream(input)?;
-    let codestream = parse_codestream(&extracted.codestream)?;
+    let codestream = parse_codestream_with_config(&extracted.codestream, config)?;
     Ok((extracted, codestream))
 }
 

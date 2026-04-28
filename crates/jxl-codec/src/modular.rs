@@ -1,4 +1,5 @@
 use crate::bitstream::{BitReader, bits_offset, val};
+use crate::decode::{DecodeConfig, ModularGroupExecution};
 use crate::entropy::{AnsCode, AnsSymbolReader, decode_histograms};
 use crate::error::{Error, Result};
 use crate::frame::{ColorTransform, FrameEncoding, FrameHeader};
@@ -61,6 +62,16 @@ struct ImageRect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ModularGroupExecutor {
     Serial,
+    RequestedThreads(usize),
+}
+
+impl From<ModularGroupExecution> for ModularGroupExecutor {
+    fn from(execution: ModularGroupExecution) -> Self {
+        match execution {
+            ModularGroupExecution::Serial => Self::Serial,
+            ModularGroupExecution::RequestedThreads(threads) => Self::RequestedThreads(threads),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,6 +323,7 @@ pub fn read_modular_frame_metadata(
     metadata: &ImageMetadata,
     frame_header: &FrameHeader,
     frame_data: &FrameData,
+    config: DecodeConfig,
 ) -> Result<Option<ModularFrameMetadata>> {
     if frame_header.encoding != FrameEncoding::Modular {
         return Ok(None);
@@ -326,7 +338,7 @@ pub fn read_modular_frame_metadata(
         frame_header,
         frame_data,
         &plan,
-        ModularGroupExecutor::Serial,
+        ModularGroupExecutor::from(config.modular_group_execution),
     )
     .ok();
     let image = residuals
@@ -590,6 +602,10 @@ impl ModularGroupExecutor {
     ) -> Vec<&ModularSectionMetadata> {
         match self {
             Self::Serial => select_modular_groups_for_rect(groups, rect),
+            Self::RequestedThreads(threads) => {
+                debug_assert!(threads > 0);
+                select_modular_groups_for_rect(groups, rect)
+            }
         }
     }
 
@@ -601,6 +617,10 @@ impl ModularGroupExecutor {
     ) -> Result<Vec<ModularDecodedGroup>> {
         match self {
             Self::Serial => decode_modular_group_residuals_serial(codestream, groups, global_tree),
+            Self::RequestedThreads(threads) => {
+                debug_assert!(threads > 0);
+                decode_modular_group_residuals_serial(codestream, groups, global_tree)
+            }
         }
     }
 }

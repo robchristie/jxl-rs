@@ -179,22 +179,22 @@ impl Decoder {
 
     pub fn decode_channels(&self, input: &[u8]) -> Result<DecodedChannels> {
         self.validate_options()?;
-        decode_channels_buffered(input)
+        decode_channels_buffered(input, self.codec_config())
     }
 
     pub fn decode(&self, input: &[u8]) -> Result<DecodedImage> {
         self.validate_options()?;
-        decode_buffered(input)
+        decode_buffered(input, self.codec_config())
     }
 
     pub fn decode_rgba8(&self, input: &[u8]) -> Result<RgbaImage> {
         self.validate_options()?;
-        decode_rgba8_buffered(input)
+        decode_rgba8_buffered(input, self.codec_config())
     }
 
     pub fn decode_rgba16(&self, input: &[u8]) -> Result<Rgba16Image> {
         self.validate_options()?;
-        decode_rgba16_buffered(input)
+        decode_rgba16_buffered(input, self.codec_config())
     }
 
     fn validate_options(&self) -> Result<()> {
@@ -208,6 +208,19 @@ impl Decoder {
             return Err(Error::Unsupported("zero decoder threads"));
         }
         Ok(())
+    }
+
+    fn codec_config(&self) -> jxl_codec::DecodeConfig {
+        jxl_codec::DecodeConfig {
+            modular_group_execution: match self.options.threads {
+                ThreadingMode::Auto | ThreadingMode::Single => {
+                    jxl_codec::ModularGroupExecution::Serial
+                }
+                ThreadingMode::Threads(threads) => {
+                    jxl_codec::ModularGroupExecution::RequestedThreads(threads)
+                }
+            },
+        }
     }
 }
 
@@ -247,8 +260,11 @@ pub fn decode_rgba16(input: &[u8]) -> Result<Rgba16Image> {
     Decoder::new().decode_rgba16(input)
 }
 
-fn decode_channels_buffered(input: &[u8]) -> Result<DecodedChannels> {
-    let (_, codestream) = jxl_codec::parse_file(input)?;
+fn decode_channels_buffered(
+    input: &[u8],
+    config: jxl_codec::DecodeConfig,
+) -> Result<DecodedChannels> {
+    let (_, codestream) = jxl_codec::parse_file_with_config(input, config)?;
     if codestream.basic_info.have_animation {
         return Err(Error::Unsupported("animated image decode"));
     }
@@ -291,8 +307,8 @@ fn decode_channels_buffered(input: &[u8]) -> Result<DecodedChannels> {
     })
 }
 
-fn decode_buffered(input: &[u8]) -> Result<DecodedImage> {
-    let channels = decode_channels_buffered(input)?;
+fn decode_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<DecodedImage> {
+    let channels = decode_channels_buffered(input, config)?;
     let alpha = decode_interleaved_alpha(&channels)?;
     let output_channels = channels.color_channels + usize::from(alpha.is_some());
     if channels.channels.len() != output_channels {
@@ -327,8 +343,8 @@ fn decode_buffered(input: &[u8]) -> Result<DecodedImage> {
     }
 }
 
-fn decode_rgba8_buffered(input: &[u8]) -> Result<RgbaImage> {
-    let decoded = decode_buffered(input)?;
+fn decode_rgba8_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<RgbaImage> {
+    let decoded = decode_buffered(input, config)?;
     let pixels = match &decoded.pixels {
         PixelData::U8(samples) => rgba8_from_u8(&decoded, samples)?,
         PixelData::U16(samples) => rgba8_from_u16(&decoded, samples)?,
@@ -340,8 +356,8 @@ fn decode_rgba8_buffered(input: &[u8]) -> Result<RgbaImage> {
     })
 }
 
-fn decode_rgba16_buffered(input: &[u8]) -> Result<Rgba16Image> {
-    let decoded = decode_buffered(input)?;
+fn decode_rgba16_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<Rgba16Image> {
+    let decoded = decode_buffered(input, config)?;
     let pixels = match &decoded.pixels {
         PixelData::U8(samples) => rgba16_from_u8(&decoded, samples)?,
         PixelData::U16(samples) => rgba16_from_u16(&decoded, samples)?,

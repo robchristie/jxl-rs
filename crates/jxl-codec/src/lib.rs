@@ -8,6 +8,7 @@
 pub mod bitstream;
 pub mod codestream;
 pub mod container;
+pub mod decode;
 pub mod error;
 pub mod frame;
 pub mod frame_data;
@@ -18,10 +19,14 @@ pub mod transform;
 pub(crate) mod entropy;
 pub(crate) mod icc;
 
-pub use codestream::{BasicInfo, Codestream, SizeHeader, parse_codestream};
+pub use codestream::{
+    BasicInfo, Codestream, SizeHeader, parse_codestream, parse_codestream_with_config,
+};
 pub use container::{
     BoxRecord, Container, ContainerBox, ExtractedCodestream, FileFormat, Signature, parse_file,
+    parse_file_with_config,
 };
+pub use decode::{DecodeConfig, ModularGroupExecution};
 pub use error::{Error, Result};
 pub use frame::{
     AnimationFrame as FrameAnimation, BlendMode, BlendingInfo, ColorTransform, FrameEncoding,

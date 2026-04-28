@@ -5,8 +5,9 @@ use std::{
 };
 
 use jxl_codec::{
-    BlendMode, ColorSpace, ColorTransform, ExtraChannelType, FileFormat, FrameEncoding,
-    FrameSectionKind, FrameType, TransferFunction, TransformId, parse_file,
+    BlendMode, ColorSpace, ColorTransform, DecodeConfig, ExtraChannelType, FileFormat,
+    FrameEncoding, FrameSectionKind, FrameType, ModularGroupExecution, TransferFunction,
+    TransformId, parse_file, parse_file_with_config,
 };
 
 #[test]
@@ -76,6 +77,68 @@ fn parses_checked_in_fixture_dimensions() {
             "fixture first frame data was not parsed: {path}"
         );
     }
+}
+
+#[test]
+fn configured_parse_matches_default_serial_parse() {
+    let bytes = std::fs::read(workspace_path(
+        "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
+    ))
+    .unwrap();
+    let default = parse_file(&bytes).unwrap();
+    let configured = parse_file_with_config(
+        &bytes,
+        DecodeConfig {
+            modular_group_execution: ModularGroupExecution::Serial,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(configured, default);
+}
+
+#[test]
+fn requested_threads_parse_matches_serial_for_now() {
+    let bytes = std::fs::read(workspace_path(
+        "reference/libjxl/testdata/jxl/pq_gradient.jxl",
+    ))
+    .unwrap();
+    let serial = parse_file_with_config(
+        &bytes,
+        DecodeConfig {
+            modular_group_execution: ModularGroupExecution::Serial,
+        },
+    )
+    .unwrap();
+    let requested_threads = parse_file_with_config(
+        &bytes,
+        DecodeConfig {
+            modular_group_execution: ModularGroupExecution::RequestedThreads(2),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(requested_threads, serial);
+}
+
+#[test]
+fn rejects_zero_requested_threads() {
+    let bytes = std::fs::read(workspace_path(
+        "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
+    ))
+    .unwrap();
+    let err = parse_file_with_config(
+        &bytes,
+        DecodeConfig {
+            modular_group_execution: ModularGroupExecution::RequestedThreads(0),
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        jxl_codec::Error::Unsupported("zero modular group threads")
+    );
 }
 
 #[test]

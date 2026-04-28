@@ -1,4 +1,5 @@
 use crate::bitstream::{BitReader, bits_offset};
+use crate::decode::DecodeConfig;
 use crate::error::{Error, Result};
 use crate::frame::{FrameHeader, read_frame_header};
 use crate::frame_data::{FrameData, read_frame_data};
@@ -51,6 +52,11 @@ pub struct SizeHeader {
 }
 
 pub fn parse_codestream(input: &[u8]) -> Result<Codestream> {
+    parse_codestream_with_config(input, DecodeConfig::default())
+}
+
+pub fn parse_codestream_with_config(input: &[u8], config: DecodeConfig) -> Result<Codestream> {
+    let config = config.validate()?;
     let payload = input
         .strip_prefix(&CODESTREAM_SIGNATURE)
         .ok_or(Error::InvalidCodestream("missing codestream signature"))?;
@@ -82,7 +88,7 @@ pub fn parse_codestream(input: &[u8]) -> Result<Codestream> {
     };
     let first_frame_modular = match (&first_frame, &first_frame_data) {
         (Some(frame), Some(frame_data)) => {
-            read_modular_frame_metadata(input, &metadata, frame, frame_data)?
+            read_modular_frame_metadata(input, &metadata, frame, frame_data, config)?
         }
         _ => None,
     };
