@@ -106,6 +106,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             animation.have_timecodes
         );
     }
+    if let Some(frame) = &info.first_frame {
+        println!(
+            "First frame: {}, {}, {}x{} at ({},{}), passes={}, groups={}",
+            frame.encoding,
+            frame.frame_type,
+            frame.frame_size.width,
+            frame.frame_size.height,
+            frame.frame_origin.x0,
+            frame.frame_origin.y0,
+            frame.passes.num_passes,
+            frame.group_layout.num_groups
+        );
+        if frame.animation_frame.duration != 0 {
+            println!("First frame duration: {}", frame.animation_frame.duration);
+        }
+    } else {
+        println!("First frame: not parsed (ICC profile parsing is not implemented yet)");
+    }
 
     if args.verbose {
         for record in info.boxes {
@@ -147,6 +165,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 )
             }
         );
+        if let Some(frame) = &info.first_frame {
+            println!("First frame flags: 0x{:x}", frame.flags);
+            println!("First frame color transform: {}", frame.color_transform);
+            println!(
+                "First frame upsampling: color={}, extra={:?}",
+                frame.upsampling, frame.extra_channel_upsampling
+            );
+            println!(
+                "First frame blending: mode=\"{}\" source={} alpha={} clamp={}",
+                frame.blending_info.mode,
+                frame.blending_info.source,
+                frame.blending_info.alpha_channel,
+                frame.blending_info.clamp
+            );
+            println!(
+                "First frame group layout: dim={} groups={}x{}",
+                frame.group_layout.group_dim,
+                frame.group_layout.groups_x,
+                frame.group_layout.groups_y
+            );
+            println!(
+                "First frame loop filter: gaborish={} epf_iters={}",
+                frame.loop_filter.gab, frame.loop_filter.epf_iters
+            );
+        }
     }
 
     Ok(())

@@ -9,6 +9,7 @@ pub mod bitstream;
 pub mod codestream;
 pub mod container;
 pub mod error;
+pub mod frame;
 pub mod metadata;
 pub mod transform;
 
@@ -17,6 +18,11 @@ pub use container::{
     BoxRecord, Container, ContainerBox, ExtractedCodestream, FileFormat, Signature, parse_file,
 };
 pub use error::{Error, Result};
+pub use frame::{
+    AnimationFrame as FrameAnimation, BlendMode, BlendingInfo, ColorTransform, FrameEncoding,
+    FrameGroupLayout, FrameHeader, FrameOrigin, FrameSize, FrameType, LoopFilter, Passes,
+    YCbCrChromaSubsampling,
+};
 pub use metadata::{
     AnimationHeader, BitDepth, ColorEncoding, ColorSpace, ExtraChannelInfo, ExtraChannelType,
     ImageMetadata, Orientation, PreviewHeader, Primaries, RenderingIntent, ToneMapping,

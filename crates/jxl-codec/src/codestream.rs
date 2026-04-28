@@ -1,5 +1,6 @@
 use crate::bitstream::{BitReader, bits_offset};
 use crate::error::{Error, Result};
+use crate::frame::{FrameHeader, read_frame_header};
 use crate::metadata::{ImageMetadata, read_image_metadata};
 use crate::transform::{CustomTransformData, read_custom_transform_data};
 
@@ -10,6 +11,7 @@ pub struct Codestream {
     pub basic_info: BasicInfo,
     pub metadata: ImageMetadata,
     pub transform_data: CustomTransformData,
+    pub first_frame: Option<FrameHeader>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -50,6 +52,17 @@ pub fn parse_codestream(input: &[u8]) -> Result<Codestream> {
     let size = read_size_header(&mut reader)?;
     let metadata = read_image_metadata(&mut reader)?;
     let transform_data = read_custom_transform_data(&mut reader, metadata.xyb_encoded)?;
+    let first_frame = if metadata.color_encoding.want_icc {
+        None
+    } else {
+        reader.jump_to_byte_boundary()?;
+        Some(read_frame_header(
+            &mut reader,
+            size.width,
+            size.height,
+            &metadata,
+        )?)
+    };
 
     Ok(Codestream {
         basic_info: BasicInfo {
@@ -82,6 +95,7 @@ pub fn parse_codestream(input: &[u8]) -> Result<Codestream> {
         },
         metadata,
         transform_data,
+        first_frame,
     })
 }
 

@@ -3,7 +3,10 @@ use std::{
     process::Command,
 };
 
-use jxl_codec::{ColorSpace, ExtraChannelType, FileFormat, TransferFunction, parse_file};
+use jxl_codec::{
+    BlendMode, ColorSpace, ColorTransform, ExtraChannelType, FileFormat, FrameEncoding, FrameType,
+    TransferFunction, parse_file,
+};
 
 #[test]
 fn parses_checked_in_fixture_dimensions() {
@@ -56,6 +59,10 @@ fn parses_checked_in_fixture_dimensions() {
         assert!(
             codestream.transform_data.is_default(),
             "fixture unexpectedly uses custom transform data: {path}"
+        );
+        assert!(
+            codestream.first_frame.is_some(),
+            "fixture first frame was not parsed: {path}"
         );
     }
 }
@@ -124,6 +131,48 @@ fn parses_non_default_fixture_metadata() {
         ExtraChannelType::Alpha
     );
     assert_eq!(animation.metadata.animation.unwrap().tps_numerator, 100);
+}
+
+#[test]
+fn parses_checked_in_fixture_first_frame_headers() {
+    let splines = parse_fixture("reference/libjxl/testdata/jxl/splines.jxl");
+    let frame = splines.first_frame.as_ref().unwrap();
+    assert_eq!(frame.encoding, FrameEncoding::Modular);
+    assert_eq!(frame.frame_type, FrameType::Regular);
+    assert_eq!(frame.frame_size.width, 2048);
+    assert_eq!(frame.frame_size.height, 2048);
+    assert_eq!(frame.group_layout.group_dim, 1024);
+    assert_eq!(frame.group_layout.num_groups, 4);
+    assert_eq!(frame.blending_info.mode, BlendMode::Replace);
+
+    let pq = parse_fixture("reference/libjxl/testdata/jxl/pq_gradient.jxl");
+    let frame = pq.first_frame.as_ref().unwrap();
+    assert_eq!(frame.encoding, FrameEncoding::Modular);
+    assert_eq!(frame.color_transform, ColorTransform::None);
+    assert_eq!(frame.frame_size.width, 1088);
+    assert_eq!(frame.frame_size.height, 64);
+    assert_eq!(frame.group_layout.groups_x, 3);
+    assert_eq!(frame.group_layout.groups_y, 1);
+
+    let animation =
+        parse_fixture("reference/libjxl/testdata/jxl/blending/cropped_traffic_light.jxl");
+    let frame = animation.first_frame.as_ref().unwrap();
+    assert_eq!(frame.encoding, FrameEncoding::Modular);
+    assert_eq!(frame.frame_size.width, 60);
+    assert_eq!(frame.frame_size.height, 105);
+    assert_eq!(frame.extra_channel_upsampling, vec![1]);
+    assert_eq!(frame.extra_channel_blending_info.len(), 1);
+    assert_eq!(frame.animation_frame.duration, 300);
+
+    let container =
+        parse_fixture("reference/libjxl/testdata/jxl/boxes/square-extended-size-container.jxl");
+    let frame = container.first_frame.as_ref().unwrap();
+    assert_eq!(frame.encoding, FrameEncoding::VarDct);
+    assert_eq!(frame.color_transform, ColorTransform::Xyb);
+    assert_eq!(frame.frame_size.width, 8);
+    assert_eq!(frame.frame_size.height, 8);
+    assert_eq!(frame.group_layout.num_groups, 1);
+    assert!(frame.loop_filter.gab);
 }
 
 fn workspace_path(relative: impl AsRef<Path>) -> PathBuf {

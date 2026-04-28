@@ -14,14 +14,17 @@ decoder needs:
   and tone mapping.
 - Custom transform-data parsing after basic info, including optional custom
   opsin inverse matrix and upsampling kernel weights.
+- First-frame header parsing: frame type, modular/VarDCT encoding selection,
+  color transform, frame crop/origin, passes, blending, animation timing,
+  loop-filter parameters, and group layout.
 - A small public inspection API through the `jxl` crate.
 - A `jxlinfo-rs` CLI for metadata inspection.
 - Fixture tests against `reference/libjxl/testdata`, with optional comparison
   to the built libjxl `jxlinfo` reference tool.
 
 Pixel reconstruction is not implemented yet. The next decoder slices should add
-ICC profile parsing when the header requests ICC, frame header parsing, TOC
-parsing, entropy readers, modular image decoding, and then VarDCT.
+ICC profile parsing when the header requests ICC, frame-data TOC parsing,
+entropy readers, modular image decoding, and then VarDCT.
 
 ## Workspace
 

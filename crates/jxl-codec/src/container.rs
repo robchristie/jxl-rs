@@ -142,11 +142,10 @@ fn extract_container_codestream(input: &[u8]) -> Result<ExtractedCodestream> {
         box_index += 1;
 
         match &record.box_type {
-            b"JXL " => {
-                if box_index != 1 || contents != [0x0d, 0x0a, 0x87, 0x0a] {
-                    return Err(Error::InvalidContainer("invalid signature box"));
-                }
+            b"JXL " if box_index != 1 || contents != [0x0d, 0x0a, 0x87, 0x0a] => {
+                return Err(Error::InvalidContainer("invalid signature box"));
             }
+            b"JXL " => {}
             b"ftyp" => {
                 if box_index != 2 {
                     return Err(Error::InvalidContainer("ftyp box must come second"));

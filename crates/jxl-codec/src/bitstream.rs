@@ -122,6 +122,19 @@ impl<'a> BitReader<'a> {
         String::from_utf8(bytes).map_err(|_| Error::InvalidCodestream("invalid UTF-8 name"))
     }
 
+    pub fn jump_to_byte_boundary(&mut self) -> Result<()> {
+        let padding_bits = self.bit_pos % 8;
+        if padding_bits == 0 {
+            return Ok(());
+        }
+
+        let padding = self.read_bits(8 - padding_bits)?;
+        if padding != 0 {
+            return Err(Error::InvalidCodestream("non-zero padding bits"));
+        }
+        Ok(())
+    }
+
     pub fn skip_bits(&mut self, bits: usize) -> Result<()> {
         let end = self
             .bit_pos
@@ -169,5 +182,26 @@ mod tests {
         let mut reader = BitReader::new(&[0]);
 
         assert_eq!(reader.read_bits(9), Err(Error::Truncated));
+    }
+
+    #[test]
+    fn jumps_to_byte_boundary_through_zero_padding() {
+        let mut reader = BitReader::new(&[0b0000_0101, 0b1100_0011]);
+
+        assert_eq!(reader.read_bits(3).unwrap(), 0b101);
+        reader.jump_to_byte_boundary().unwrap();
+        assert_eq!(reader.bits_consumed(), 8);
+        assert_eq!(reader.read_bits(4).unwrap(), 0b0011);
+    }
+
+    #[test]
+    fn rejects_non_zero_byte_boundary_padding() {
+        let mut reader = BitReader::new(&[0b0000_1001]);
+
+        assert_eq!(reader.read_bits(3).unwrap(), 0b001);
+        assert_eq!(
+            reader.jump_to_byte_boundary(),
+            Err(Error::InvalidCodestream("non-zero padding bits"))
+        );
     }
 }

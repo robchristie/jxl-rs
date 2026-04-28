@@ -1,25 +1,13 @@
 use crate::bitstream::BitReader;
 use crate::error::Result;
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CustomTransformData {
     pub opsin_inverse_matrix: Option<OpsinInverseMatrix>,
     pub custom_weights_mask: u32,
     pub upsampling2_weights: Option<Vec<f32>>,
     pub upsampling4_weights: Option<Vec<f32>>,
     pub upsampling8_weights: Option<Vec<f32>>,
-}
-
-impl Default for CustomTransformData {
-    fn default() -> Self {
-        Self {
-            opsin_inverse_matrix: None,
-            custom_weights_mask: 0,
-            upsampling2_weights: None,
-            upsampling4_weights: None,
-            upsampling8_weights: None,
-        }
-    }
 }
 
 impl CustomTransformData {

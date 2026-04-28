@@ -772,7 +772,7 @@ fn read_packed_signed_xy(reader: &mut BitReader<'_>) -> Result<i32> {
     Ok(unpack_signed(packed))
 }
 
-fn unpack_signed(value: u32) -> i32 {
+pub(crate) fn unpack_signed(value: u32) -> i32 {
     if value & 1 == 0 {
         (value >> 1) as i32
     } else {
@@ -780,7 +780,7 @@ fn unpack_signed(value: u32) -> i32 {
     }
 }
 
-fn read_extensions(reader: &mut BitReader<'_>) -> Result<u64> {
+pub(crate) fn read_extensions(reader: &mut BitReader<'_>) -> Result<u64> {
     let extensions = reader.read_u64()?;
     let mut total_extension_bits = 0u64;
     let mut remaining = extensions;
