@@ -13,6 +13,9 @@ pub mod frame;
 pub mod metadata;
 pub mod transform;
 
+pub(crate) mod entropy;
+pub(crate) mod icc;
+
 pub use codestream::{BasicInfo, Codestream, SizeHeader, parse_codestream};
 pub use container::{
     BoxRecord, Container, ContainerBox, ExtractedCodestream, FileFormat, Signature, parse_file,

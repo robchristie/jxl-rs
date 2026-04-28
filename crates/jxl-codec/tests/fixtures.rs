@@ -47,6 +47,12 @@ fn parses_checked_in_fixture_dimensions() {
             2048,
             2048,
         ),
+        (
+            "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
+            FileFormat::Container,
+            64,
+            64,
+        ),
     ];
 
     for (path, expected_format, expected_width, expected_height) in cases {
@@ -81,6 +87,7 @@ fn agrees_with_reference_jxlinfo_when_available() {
         "reference/libjxl/testdata/jxl/pq_gradient.jxl",
         "reference/libjxl/testdata/jxl/spline_on_first_frame.jxl",
         "reference/libjxl/testdata/jxl/splines.jxl",
+        "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
     ];
 
     for path in cases {
@@ -173,6 +180,23 @@ fn parses_checked_in_fixture_first_frame_headers() {
     assert_eq!(frame.frame_size.height, 8);
     assert_eq!(frame.group_layout.num_groups, 1);
     assert!(frame.loop_filter.gab);
+}
+
+#[test]
+fn parses_generated_icc_profile_and_continues_to_first_frame() {
+    let image = parse_fixture("crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl");
+    assert!(image.metadata.color_encoding.want_icc);
+    let icc = image.icc_profile.as_ref().unwrap();
+    assert_eq!(icc.len(), 832);
+    assert_eq!(&icc[36..40], b"acsp");
+    assert_eq!(u32::from_be_bytes([icc[0], icc[1], icc[2], icc[3]]), 832);
+
+    let frame = image.first_frame.as_ref().unwrap();
+    assert_eq!(frame.encoding, FrameEncoding::Modular);
+    assert_eq!(frame.color_transform, ColorTransform::None);
+    assert_eq!(frame.frame_size.width, 64);
+    assert_eq!(frame.frame_size.height, 64);
+    assert_eq!(frame.group_layout.num_groups, 1);
 }
 
 fn workspace_path(relative: impl AsRef<Path>) -> PathBuf {

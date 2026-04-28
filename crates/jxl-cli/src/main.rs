@@ -106,6 +106,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             animation.have_timecodes
         );
     }
+    if let Some(icc_profile) = &info.icc_profile {
+        println!("ICC profile: {} bytes", icc_profile.len());
+    }
     if let Some(frame) = &info.first_frame {
         println!(
             "First frame: {}, {}, {}x{} at ({},{}), passes={}, groups={}",
@@ -122,7 +125,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("First frame duration: {}", frame.animation_frame.duration);
         }
     } else {
-        println!("First frame: not parsed (ICC profile parsing is not implemented yet)");
+        println!("First frame: not parsed");
     }
 
     if args.verbose {

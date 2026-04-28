@@ -20,6 +20,7 @@ pub struct ImageInfo {
     pub basic_info: BasicInfo,
     pub metadata: ImageMetadata,
     pub transform_data: CustomTransformData,
+    pub icc_profile: Option<Vec<u8>>,
     pub first_frame: Option<FrameHeader>,
     pub boxes: Vec<BoxRecord>,
 }
@@ -33,6 +34,7 @@ pub fn inspect(input: &[u8]) -> Result<ImageInfo> {
         basic_info: codestream.basic_info,
         metadata: codestream.metadata,
         transform_data: codestream.transform_data,
+        icc_profile: codestream.icc_profile,
         first_frame: codestream.first_frame,
         boxes: extracted
             .container

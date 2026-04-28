@@ -14,6 +14,8 @@ decoder needs:
   and tone mapping.
 - Custom transform-data parsing after basic info, including optional custom
   opsin inverse matrix and upsampling kernel weights.
+- ICC profile parsing for codestreams that signal `want_icc`, including the
+  JPEG XL ICC entropy stream and predictor reversal.
 - First-frame header parsing: frame type, modular/VarDCT encoding selection,
   color transform, frame crop/origin, passes, blending, animation timing,
   loop-filter parameters, and group layout.
@@ -23,8 +25,8 @@ decoder needs:
   to the built libjxl `jxlinfo` reference tool.
 
 Pixel reconstruction is not implemented yet. The next decoder slices should add
-ICC profile parsing when the header requests ICC, frame-data TOC parsing,
-entropy readers, modular image decoding, and then VarDCT.
+frame-data TOC parsing, group payload traversal, modular image decoding, and
+then VarDCT.
 
 ## Workspace
 
@@ -60,7 +62,7 @@ cmake -S reference/libjxl -B reference/libjxl/build-rs-oracle -G Ninja \
   -DJPEGXL_ENABLE_JNI=OFF \
   -DJPEGXL_ENABLE_DEVTOOLS=OFF \
   -DJPEGXL_ENABLE_VIEWERS=OFF
-cmake --build reference/libjxl/build-rs-oracle --target jxlinfo djxl -j 8
+cmake --build reference/libjxl/build-rs-oracle --target jxlinfo djxl cjxl -j 8
 ```
 
 Set `JXL_RS_REFERENCE_JXLINFO=/path/to/jxlinfo` to use a different oracle

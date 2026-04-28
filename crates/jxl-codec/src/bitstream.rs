@@ -23,7 +23,7 @@ impl<'a> BitReader<'a> {
         Ok(self.read_bits(1)? != 0)
     }
 
-    pub fn read_bits(&mut self, bits: usize) -> Result<u64> {
+    pub fn peek_bits(&self, bits: usize) -> Result<u64> {
         if bits > 56 {
             return Err(Error::InvalidCodestream("bit reads are limited to 56 bits"));
         }
@@ -42,7 +42,12 @@ impl<'a> BitReader<'a> {
             let bit = (self.bytes[pos / 8] >> (pos % 8)) & 1;
             value |= u64::from(bit) << out_bit;
         }
-        self.bit_pos = end;
+        Ok(value)
+    }
+
+    pub fn read_bits(&mut self, bits: usize) -> Result<u64> {
+        let value = self.peek_bits(bits)?;
+        self.skip_bits(bits)?;
         Ok(value)
     }
 
