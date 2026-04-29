@@ -67,7 +67,9 @@ pub struct VarDctPassGroupSectionMetadata {
 pub struct VarDctDecodePlan {
     pub frame: VarDctFrameMetadata,
     pub global: Option<VarDctGlobalMetadata>,
+    pub modular_global_tree_direct_start_bits: Option<usize>,
     pub modular_global_tree_start_bits: Option<usize>,
+    pub modular_global_tree_direct_error: Option<Error>,
     pub modular_global_tree_error: Option<Error>,
     pub global_payload: Option<VarDctSectionPayloadMetadata>,
     pub ac_global_payload: Option<VarDctSectionPayloadMetadata>,
@@ -295,20 +297,31 @@ pub fn read_vardct_decode_plan(
         .as_ref()
         .map(|section| read_vardct_global_metadata(codestream, section))
         .transpose()?;
-    let (global_tree, modular_global_tree_start_bits, modular_global_tree_error) =
-        match (&global_payload, &global) {
-            (Some(payload), Some(global)) => match read_vardct_modular_global_tree(
-                codestream,
-                metadata,
-                frame_header,
-                payload,
-                global,
-            ) {
-                Ok((start_bits, tree)) => (Some(tree), Some(start_bits), None),
-                Err(error) => (None, None, Some(error)),
-            },
-            _ => (None, None, None),
-        };
+    let (
+        global_tree,
+        modular_global_tree_direct_start_bits,
+        modular_global_tree_start_bits,
+        modular_global_tree_direct_error,
+        modular_global_tree_error,
+    ) = match (&global_payload, &global) {
+        (Some(payload), Some(global)) => match read_vardct_modular_global_tree(
+            codestream,
+            metadata,
+            frame_header,
+            payload,
+            global,
+        ) {
+            Ok(result) => (
+                Some(result.tree),
+                Some(result.direct_start_bits),
+                Some(result.tree_start_bits),
+                result.direct_error,
+                None,
+            ),
+            Err(error) => (None, Some(global.bits_consumed), None, None, Some(error)),
+        },
+        _ => (None, None, None, None, None),
+    };
     let ac_global_payload = frame
         .ac_global_section
         .as_ref()
@@ -355,7 +368,9 @@ pub fn read_vardct_decode_plan(
     Ok(Some(VarDctDecodePlan {
         frame,
         global,
+        modular_global_tree_direct_start_bits,
         modular_global_tree_start_bits,
+        modular_global_tree_direct_error,
         modular_global_tree_error,
         global_payload,
         ac_global_payload,
@@ -447,14 +462,19 @@ fn read_vardct_modular_global_tree(
     frame_header: &FrameHeader,
     payload: &VarDctSectionPayloadMetadata,
     global: &VarDctGlobalMetadata,
-) -> Result<(usize, ModularTreeCoding)> {
+) -> Result<VarDctModularGlobalTreeRead> {
     let bytes = codestream
         .get(payload.payload_range.clone())
         .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
     let mut reader = BitReader::new(bytes);
     reader.skip_bits(global.bits_consumed)?;
     match read_modular_global_tree_coding(&mut reader, metadata, frame_header) {
-        Ok(tree) => Ok((global.bits_consumed, tree)),
+        Ok(tree) => Ok(VarDctModularGlobalTreeRead {
+            direct_start_bits: global.bits_consumed,
+            tree_start_bits: global.bits_consumed,
+            direct_error: None,
+            tree,
+        }),
         Err(error) => {
             let start = global.bits_consumed;
             let end = (global.bits_consumed + 64).min(bytes.len() * 8);
@@ -464,12 +484,24 @@ fn read_vardct_modular_global_tree(
                 if let Ok(tree) =
                     read_modular_global_tree_coding(&mut probe, metadata, frame_header)
                 {
-                    return Ok((offset, tree));
+                    return Ok(VarDctModularGlobalTreeRead {
+                        direct_start_bits: global.bits_consumed,
+                        tree_start_bits: offset,
+                        direct_error: Some(error),
+                        tree,
+                    });
                 }
             }
             Err(error)
         }
     }
+}
+
+struct VarDctModularGlobalTreeRead {
+    direct_start_bits: usize,
+    tree_start_bits: usize,
+    direct_error: Option<Error>,
+    tree: ModularTreeCoding,
 }
 
 fn vardct_dc_channel_plan(
@@ -664,7 +696,6 @@ fn read_vardct_block_context_map(
             "VarDCT block context map has too many contexts",
         ));
     }
-
     Ok(VarDctBlockContextMapMetadata {
         all_default,
         dc_thresholds,

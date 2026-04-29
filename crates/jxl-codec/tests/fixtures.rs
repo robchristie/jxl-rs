@@ -479,7 +479,12 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(selected_dc[0].group.group, 0);
 
     let global = plan.global.as_ref().unwrap();
+    assert_eq!(plan.modular_global_tree_direct_start_bits, Some(206));
     assert_eq!(plan.modular_global_tree_start_bits, Some(220));
+    assert_eq!(
+        plan.modular_global_tree_direct_error,
+        Some(jxl_codec::Error::Truncated)
+    );
     assert_eq!(plan.modular_global_tree_error, None);
     assert_vardct_global_cursor_in_payload(global, global.section.section.payload_size);
 }
