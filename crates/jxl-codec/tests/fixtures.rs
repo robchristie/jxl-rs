@@ -546,6 +546,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         Some(520)
     );
     assert_eq!(plan.modular_global_tree_direct_tree_node_count, Some(31));
+    assert_eq!(plan.modular_global_tree_direct_tree_leaf_count, Some(16));
     assert_eq!(plan.modular_global_tree_direct_error_bits, Some(1035));
     assert_eq!(
         plan.modular_global_tree_direct_error_absolute_bits,
@@ -558,6 +559,10 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(
         plan.modular_global_tree_direct_residual_context_count,
         Some(16)
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_residual_context_count,
+        plan.modular_global_tree_direct_tree_leaf_count
     );
     assert_eq!(
         plan.modular_global_tree_direct_residual_histogram_count,
