@@ -463,7 +463,7 @@ fn read_global_section(
     } else {
         None
     };
-    let group_header = read_group_header(reader)?;
+    let group_header = read_modular_group_header_metadata(reader)?;
     if group_header.use_global_tree && !has_global_tree {
         return Err(Error::InvalidCodestream(
             "modular stream references a missing global tree",
@@ -568,7 +568,7 @@ fn read_modular_group_section(
 
     let payload = section_payload(codestream, section)?;
     let mut reader = BitReader::new(payload);
-    let header = read_group_header(&mut reader)?;
+    let header = read_modular_group_header_metadata(&mut reader)?;
     let local_tree = if header.use_global_tree {
         if !has_global_tree {
             return Err(Error::InvalidCodestream(
@@ -803,7 +803,7 @@ fn decode_global_residuals(
         return Err(Error::InvalidCodestream("modular frame has no global tree"));
     }
     let tree = read_tree_coding(&mut reader, MAX_TREE_SIZE)?;
-    let header = read_group_header(&mut reader)?;
+    let header = read_modular_group_header_metadata(&mut reader)?;
     if !header.use_global_tree {
         return Err(Error::InvalidCodestream(
             "global modular stream does not use its global tree",
@@ -1787,7 +1787,7 @@ fn decode_group_residuals(
         .get(group_payload_range(group)?)
         .ok_or(Error::InvalidCodestream("modular group outside codestream"))?;
     let mut reader = BitReader::new(payload);
-    let header = read_group_header(&mut reader)?;
+    let header = read_modular_group_header_metadata(&mut reader)?;
     let tree = if header.use_global_tree {
         global_tree.clone()
     } else {
@@ -2707,7 +2707,9 @@ fn global_tree_size_limit(metadata: &ImageMetadata, frame_header: &FrameHeader) 
     Ok(MAX_TREE_SIZE.min(1024 + (samples / 16) as usize))
 }
 
-fn read_group_header(reader: &mut BitReader<'_>) -> Result<ModularGroupHeader> {
+pub(crate) fn read_modular_group_header_metadata(
+    reader: &mut BitReader<'_>,
+) -> Result<ModularGroupHeader> {
     let use_global_tree = reader.read_bool()?;
     let weighted_predictor = read_weighted_predictor_header(reader)?;
     let num_transforms =

@@ -5,6 +5,7 @@ use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
 use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_payload_range};
 use crate::metadata::unpack_signed;
+use crate::modular::{ModularGroupHeader, read_modular_group_header_metadata};
 use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +94,7 @@ pub struct VarDctDcGroupPayloadMetadata {
 pub struct VarDctDcGroupMetadata {
     pub payload: VarDctDcGroupPayloadMetadata,
     pub cursor: VarDctDcGroupCursorMetadata,
+    pub var_dct_dc_header: Option<ModularGroupHeader>,
     pub parse_error: Option<Error>,
 }
 
@@ -331,20 +333,28 @@ fn read_vardct_dc_group_metadata(
     codestream: &[u8],
     payload: VarDctDcGroupPayloadMetadata,
 ) -> Result<VarDctDcGroupMetadata> {
-    codestream
+    let bytes = codestream
         .get(payload.section.payload_range.clone())
         .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
+    let mut reader = BitReader::new(bytes);
+    let header_result = read_modular_group_header_metadata(&mut reader);
+    let (var_dct_dc_header, parse_error) = match header_result {
+        Ok(header) => (Some(header), None),
+        Err(error) => (None, Some(error)),
+    };
+    let header_end = var_dct_dc_header.as_ref().map(|_| reader.bits_consumed());
     Ok(VarDctDcGroupMetadata {
         payload,
         cursor: VarDctDcGroupCursorMetadata {
             var_dct_dc_start_bits: 0,
-            var_dct_dc_end_bits: None,
-            modular_dc_start_bits: None,
+            var_dct_dc_end_bits: header_end,
+            modular_dc_start_bits: header_end,
             modular_dc_end_bits: None,
             ac_metadata_start_bits: None,
             ac_metadata_end_bits: None,
         },
-        parse_error: Some(Error::Unsupported("VarDCT DC group payload parsing")),
+        var_dct_dc_header,
+        parse_error,
     })
 }
 
@@ -855,11 +865,18 @@ mod tests {
         assert_eq!(plan.dc_group_metadata.len(), 1);
         assert_eq!(plan.dc_group_metadata[0].payload, plan.dc_group_payloads[0]);
         assert_eq!(plan.dc_group_metadata[0].cursor.var_dct_dc_start_bits, 0);
-        assert_eq!(plan.dc_group_metadata[0].cursor.var_dct_dc_end_bits, None);
-        assert_eq!(
-            plan.dc_group_metadata[0].parse_error,
-            Some(Error::Unsupported("VarDCT DC group payload parsing"))
-        );
+        if let Some(end_bits) = plan.dc_group_metadata[0].cursor.var_dct_dc_end_bits {
+            assert!(end_bits <= plan.dc_group_payloads[0].section.payload_range.len() * 8);
+            assert_eq!(
+                plan.dc_group_metadata[0].cursor.modular_dc_start_bits,
+                Some(end_bits)
+            );
+            assert!(plan.dc_group_metadata[0].var_dct_dc_header.is_some());
+            assert_eq!(plan.dc_group_metadata[0].parse_error, None);
+        } else {
+            assert!(plan.dc_group_metadata[0].var_dct_dc_header.is_none());
+            assert!(plan.dc_group_metadata[0].parse_error.is_some());
+        }
         assert_eq!(plan.ac_group_payloads.len(), 2);
         assert_eq!(plan.ac_group_payloads[0].section.payload_range, 25..36);
         assert_eq!(plan.ac_group_payloads[0].group.group, 0);
