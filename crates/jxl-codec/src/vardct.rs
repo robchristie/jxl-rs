@@ -12,9 +12,10 @@ use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_paylo
 use crate::metadata::ImageMetadata;
 use crate::metadata::unpack_signed;
 use crate::modular::{
-    MaTreeLeafProbe, ModularGroupChannelPlan, ModularGroupHeader, ModularPredictor,
-    ModularTreeCoding, decode_modular_stream_from_reader, probe_modular_global_tree_coding,
-    read_modular_global_tree_coding, read_modular_group_header_metadata,
+    MaTreeLeafProbe, ModularDecodedGroup, ModularGroupChannelPlan, ModularGroupHeader,
+    ModularPredictor, ModularTreeCoding, decode_modular_stream_from_reader,
+    probe_modular_global_tree_coding, read_modular_global_tree_coding,
+    read_modular_group_header_metadata,
 };
 use std::ops::Range;
 
@@ -542,6 +543,7 @@ pub struct VarDctDcGroupMetadata {
     pub cursor: VarDctDcGroupCursorMetadata,
     pub extra_precision_bits: Option<u8>,
     pub var_dct_dc_header: Option<ModularGroupHeader>,
+    pub var_dct_dc: Option<ModularDecodedGroup>,
     pub parse_error: Option<Error>,
 }
 
@@ -1058,41 +1060,48 @@ fn read_vardct_dc_group_metadata(
         .ok()
         .map(|_| reader.bits_consumed());
     let mut stream_reader = reader.clone();
-    let (extra_precision_bits, var_dct_dc_header, parse_error) = match extra_precision_result {
-        Ok(extra_precision_bits) => match read_modular_group_header_metadata(&mut reader) {
-            Ok(header) => {
-                let channels = vardct_dc_channel_plan(frame_header, &payload)?;
-                if header.use_global_tree && global_tree.is_none() {
-                    (
-                        Some(extra_precision_bits),
-                        Some(header),
-                        Some(
-                            global_tree_error
-                                .cloned()
-                                .unwrap_or(Error::InvalidCodestream(
-                                    "modular stream references a missing global tree",
+    let (extra_precision_bits, var_dct_dc_header, var_dct_dc, parse_error) =
+        match extra_precision_result {
+            Ok(extra_precision_bits) => {
+                match read_modular_group_header_metadata(&mut reader) {
+                    Ok(header) => {
+                        let channels = vardct_dc_channel_plan(frame_header, &payload)?;
+                        if header.use_global_tree && global_tree.is_none() {
+                            (
+                                Some(extra_precision_bits),
+                                Some(header),
+                                None,
+                                Some(global_tree_error.cloned().unwrap_or(
+                                    Error::InvalidCodestream(
+                                        "modular stream references a missing global tree",
+                                    ),
                                 )),
-                        ),
-                    )
-                } else {
-                    match decode_modular_stream_from_reader(
-                        &mut stream_reader,
-                        payload.section.section.section_physical_index,
-                        payload.var_dct_dc_stream_id,
-                        &channels,
-                        global_tree,
-                    ) {
-                        Ok((decoded_header, _)) => {
-                            (Some(extra_precision_bits), Some(decoded_header), None)
+                            )
+                        } else {
+                            match decode_modular_stream_from_reader(
+                                &mut stream_reader,
+                                payload.section.section.section_physical_index,
+                                payload.var_dct_dc_stream_id,
+                                &channels,
+                                global_tree,
+                            ) {
+                                Ok((decoded_header, decoded)) => (
+                                    Some(extra_precision_bits),
+                                    Some(decoded_header),
+                                    Some(decoded),
+                                    None,
+                                ),
+                                Err(error) => {
+                                    (Some(extra_precision_bits), Some(header), None, Some(error))
+                                }
+                            }
                         }
-                        Err(error) => (Some(extra_precision_bits), Some(header), Some(error)),
                     }
+                    Err(error) => (Some(extra_precision_bits), None, None, Some(error)),
                 }
             }
-            Err(error) => (Some(extra_precision_bits), None, Some(error)),
-        },
-        Err(error) => (None, None, Some(error)),
-    };
+            Err(error) => (None, None, None, Some(error)),
+        };
     let header_end = var_dct_dc_header.as_ref().map(|_| reader.bits_consumed());
     let var_dct_dc_end = parse_error
         .is_none()
@@ -1113,6 +1122,7 @@ fn read_vardct_dc_group_metadata(
         },
         extra_precision_bits,
         var_dct_dc_header,
+        var_dct_dc,
         parse_error,
     })
 }
@@ -1409,8 +1419,8 @@ fn vardct_dc_channel_plan(
         }
         channels.push(ModularGroupChannelPlan {
             channel_index,
-            width: payload.group.width >> hshift as u32,
-            height: payload.group.height >> vshift as u32,
+            width: payload.group.width.div_ceil(8) >> hshift as u32,
+            height: payload.group.height.div_ceil(8) >> vshift as u32,
             x0: 0,
             y0: 0,
             hshift,

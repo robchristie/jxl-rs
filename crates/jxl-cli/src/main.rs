@@ -508,6 +508,44 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     section.section.payload_size
                 );
             }
+            if let Some(plan) = &info.first_frame_vardct_plan {
+                for group in &plan.dc_group_metadata {
+                    println!(
+                        "First frame VarDCT DC stream group {}: stream_id={} bits={} channels={} error={:?}",
+                        group.payload.group.group,
+                        group.payload.var_dct_dc_stream_id,
+                        group.cursor.var_dct_dc_end_bits.unwrap_or_default(),
+                        group
+                            .var_dct_dc
+                            .as_ref()
+                            .map(|decoded| decoded.channels.len())
+                            .unwrap_or_default(),
+                        group.parse_error
+                    );
+                    if let Some(decoded) = &group.var_dct_dc {
+                        for channel in &decoded.channels {
+                            let min = channel.samples.iter().min().copied().unwrap_or_default();
+                            let max = channel.samples.iter().max().copied().unwrap_or_default();
+                            let sum = channel
+                                .samples
+                                .iter()
+                                .fold(0i64, |sum, sample| sum + i64::from(*sample));
+                            println!(
+                                "First frame VarDCT DC stream channel {}: {}x{} at ({},{}) samples={} min={} max={} sum={}",
+                                channel.channel_index,
+                                channel.width,
+                                channel.height,
+                                channel.x0,
+                                channel.y0,
+                                channel.samples.len(),
+                                min,
+                                max,
+                                sum
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 

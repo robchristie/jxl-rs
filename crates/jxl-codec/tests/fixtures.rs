@@ -466,9 +466,38 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         assert!(header.use_global_tree);
         assert!(header.weighted_predictor.all_default);
         assert!(header.transforms.is_empty());
-        assert_eq!(metadata.parse_error, Some(jxl_codec::Error::Truncated));
-        assert_eq!(metadata.cursor.var_dct_dc_end_bits, None);
-        assert_eq!(metadata.cursor.modular_dc_start_bits, None);
+        let var_dct_dc = metadata.var_dct_dc.as_ref().unwrap();
+        assert_eq!(metadata.parse_error, None);
+        assert_eq!(metadata.cursor.var_dct_dc_end_bits, Some(18911));
+        assert_eq!(metadata.cursor.modular_dc_start_bits, Some(18911));
+        assert_eq!(var_dct_dc.section_physical_index, 1);
+        assert_eq!(var_dct_dc.stream_id, dc_group.var_dct_dc_stream_id);
+        assert_eq!(var_dct_dc.bits_consumed, 18911);
+        assert_eq!(
+            var_dct_dc
+                .channels
+                .iter()
+                .map(|channel| (
+                    channel.channel_index,
+                    channel.x0,
+                    channel.y0,
+                    channel.width,
+                    channel.height,
+                    channel.samples.len(),
+                    channel.samples.iter().min().copied().unwrap_or_default(),
+                    channel.samples.iter().max().copied().unwrap_or_default(),
+                    channel
+                        .samples
+                        .iter()
+                        .fold(0i64, |sum, sample| sum + i64::from(*sample)),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, 0, 0, 40, 24, 960, 20, 1129, 618209),
+                (1, 0, 0, 40, 24, 960, -162, 281, 17551),
+                (2, 0, 0, 40, 24, 960, -162, 150, -6856),
+            ]
+        );
         assert_eq!(metadata.cursor.modular_dc_end_bits, None);
         assert_eq!(metadata.cursor.ac_metadata_start_bits, None);
         assert_eq!(metadata.cursor.ac_metadata_end_bits, None);
