@@ -419,6 +419,10 @@ pub struct VarDctDecodePlan {
     pub modular_global_tree_direct_error_remaining_bits: Option<usize>,
     pub modular_global_tree_direct_residual_context_count: Option<usize>,
     pub modular_global_tree_direct_residual_histogram_count: Option<usize>,
+    pub modular_global_tree_direct_residual_context_map_entries: Vec<u8>,
+    pub modular_global_tree_direct_residual_context_map_distinct_entries: Vec<u8>,
+    pub modular_global_tree_direct_residual_context_map_histogram_usage_counts: Vec<usize>,
+    pub modular_global_tree_direct_residual_context_map_max_entry: Option<u8>,
     pub modular_global_tree_direct_residual_lz77_end_bits: Option<usize>,
     pub modular_global_tree_direct_residual_context_map_end_bits: Option<usize>,
     pub modular_global_tree_direct_residual_entropy_mode_end_bits: Option<usize>,
@@ -720,6 +724,10 @@ pub fn read_vardct_decode_plan(
         modular_global_tree_direct_error_bits,
         modular_global_tree_direct_residual_context_count,
         modular_global_tree_direct_residual_histogram_count,
+        modular_global_tree_direct_residual_context_map_entries,
+        modular_global_tree_direct_residual_context_map_distinct_entries,
+        modular_global_tree_direct_residual_context_map_histogram_usage_counts,
+        modular_global_tree_direct_residual_context_map_max_entry,
         modular_global_tree_direct_residual_lz77_end_bits,
         modular_global_tree_direct_residual_context_map_end_bits,
         modular_global_tree_direct_residual_entropy_mode_end_bits,
@@ -751,6 +759,10 @@ pub fn read_vardct_decode_plan(
                 result.direct_error_bits,
                 result.direct_residual_context_count,
                 result.direct_residual_histogram_count,
+                result.direct_residual_context_map_entries,
+                result.direct_residual_context_map_distinct_entries,
+                result.direct_residual_context_map_histogram_usage_counts,
+                result.direct_residual_context_map_max_entry,
                 result.direct_residual_lz77_end_bits,
                 result.direct_residual_context_map_end_bits,
                 result.direct_residual_entropy_mode_end_bits,
@@ -774,6 +786,10 @@ pub fn read_vardct_decode_plan(
                 None,
                 None,
                 None,
+                None,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
                 None,
                 None,
                 None,
@@ -799,6 +815,10 @@ pub fn read_vardct_decode_plan(
             None,
             None,
             None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
             None,
             None,
             None,
@@ -909,6 +929,10 @@ pub fn read_vardct_decode_plan(
         ),
         modular_global_tree_direct_residual_context_count,
         modular_global_tree_direct_residual_histogram_count,
+        modular_global_tree_direct_residual_context_map_entries,
+        modular_global_tree_direct_residual_context_map_distinct_entries,
+        modular_global_tree_direct_residual_context_map_histogram_usage_counts,
+        modular_global_tree_direct_residual_context_map_max_entry,
         modular_global_tree_direct_residual_lz77_end_bits,
         modular_global_tree_direct_residual_context_map_end_bits,
         modular_global_tree_direct_residual_entropy_mode_end_bits,
@@ -1030,6 +1054,10 @@ fn read_vardct_modular_global_tree(
             direct_error_bits: None,
             direct_residual_context_count: None,
             direct_residual_histogram_count: None,
+            direct_residual_context_map_entries: Vec::new(),
+            direct_residual_context_map_distinct_entries: Vec::new(),
+            direct_residual_context_map_histogram_usage_counts: Vec::new(),
+            direct_residual_context_map_max_entry: None,
             direct_residual_lz77_end_bits: None,
             direct_residual_context_map_end_bits: None,
             direct_residual_entropy_mode_end_bits: None,
@@ -1066,6 +1094,25 @@ fn read_vardct_modular_global_tree(
                         direct_error_bits: direct_probe.error_bits,
                         direct_residual_context_count: direct_probe.residual_context_count,
                         direct_residual_histogram_count: direct_probe.residual_histogram_count,
+                        direct_residual_context_map_entries: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .map(|probe| probe.context_map_entries.clone())
+                            .unwrap_or_default(),
+                        direct_residual_context_map_distinct_entries: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .map(|probe| probe.context_map_distinct_entries.clone())
+                            .unwrap_or_default(),
+                        direct_residual_context_map_histogram_usage_counts: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .map(|probe| probe.context_map_histogram_usage_counts.clone())
+                            .unwrap_or_default(),
+                        direct_residual_context_map_max_entry: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .and_then(|probe| probe.context_map_max_entry),
                         direct_residual_lz77_end_bits: direct_probe
                             .residual_histogram_probe
                             .as_ref()
@@ -1138,6 +1185,10 @@ struct VarDctModularGlobalTreeRead {
     direct_error_bits: Option<usize>,
     direct_residual_context_count: Option<usize>,
     direct_residual_histogram_count: Option<usize>,
+    direct_residual_context_map_entries: Vec<u8>,
+    direct_residual_context_map_distinct_entries: Vec<u8>,
+    direct_residual_context_map_histogram_usage_counts: Vec<usize>,
+    direct_residual_context_map_max_entry: Option<u8>,
     direct_residual_lz77_end_bits: Option<usize>,
     direct_residual_context_map_end_bits: Option<usize>,
     direct_residual_entropy_mode_end_bits: Option<usize>,

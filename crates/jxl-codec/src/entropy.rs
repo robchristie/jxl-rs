@@ -240,6 +240,10 @@ pub(crate) struct HistogramCodingProbe {
     pub histogram_end_bits: Option<usize>,
     pub context_count: Option<usize>,
     pub num_histograms: Option<usize>,
+    pub context_map_entries: Vec<u8>,
+    pub context_map_distinct_entries: Vec<u8>,
+    pub context_map_histogram_usage_counts: Vec<usize>,
+    pub context_map_max_entry: Option<u8>,
     pub use_prefix_code: Option<bool>,
     pub log_alpha_size: Option<usize>,
     pub ans_histograms: Vec<AnsHistogramProbe>,
@@ -734,6 +738,11 @@ pub(crate) fn probe_decode_histograms(
         1
     };
     let context_map_end_bits = Some(reader.bits_consumed());
+    let context_map_entries = context_map.clone();
+    let context_map_distinct_entries = distinct_context_map_entries(&context_map_entries);
+    let context_map_histogram_usage_counts =
+        context_map_histogram_usage_counts(&context_map_entries, num_histograms);
+    let context_map_max_entry = context_map_entries.iter().copied().max();
 
     let use_prefix_code = match reader.read_bool() {
         Ok(value) => value,
@@ -920,6 +929,11 @@ pub(crate) fn probe_decode_histograms(
                         uint_config_end_bits,
                         context_count: Some(context_count),
                         num_histograms: Some(num_histograms),
+                        context_map_entries: context_map_entries.clone(),
+                        context_map_distinct_entries: context_map_distinct_entries.clone(),
+                        context_map_histogram_usage_counts: context_map_histogram_usage_counts
+                            .clone(),
+                        context_map_max_entry,
                         use_prefix_code: Some(use_prefix_code),
                         log_alpha_size: Some(log_alpha_size),
                         ans_histograms,
@@ -943,6 +957,10 @@ pub(crate) fn probe_decode_histograms(
                     uint_config_end_bits,
                     context_count: Some(context_count),
                     num_histograms: Some(num_histograms),
+                    context_map_entries: context_map_entries.clone(),
+                    context_map_distinct_entries: context_map_distinct_entries.clone(),
+                    context_map_histogram_usage_counts: context_map_histogram_usage_counts.clone(),
+                    context_map_max_entry,
                     use_prefix_code: Some(use_prefix_code),
                     log_alpha_size: Some(log_alpha_size),
                     ans_histograms,
@@ -970,6 +988,10 @@ pub(crate) fn probe_decode_histograms(
                     uint_config_end_bits,
                     context_count: Some(context_count),
                     num_histograms: Some(num_histograms),
+                    context_map_entries: context_map_entries.clone(),
+                    context_map_distinct_entries: context_map_distinct_entries.clone(),
+                    context_map_histogram_usage_counts: context_map_histogram_usage_counts.clone(),
+                    context_map_max_entry,
                     use_prefix_code: Some(use_prefix_code),
                     log_alpha_size: Some(log_alpha_size),
                     ans_histograms,
@@ -995,6 +1017,10 @@ pub(crate) fn probe_decode_histograms(
             histogram_end_bits: Some(reader.bits_consumed()),
             context_count: Some(context_count),
             num_histograms: Some(num_histograms),
+            context_map_entries: context_map_entries.clone(),
+            context_map_distinct_entries: context_map_distinct_entries.clone(),
+            context_map_histogram_usage_counts: context_map_histogram_usage_counts.clone(),
+            context_map_max_entry,
             use_prefix_code: Some(use_prefix_code),
             log_alpha_size: Some(log_alpha_size),
             ans_histograms,
@@ -1015,6 +1041,10 @@ pub(crate) fn probe_decode_histograms(
         histogram_end_bits: Some(reader.bits_consumed()),
         context_count: Some(context_count),
         num_histograms: Some(num_histograms),
+        context_map_entries,
+        context_map_distinct_entries,
+        context_map_histogram_usage_counts,
+        context_map_max_entry,
         use_prefix_code: Some(use_prefix_code),
         log_alpha_size: Some(log_alpha_size),
         ans_histograms: Vec::new(),
@@ -1040,6 +1070,10 @@ fn histogram_probe_error(
         histogram_end_bits: None,
         context_count: None,
         num_histograms: None,
+        context_map_entries: Vec::new(),
+        context_map_distinct_entries: Vec::new(),
+        context_map_histogram_usage_counts: Vec::new(),
+        context_map_max_entry: None,
         use_prefix_code: None,
         log_alpha_size: None,
         ans_histograms: Vec::new(),
@@ -1315,6 +1349,23 @@ fn verify_context_map(context_map: &[u8], num_histograms: usize) -> Result<()> {
         return Err(Error::InvalidCodestream("incomplete context map"));
     }
     Ok(())
+}
+
+fn distinct_context_map_entries(context_map: &[u8]) -> Vec<u8> {
+    let mut entries = context_map.to_vec();
+    entries.sort_unstable();
+    entries.dedup();
+    entries
+}
+
+fn context_map_histogram_usage_counts(context_map: &[u8], num_histograms: usize) -> Vec<usize> {
+    let mut counts = vec![0; num_histograms];
+    for &entry in context_map {
+        if let Some(count) = counts.get_mut(usize::from(entry)) {
+            *count += 1;
+        }
+    }
+    counts
 }
 
 fn inverse_move_to_front(data: &mut [u8]) {

@@ -569,6 +569,22 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         Some(4)
     );
     assert_eq!(
+        plan.modular_global_tree_direct_residual_context_map_entries,
+        vec![0, 0, 0, 1, 2, 2, 2, 2, 0, 1, 3, 0, 3, 3, 3, 3]
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_residual_context_map_distinct_entries,
+        vec![0, 1, 2, 3]
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_residual_context_map_histogram_usage_counts,
+        vec![5, 2, 4, 5]
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_residual_context_map_max_entry,
+        Some(3)
+    );
+    assert_eq!(
         plan.modular_global_tree_direct_residual_lz77_end_bits,
         Some(521)
     );
