@@ -177,35 +177,50 @@ impl Decoder {
         self
     }
 
+    /// Decodes raw image channels.
+    ///
+    /// If [`Decoder::roi`] is set, the returned [`DecodedChannels::width`] and
+    /// [`DecodedChannels::height`] are the requested region dimensions. Channel
+    /// samples are ROI-local: sample `(0, 0)` corresponds to the requested
+    /// image-space coordinate `(roi.x, roi.y)`.
+    ///
+    /// ROI decode is currently supported only for modular still images whose
+    /// cropped channels can be assembled without modular transforms, meta
+    /// channels, shifted/subsampled channels, or VarDCT reconstruction.
     pub fn decode_channels(&self, input: &[u8]) -> Result<DecodedChannels> {
-        self.validate_options()?;
+        self.validate_shared_options()?;
         decode_channels_buffered(input, self.codec_config())
     }
 
     pub fn decode(&self, input: &[u8]) -> Result<DecodedImage> {
-        self.validate_options()?;
+        self.validate_full_image_output_options()?;
         decode_buffered(input, self.codec_config())
     }
 
     pub fn decode_rgba8(&self, input: &[u8]) -> Result<RgbaImage> {
-        self.validate_options()?;
+        self.validate_full_image_output_options()?;
         decode_rgba8_buffered(input, self.codec_config())
     }
 
     pub fn decode_rgba16(&self, input: &[u8]) -> Result<Rgba16Image> {
-        self.validate_options()?;
+        self.validate_full_image_output_options()?;
         decode_rgba16_buffered(input, self.codec_config())
     }
 
-    fn validate_options(&self) -> Result<()> {
-        if self.options.roi.is_some() {
-            return Err(Error::Unsupported("region-of-interest decode"));
-        }
+    fn validate_shared_options(&self) -> Result<()> {
         if self.options.memory_limit.is_some() {
             return Err(Error::Unsupported("memory-limited decode"));
         }
         if self.options.threads == ThreadingMode::Threads(0) {
             return Err(Error::Unsupported("zero decoder threads"));
+        }
+        Ok(())
+    }
+
+    fn validate_full_image_output_options(&self) -> Result<()> {
+        self.validate_shared_options()?;
+        if self.options.roi.is_some() {
+            return Err(Error::Unsupported("region-of-interest decode"));
         }
         Ok(())
     }
@@ -220,7 +235,12 @@ impl Decoder {
                     jxl_codec::ModularGroupExecution::RequestedThreads(threads)
                 }
             },
-            region: None,
+            region: self.options.roi.map(|roi| jxl_codec::ImageRegion {
+                x: roi.x,
+                y: roi.y,
+                width: roi.width,
+                height: roi.height,
+            }),
         }
     }
 }
@@ -280,10 +300,11 @@ fn decode_channels_buffered(
         .first_frame_modular
         .as_ref()
         .ok_or(Error::Unsupported("modular image metadata"))?;
-    let image = modular
-        .image
-        .as_ref()
-        .ok_or(Error::Unsupported("modular pixel reconstruction"))?;
+    let image = modular.image.as_ref().ok_or(if config.region.is_some() {
+        Error::Unsupported("region-of-interest raw channel decode")
+    } else {
+        Error::Unsupported("modular pixel reconstruction")
+    })?;
     let color_channels = codestream.metadata.num_color_channels() as usize;
     let bit_depth = codestream.metadata.bit_depth.bits_per_sample;
     if codestream.metadata.bit_depth.floating_point_sample {
@@ -725,7 +746,15 @@ mod tests {
             height: 8,
         });
         assert_eq!(
-            roi_decoder.decode_channels(&bytes),
+            roi_decoder.decode(&bytes),
+            Err(Error::Unsupported("region-of-interest decode"))
+        );
+        assert_eq!(
+            roi_decoder.decode_rgba8(&bytes),
+            Err(Error::Unsupported("region-of-interest decode"))
+        );
+        assert_eq!(
+            roi_decoder.decode_rgba16(&bytes),
             Err(Error::Unsupported("region-of-interest decode"))
         );
 
@@ -740,6 +769,77 @@ mod tests {
             zero_threads_decoder.decode_rgba8(&bytes),
             Err(Error::Unsupported("zero decoder threads"))
         );
+    }
+
+    #[test]
+    fn decode_channels_roi_rejects_transformed_modular_fixture() {
+        let bytes = std::fs::read(workspace_path(
+            "reference/libjxl/testdata/jxl/pq_gradient.jxl",
+        ))
+        .unwrap();
+        let decoder = Decoder::new().roi(Rect {
+            x: 600,
+            y: 0,
+            width: 32,
+            height: 32,
+        });
+
+        assert_eq!(
+            decoder.decode_channels(&bytes),
+            Err(Error::Unsupported("region-of-interest raw channel decode"))
+        );
+    }
+
+    #[test]
+    fn decode_channels_roi_crops_transform_free_modular_image_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping rgba channel ROI comparison; reference tools are not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-roi-source", "pgm");
+        let encoded = unique_temp_path("jxl-roi", "jxl");
+        write_roi_source_pgm(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "0", "-m", "1", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let image = Decoder::new()
+            .roi(Rect {
+                x: 2,
+                y: 1,
+                width: 3,
+                height: 2,
+            })
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+
+        assert_eq!(image.width, 3);
+        assert_eq!(image.height, 2);
+        assert_eq!(image.color_channels, 1);
+        assert_eq!(image.alpha, None);
+        assert_eq!(image.bit_depth, 8);
+        assert_eq!(image.channels.len(), 1);
+        assert_eq!(image.channels[0].width, 3);
+        assert_eq!(image.channels[0].height, 2);
+        assert_eq!(image.channels[0].hshift, 0);
+        assert_eq!(image.channels[0].vshift, 0);
+        let ChannelData::U8(samples) = &image.channels[0].samples else {
+            panic!("expected 8-bit ROI samples");
+        };
+        assert_eq!(samples, &[206, 213, 220, 142, 149, 156]);
     }
 
     #[test]
@@ -1278,6 +1378,14 @@ mod tests {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             bytes.push((state >> 24) as u8);
         }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn write_roi_source_pgm(path: &Path) {
+        let width = 64u32;
+        let height = 64u32;
+        let mut bytes = format!("P5\n{width} {height}\n255\n").into_bytes();
+        bytes.extend((0..width * height).map(|index| (index.wrapping_mul(7) & 0xff) as u8));
         std::fs::write(path, bytes).unwrap();
     }
 
