@@ -452,16 +452,14 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         );
         assert_eq!(&metadata.payload, dc_group);
         assert_eq!(metadata.cursor.var_dct_dc_start_bits, 0);
-        if let Some(end_bits) = metadata.cursor.var_dct_dc_end_bits {
-            assert!(end_bits <= dc_group.section.payload_range.len() * 8);
-            assert_eq!(metadata.cursor.modular_dc_start_bits, Some(end_bits));
-            assert!(metadata.var_dct_dc_header.is_some());
-            assert!(metadata.parse_error.is_none());
-        } else {
-            assert_eq!(metadata.cursor.modular_dc_start_bits, None);
-            assert!(metadata.var_dct_dc_header.is_none());
-            assert!(metadata.parse_error.is_some());
-        }
+        let end_bits = metadata.cursor.var_dct_dc_end_bits.unwrap();
+        assert!(end_bits <= dc_group.section.payload_range.len() * 8);
+        assert_eq!(metadata.cursor.modular_dc_start_bits, Some(end_bits));
+        let header = metadata.var_dct_dc_header.as_ref().unwrap();
+        assert!(header.use_global_tree);
+        assert!(!header.weighted_predictor.all_default);
+        assert!(header.transforms.is_empty());
+        assert!(metadata.parse_error.is_none());
         assert_eq!(metadata.cursor.modular_dc_end_bits, None);
         assert_eq!(metadata.cursor.ac_metadata_start_bits, None);
         assert_eq!(metadata.cursor.ac_metadata_end_bits, None);

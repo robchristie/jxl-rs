@@ -834,6 +834,7 @@ mod tests {
         let mut codestream = vec![0; 64];
         codestream[10] = 1;
         codestream[12] = 0b0000_0011;
+        codestream[13] = 0b0000_0010;
 
         let plan = read_vardct_decode_plan(&codestream, &frame_header, &frame_data)
             .unwrap()
@@ -863,20 +864,16 @@ mod tests {
         assert_eq!(plan.dc_group_payloads[0].section.payload_range, 13..18);
         assert_eq!(plan.dc_group_payloads[0].group.group, 0);
         assert_eq!(plan.dc_group_metadata.len(), 1);
-        assert_eq!(plan.dc_group_metadata[0].payload, plan.dc_group_payloads[0]);
-        assert_eq!(plan.dc_group_metadata[0].cursor.var_dct_dc_start_bits, 0);
-        if let Some(end_bits) = plan.dc_group_metadata[0].cursor.var_dct_dc_end_bits {
-            assert!(end_bits <= plan.dc_group_payloads[0].section.payload_range.len() * 8);
-            assert_eq!(
-                plan.dc_group_metadata[0].cursor.modular_dc_start_bits,
-                Some(end_bits)
-            );
-            assert!(plan.dc_group_metadata[0].var_dct_dc_header.is_some());
-            assert_eq!(plan.dc_group_metadata[0].parse_error, None);
-        } else {
-            assert!(plan.dc_group_metadata[0].var_dct_dc_header.is_none());
-            assert!(plan.dc_group_metadata[0].parse_error.is_some());
-        }
+        let dc_metadata = &plan.dc_group_metadata[0];
+        assert_eq!(dc_metadata.payload, plan.dc_group_payloads[0]);
+        assert_eq!(dc_metadata.cursor.var_dct_dc_start_bits, 0);
+        assert_eq!(dc_metadata.cursor.var_dct_dc_end_bits, Some(4));
+        assert_eq!(dc_metadata.cursor.modular_dc_start_bits, Some(4));
+        let dc_header = dc_metadata.var_dct_dc_header.as_ref().unwrap();
+        assert!(!dc_header.use_global_tree);
+        assert!(dc_header.weighted_predictor.all_default);
+        assert!(dc_header.transforms.is_empty());
+        assert_eq!(dc_metadata.parse_error, None);
         assert_eq!(plan.ac_group_payloads.len(), 2);
         assert_eq!(plan.ac_group_payloads[0].section.payload_range, 25..36);
         assert_eq!(plan.ac_group_payloads[0].group.group, 0);
