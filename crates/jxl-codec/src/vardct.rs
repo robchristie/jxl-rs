@@ -306,6 +306,12 @@ pub struct VarDctDecodePlan {
     pub modular_global_tree_direct_error_remaining_bits: Option<usize>,
     pub modular_global_tree_direct_residual_context_count: Option<usize>,
     pub modular_global_tree_direct_residual_histogram_count: Option<usize>,
+    pub modular_global_tree_direct_residual_lz77_end_bits: Option<usize>,
+    pub modular_global_tree_direct_residual_context_map_end_bits: Option<usize>,
+    pub modular_global_tree_direct_residual_entropy_mode_end_bits: Option<usize>,
+    pub modular_global_tree_direct_residual_log_alpha_size_end_bits: Option<usize>,
+    pub modular_global_tree_direct_residual_uint_config_end_bits_by_histogram: Vec<usize>,
+    pub modular_global_tree_direct_residual_uint_config_end_bits: Option<usize>,
     pub modular_global_tree_direct_residual_use_prefix_code: Option<bool>,
     pub modular_global_tree_direct_residual_log_alpha_size: Option<usize>,
     pub modular_global_tree_direct_residual_failed_histogram_index: Option<usize>,
@@ -600,6 +606,12 @@ pub fn read_vardct_decode_plan(
         modular_global_tree_direct_error_bits,
         modular_global_tree_direct_residual_context_count,
         modular_global_tree_direct_residual_histogram_count,
+        modular_global_tree_direct_residual_lz77_end_bits,
+        modular_global_tree_direct_residual_context_map_end_bits,
+        modular_global_tree_direct_residual_entropy_mode_end_bits,
+        modular_global_tree_direct_residual_log_alpha_size_end_bits,
+        modular_global_tree_direct_residual_uint_config_end_bits_by_histogram,
+        modular_global_tree_direct_residual_uint_config_end_bits,
         modular_global_tree_direct_residual_use_prefix_code,
         modular_global_tree_direct_residual_log_alpha_size,
         modular_global_tree_direct_residual_failed_histogram_index,
@@ -624,6 +636,12 @@ pub fn read_vardct_decode_plan(
                 result.direct_error_bits,
                 result.direct_residual_context_count,
                 result.direct_residual_histogram_count,
+                result.direct_residual_lz77_end_bits,
+                result.direct_residual_context_map_end_bits,
+                result.direct_residual_entropy_mode_end_bits,
+                result.direct_residual_log_alpha_size_end_bits,
+                result.direct_residual_uint_config_end_bits_by_histogram,
+                result.direct_residual_uint_config_end_bits,
                 result.direct_residual_use_prefix_code,
                 result.direct_residual_log_alpha_size,
                 result.direct_residual_failed_histogram_index,
@@ -648,6 +666,12 @@ pub fn read_vardct_decode_plan(
                 Vec::new(),
                 None,
                 None,
+                None,
+                None,
+                None,
+                Vec::new(),
+                None,
+                None,
                 Some(error),
             ),
         },
@@ -658,6 +682,12 @@ pub fn read_vardct_decode_plan(
             None,
             None,
             None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
             None,
             None,
             None,
@@ -761,6 +791,12 @@ pub fn read_vardct_decode_plan(
         ),
         modular_global_tree_direct_residual_context_count,
         modular_global_tree_direct_residual_histogram_count,
+        modular_global_tree_direct_residual_lz77_end_bits,
+        modular_global_tree_direct_residual_context_map_end_bits,
+        modular_global_tree_direct_residual_entropy_mode_end_bits,
+        modular_global_tree_direct_residual_log_alpha_size_end_bits,
+        modular_global_tree_direct_residual_uint_config_end_bits_by_histogram,
+        modular_global_tree_direct_residual_uint_config_end_bits,
         modular_global_tree_direct_residual_use_prefix_code,
         modular_global_tree_direct_residual_log_alpha_size,
         modular_global_tree_direct_residual_failed_histogram_index,
@@ -875,6 +911,12 @@ fn read_vardct_modular_global_tree(
             direct_error_bits: None,
             direct_residual_context_count: None,
             direct_residual_histogram_count: None,
+            direct_residual_lz77_end_bits: None,
+            direct_residual_context_map_end_bits: None,
+            direct_residual_entropy_mode_end_bits: None,
+            direct_residual_log_alpha_size_end_bits: None,
+            direct_residual_uint_config_end_bits_by_histogram: Vec::new(),
+            direct_residual_uint_config_end_bits: None,
             direct_residual_use_prefix_code: None,
             direct_residual_log_alpha_size: None,
             direct_residual_failed_histogram_index: None,
@@ -904,6 +946,31 @@ fn read_vardct_modular_global_tree(
                         direct_error_bits: direct_probe.error_bits,
                         direct_residual_context_count: direct_probe.residual_context_count,
                         direct_residual_histogram_count: direct_probe.residual_histogram_count,
+                        direct_residual_lz77_end_bits: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .and_then(|probe| probe.lz77_end_bits),
+                        direct_residual_context_map_end_bits: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .and_then(|probe| probe.context_map_end_bits),
+                        direct_residual_entropy_mode_end_bits: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .and_then(|probe| probe.entropy_mode_end_bits),
+                        direct_residual_log_alpha_size_end_bits: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .and_then(|probe| probe.log_alpha_size_end_bits),
+                        direct_residual_uint_config_end_bits_by_histogram: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .map(|probe| probe.uint_config_end_bits_by_histogram.clone())
+                            .unwrap_or_default(),
+                        direct_residual_uint_config_end_bits: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .and_then(|probe| probe.uint_config_end_bits),
                         direct_residual_use_prefix_code: direct_probe
                             .residual_histogram_probe
                             .as_ref()
@@ -950,6 +1017,12 @@ struct VarDctModularGlobalTreeRead {
     direct_error_bits: Option<usize>,
     direct_residual_context_count: Option<usize>,
     direct_residual_histogram_count: Option<usize>,
+    direct_residual_lz77_end_bits: Option<usize>,
+    direct_residual_context_map_end_bits: Option<usize>,
+    direct_residual_entropy_mode_end_bits: Option<usize>,
+    direct_residual_log_alpha_size_end_bits: Option<usize>,
+    direct_residual_uint_config_end_bits_by_histogram: Vec<usize>,
+    direct_residual_uint_config_end_bits: Option<usize>,
     direct_residual_use_prefix_code: Option<bool>,
     direct_residual_log_alpha_size: Option<usize>,
     direct_residual_failed_histogram_index: Option<usize>,

@@ -234,6 +234,8 @@ pub(crate) struct HistogramCodingProbe {
     pub lz77_end_bits: Option<usize>,
     pub context_map_end_bits: Option<usize>,
     pub entropy_mode_end_bits: Option<usize>,
+    pub log_alpha_size_end_bits: Option<usize>,
+    pub uint_config_end_bits_by_histogram: Vec<usize>,
     pub uint_config_end_bits: Option<usize>,
     pub histogram_end_bits: Option<usize>,
     pub context_count: Option<usize>,
@@ -722,13 +724,17 @@ pub(crate) fn probe_decode_histograms(
             }
         }
     };
+    let log_alpha_size_end_bits = Some(reader.bits_consumed());
 
+    let mut uint_config_end_bits_by_histogram = Vec::with_capacity(num_histograms);
     for _ in 0..num_histograms {
         if let Err(error) = decode_uint_config(log_alpha_size, reader) {
             return HistogramCodingProbe {
                 lz77_end_bits,
                 context_map_end_bits,
                 entropy_mode_end_bits,
+                log_alpha_size_end_bits,
+                uint_config_end_bits_by_histogram,
                 context_count: Some(context_count),
                 num_histograms: Some(num_histograms),
                 use_prefix_code: Some(use_prefix_code),
@@ -736,6 +742,7 @@ pub(crate) fn probe_decode_histograms(
                 ..histogram_probe_error(reader, HistogramCodingProbeStage::UintConfig, error)
             };
         }
+        uint_config_end_bits_by_histogram.push(reader.bits_consumed());
     }
     let uint_config_end_bits = Some(reader.bits_consumed());
 
@@ -745,6 +752,8 @@ pub(crate) fn probe_decode_histograms(
             lz77_end_bits,
             context_map_end_bits,
             entropy_mode_end_bits,
+            log_alpha_size_end_bits,
+            uint_config_end_bits_by_histogram,
             uint_config_end_bits,
             context_count: Some(context_count),
             num_histograms: Some(num_histograms),
@@ -761,6 +770,8 @@ pub(crate) fn probe_decode_histograms(
             lz77_end_bits,
             context_map_end_bits,
             entropy_mode_end_bits,
+            log_alpha_size_end_bits,
+            uint_config_end_bits_by_histogram,
             uint_config_end_bits,
             context_count: Some(context_count),
             num_histograms: Some(num_histograms),
@@ -783,6 +794,9 @@ pub(crate) fn probe_decode_histograms(
                         lz77_end_bits,
                         context_map_end_bits,
                         entropy_mode_end_bits,
+                        log_alpha_size_end_bits,
+                        uint_config_end_bits_by_histogram: uint_config_end_bits_by_histogram
+                            .clone(),
                         uint_config_end_bits,
                         context_count: Some(context_count),
                         num_histograms: Some(num_histograms),
@@ -802,6 +816,8 @@ pub(crate) fn probe_decode_histograms(
                     lz77_end_bits,
                     context_map_end_bits,
                     entropy_mode_end_bits,
+                    log_alpha_size_end_bits,
+                    uint_config_end_bits_by_histogram: uint_config_end_bits_by_histogram.clone(),
                     uint_config_end_bits,
                     context_count: Some(context_count),
                     num_histograms: Some(num_histograms),
@@ -822,6 +838,8 @@ pub(crate) fn probe_decode_histograms(
                     lz77_end_bits,
                     context_map_end_bits,
                     entropy_mode_end_bits,
+                    log_alpha_size_end_bits,
+                    uint_config_end_bits_by_histogram: uint_config_end_bits_by_histogram.clone(),
                     uint_config_end_bits,
                     context_count: Some(context_count),
                     num_histograms: Some(num_histograms),
@@ -850,6 +868,9 @@ pub(crate) fn probe_decode_histograms(
                         lz77_end_bits,
                         context_map_end_bits,
                         entropy_mode_end_bits,
+                        log_alpha_size_end_bits,
+                        uint_config_end_bits_by_histogram: uint_config_end_bits_by_histogram
+                            .clone(),
                         uint_config_end_bits,
                         context_count: Some(context_count),
                         num_histograms: Some(num_histograms),
@@ -871,6 +892,8 @@ pub(crate) fn probe_decode_histograms(
                     lz77_end_bits,
                     context_map_end_bits,
                     entropy_mode_end_bits,
+                    log_alpha_size_end_bits,
+                    uint_config_end_bits_by_histogram: uint_config_end_bits_by_histogram.clone(),
                     uint_config_end_bits,
                     context_count: Some(context_count),
                     num_histograms: Some(num_histograms),
@@ -895,6 +918,8 @@ pub(crate) fn probe_decode_histograms(
                     lz77_end_bits,
                     context_map_end_bits,
                     entropy_mode_end_bits,
+                    log_alpha_size_end_bits,
+                    uint_config_end_bits_by_histogram: uint_config_end_bits_by_histogram.clone(),
                     uint_config_end_bits,
                     context_count: Some(context_count),
                     num_histograms: Some(num_histograms),
@@ -911,6 +936,8 @@ pub(crate) fn probe_decode_histograms(
             lz77_end_bits,
             context_map_end_bits,
             entropy_mode_end_bits,
+            log_alpha_size_end_bits,
+            uint_config_end_bits_by_histogram,
             uint_config_end_bits,
             histogram_end_bits: Some(reader.bits_consumed()),
             context_count: Some(context_count),
@@ -929,6 +956,8 @@ pub(crate) fn probe_decode_histograms(
         lz77_end_bits,
         context_map_end_bits,
         entropy_mode_end_bits,
+        log_alpha_size_end_bits,
+        uint_config_end_bits_by_histogram,
         uint_config_end_bits,
         histogram_end_bits: Some(reader.bits_consumed()),
         context_count: Some(context_count),
@@ -952,6 +981,8 @@ fn histogram_probe_error(
         lz77_end_bits: None,
         context_map_end_bits: None,
         entropy_mode_end_bits: None,
+        log_alpha_size_end_bits: None,
+        uint_config_end_bits_by_histogram: Vec::new(),
         uint_config_end_bits: None,
         histogram_end_bits: None,
         context_count: None,
