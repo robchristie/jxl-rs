@@ -573,6 +573,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             probe.coefficient_event_checksum
                         );
                     }
+                    if let Some(trace) = &metadata.channel_trace {
+                        println!(
+                            "First frame VarDCT AC channel trace: pass={} group={} channel={} blocks={} events={} final_bits={} row_checksum={} coeff_checksum={} summaries={}",
+                            metadata.payload.pass,
+                            metadata.payload.group.group,
+                            trace.channel,
+                            trace.blocks_decoded,
+                            trace.coefficient_events_decoded,
+                            trace.final_bits,
+                            trace.row_nzeros_checksum,
+                            trace.coefficient_event_checksum,
+                            trace.block_summaries.len()
+                        );
+                    }
                 }
             }
             for group in &vardct.dc_groups {

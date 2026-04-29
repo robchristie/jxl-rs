@@ -623,6 +623,7 @@ pub struct VarDctAcGroupMetadata {
     pub histogram_selector: Option<usize>,
     pub entropy_uses_prefix_code: Option<bool>,
     pub coefficient_probe: Option<VarDctAcCoefficientProbe>,
+    pub channel_trace: Option<VarDctAcChannelTrace>,
     pub parse_error: Option<Error>,
 }
 
@@ -655,6 +656,7 @@ pub struct VarDctAcCoefficientProbe {
     pub nzeros: u32,
     pub block_end_bits: Option<usize>,
     pub remaining_nzeros: Option<usize>,
+    pub coefficient_event_count: usize,
     pub coefficient_events: Vec<VarDctAcCoefficientEvent>,
     pub coefficient_event_checksum: u64,
 }
@@ -671,6 +673,30 @@ pub struct VarDctAcCoefficientEvent {
     pub coeff: i32,
     pub prev_after: usize,
     pub remaining_nzeros: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcChannelTrace {
+    pub channel: usize,
+    pub blocks_decoded: usize,
+    pub coefficient_events_decoded: usize,
+    pub final_bits: usize,
+    pub row_nzeros_checksum: u64,
+    pub coefficient_event_checksum: u64,
+    pub block_summaries: Vec<VarDctAcBlockSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcBlockSummary {
+    pub block_x: usize,
+    pub block_y: usize,
+    pub raw_strategy: usize,
+    pub order: usize,
+    pub nzeros: u32,
+    pub events: usize,
+    pub start_bits: usize,
+    pub end_bits: usize,
+    pub checksum: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1224,6 +1250,7 @@ fn read_vardct_ac_group_metadata(
         histogram_selector: None,
         entropy_uses_prefix_code,
         coefficient_probe: None,
+        channel_trace: None,
         parse_error: None,
     };
 
@@ -1260,14 +1287,32 @@ fn read_vardct_ac_group_metadata(
                         metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
                         metadata.cursor.coefficient_stream_start_bits =
                             Some(reader.bits_consumed());
-                        match probe_first_vardct_ac_coefficient(
-                            &mut reader,
-                            &mut symbol_reader,
-                            &entropy.context_map,
-                            &metadata,
-                            global,
-                            dc_groups,
-                        ) {
+                        let probe_result = if metadata.payload.group.group == 0 {
+                            match trace_vardct_ac_group_channel(
+                                &mut reader,
+                                &mut symbol_reader,
+                                &entropy.context_map,
+                                &metadata,
+                                global,
+                                dc_groups,
+                            ) {
+                                Ok((probe, trace)) => {
+                                    metadata.channel_trace = Some(trace);
+                                    Ok(probe)
+                                }
+                                Err(error) => Err(error),
+                            }
+                        } else {
+                            probe_first_vardct_ac_coefficient(
+                                &mut reader,
+                                &mut symbol_reader,
+                                &entropy.context_map,
+                                &metadata,
+                                global,
+                                dc_groups,
+                            )
+                        };
+                        match probe_result {
                             Ok(probe) => {
                                 metadata.coefficient_probe = Some(probe);
                                 metadata.parse_error = Some(Error::Unsupported(
@@ -1358,18 +1403,145 @@ fn probe_first_vardct_ac_coefficient(
     let global = global.ok_or(Error::Unsupported("VarDCT AC global metadata"))?;
     let first_block = first_vardct_ac_block(metadata, dc_groups)
         .ok_or(Error::Unsupported("VarDCT AC metadata grid"))?;
+    let mut row_nzeros = vec![0i32; FIRST_AC_BLOCK_EVENT_LIMIT];
+    decode_vardct_ac_block_probe(
+        reader,
+        symbol_reader,
+        context_map,
+        global,
+        first_block,
+        1,
+        32,
+        &mut row_nzeros,
+        None,
+        FIRST_AC_BLOCK_EVENT_LIMIT,
+        true,
+    )
+}
+
+fn trace_vardct_ac_group_channel(
+    reader: &mut BitReader<'_>,
+    symbol_reader: &mut AnsSymbolReader,
+    context_map: &[u8],
+    metadata: &VarDctAcGroupMetadata,
+    global: Option<&VarDctGlobalMetadata>,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<(VarDctAcCoefficientProbe, VarDctAcChannelTrace)> {
+    const TRACE_CHANNEL: usize = 1;
+    const CHANNEL_ORDER: [usize; 3] = [1, 0, 2];
+    const SUMMARY_LIMIT: usize = 8;
+
+    let global = global.ok_or(Error::Unsupported("VarDCT AC global metadata"))?;
+    let blocks = vardct_ac_blocks_for_group(metadata, dc_groups)?;
+    let width_blocks = metadata.payload.group.width.div_ceil(8) as usize;
+    let height_blocks = metadata.payload.group.height.div_ceil(8) as usize;
+    let row_len = width_blocks
+        .checked_mul(height_blocks)
+        .ok_or(Error::InvalidCodestream("AC group is too large"))?;
+    let mut row_nzeros = [
+        vec![0i32; row_len],
+        vec![0i32; row_len],
+        vec![0i32; row_len],
+    ];
+    let mut first_probe = None;
+    let mut blocks_decoded = 0usize;
+    let mut coefficient_events_decoded = 0usize;
+    let mut coefficient_event_checksum = 0xcbf29ce484222325;
+    let mut block_summaries = Vec::new();
+
+    for block in blocks {
+        for channel in CHANNEL_ORDER {
+            let predicted_nzeros = predict_from_top_and_left(
+                &row_nzeros[channel],
+                width_blocks,
+                block.block_x,
+                block.block_y,
+                32,
+            );
+            let capture_events = channel == TRACE_CHANNEL && first_probe.is_none();
+            let probe = decode_vardct_ac_block_probe(
+                reader,
+                symbol_reader,
+                context_map,
+                global,
+                block,
+                channel,
+                predicted_nzeros as usize,
+                &mut row_nzeros[channel],
+                None,
+                width_blocks,
+                capture_events,
+            )?;
+            if channel == TRACE_CHANNEL {
+                blocks_decoded += 1;
+                coefficient_events_decoded += probe.coefficient_event_count;
+                coefficient_event_checksum = (coefficient_event_checksum
+                    ^ probe.coefficient_event_checksum)
+                    .wrapping_mul(0x100000001b3);
+                if block_summaries.len() < SUMMARY_LIMIT {
+                    block_summaries.push(VarDctAcBlockSummary {
+                        block_x: probe.block_x,
+                        block_y: probe.block_y,
+                        raw_strategy: probe.raw_strategy,
+                        order: probe.order,
+                        nzeros: probe.nzeros,
+                        events: probe.coefficient_event_count,
+                        start_bits: probe.start_bits,
+                        end_bits: probe.block_end_bits.unwrap_or(probe.nzeros_end_bits),
+                        checksum: probe.coefficient_event_checksum,
+                    });
+                }
+                if first_probe.is_none() {
+                    first_probe = Some(probe);
+                }
+            }
+        }
+    }
+
+    let row_nzeros_checksum = checksum_i32_slice(&row_nzeros[TRACE_CHANNEL]);
+    let trace = VarDctAcChannelTrace {
+        channel: TRACE_CHANNEL,
+        blocks_decoded,
+        coefficient_events_decoded,
+        final_bits: reader.bits_consumed(),
+        row_nzeros_checksum,
+        coefficient_event_checksum,
+        block_summaries,
+    };
+    let first_probe = first_probe.ok_or(Error::Unsupported("VarDCT AC metadata grid"))?;
+    Ok((first_probe, trace))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn decode_vardct_ac_block_probe(
+    reader: &mut BitReader<'_>,
+    symbol_reader: &mut AnsSymbolReader,
+    context_map: &[u8],
+    global: &VarDctGlobalMetadata,
+    block: VarDctFirstAcBlock,
+    channel: usize,
+    predicted_nzeros: usize,
+    row_nzeros: &mut [i32],
+    row_nzeros_top: Option<&[i32]>,
+    nzeros_stride: usize,
+    capture_events: bool,
+) -> Result<VarDctAcCoefficientProbe> {
+    let _ = row_nzeros_top;
     let order = *STRATEGY_ORDER
-        .get(first_block.raw_strategy)
+        .get(block.raw_strategy)
         .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
     let covered_blocks =
-        STRATEGY_BLOCKS_X[first_block.raw_strategy] * STRATEGY_BLOCKS_Y[first_block.raw_strategy];
+        STRATEGY_BLOCKS_X[block.raw_strategy] * STRATEGY_BLOCKS_Y[block.raw_strategy];
     let block_size = covered_blocks * DCT_BLOCK_SIZE;
     if block_size > FIRST_AC_BLOCK_EVENT_LIMIT + covered_blocks {
         return Err(Error::Unsupported("large VarDCT AC coefficient probe"));
     }
-    let block_context = vardct_block_context(&global.block_context_map, order, 1)?;
-    let nonzero_context =
-        vardct_nonzero_context(32, block_context, global.block_context_map.num_contexts);
+    let block_context = vardct_block_context(&global.block_context_map, order, channel)?;
+    let nonzero_context = vardct_nonzero_context(
+        predicted_nzeros,
+        block_context,
+        global.block_context_map.num_contexts,
+    );
     let clustered_context = usize::from(
         *context_map
             .get(nonzero_context)
@@ -1381,10 +1553,21 @@ fn probe_first_vardct_ac_coefficient(
     if nzeros as usize > block_size - covered_blocks {
         return Err(Error::InvalidCodestream("invalid VarDCT AC nzeros"));
     }
+    let log2_covered_blocks = covered_blocks.ilog2() as usize;
+    let nzeros_for_block = ((nzeros as usize + covered_blocks - 1) >> log2_covered_blocks) as i32;
+    let block_width = STRATEGY_BLOCKS_X[block.raw_strategy];
+    let block_height = STRATEGY_BLOCKS_Y[block.raw_strategy];
+    for y in 0..block_height {
+        for x in 0..block_width {
+            let index = block.block_x + x + (block.block_y + y) * nzeros_stride;
+            if let Some(slot) = row_nzeros.get_mut(index) {
+                *slot = nzeros_for_block;
+            }
+        }
+    }
 
     let zero_density_context_offset = global.block_context_map.num_contexts * NONZERO_BUCKETS
         + ZERO_DENSITY_CONTEXT_COUNT * block_context;
-    let log2_covered_blocks = covered_blocks.ilog2() as usize;
     let mut remaining_nzeros = nzeros as usize;
     let mut prev = if remaining_nzeros > block_size / 16 {
         0
@@ -1392,6 +1575,8 @@ fn probe_first_vardct_ac_coefficient(
         1
     };
     let mut coefficient_events = Vec::new();
+    let mut coefficient_event_checksum = 0xcbf29ce484222325;
+    let mut event_count = 0usize;
     for k in covered_blocks..block_size {
         if remaining_nzeros == 0 {
             break;
@@ -1415,7 +1600,7 @@ fn probe_first_vardct_ac_coefficient(
         let coeff = unpack_signed(u_coeff);
         prev = usize::from(u_coeff != 0);
         remaining_nzeros = remaining_nzeros.saturating_sub(prev);
-        coefficient_events.push(VarDctAcCoefficientEvent {
+        let event = VarDctAcCoefficientEvent {
             k,
             zero_density_context,
             context,
@@ -1426,7 +1611,12 @@ fn probe_first_vardct_ac_coefficient(
             coeff,
             prev_after: prev,
             remaining_nzeros,
-        });
+        };
+        coefficient_event_checksum = checksum_coefficient_event(coefficient_event_checksum, &event);
+        event_count += 1;
+        if capture_events {
+            coefficient_events.push(event);
+        }
     }
     if remaining_nzeros != 0 {
         return Err(Error::InvalidCodestream(
@@ -1434,13 +1624,12 @@ fn probe_first_vardct_ac_coefficient(
         ));
     }
     let block_end_bits = Some(reader.bits_consumed());
-    let coefficient_event_checksum = checksum_coefficient_events(&coefficient_events);
 
     Ok(VarDctAcCoefficientProbe {
-        block_x: first_block.block_x,
-        block_y: first_block.block_y,
-        channel: 1,
-        raw_strategy: first_block.raw_strategy,
+        block_x: block.block_x,
+        block_y: block.block_y,
+        channel,
+        raw_strategy: block.raw_strategy,
         order,
         covered_blocks,
         block_size,
@@ -1452,7 +1641,12 @@ fn probe_first_vardct_ac_coefficient(
         nzeros,
         block_end_bits,
         remaining_nzeros: Some(remaining_nzeros),
-        coefficient_events,
+        coefficient_event_count: event_count,
+        coefficient_events: if capture_events {
+            coefficient_events
+        } else {
+            Vec::with_capacity(event_count)
+        },
         coefficient_event_checksum,
     })
 }
@@ -1468,21 +1662,38 @@ fn first_vardct_ac_block(
     metadata: &VarDctAcGroupMetadata,
     dc_groups: &[VarDctDcGroupMetadata],
 ) -> Option<VarDctFirstAcBlock> {
-    let dc_group = dc_groups.iter().find(|dc_group| {
-        let group = &dc_group.payload.group;
-        metadata.payload.group.x >= group.x
-            && metadata.payload.group.y >= group.y
-            && metadata.payload.group.x < group.x + group.width
-            && metadata.payload.group.y < group.y + group.height
-    })?;
-    let ac_metadata = dc_group.ac_metadata.as_ref()?;
+    vardct_ac_blocks_for_group(metadata, dc_groups)
+        .ok()?
+        .into_iter()
+        .next()
+}
+
+fn vardct_ac_blocks_for_group(
+    metadata: &VarDctAcGroupMetadata,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<Vec<VarDctFirstAcBlock>> {
+    let dc_group = dc_groups
+        .iter()
+        .find(|dc_group| {
+            let group = &dc_group.payload.group;
+            metadata.payload.group.x >= group.x
+                && metadata.payload.group.y >= group.y
+                && metadata.payload.group.x < group.x + group.width
+                && metadata.payload.group.y < group.y + group.height
+        })
+        .ok_or(Error::Unsupported("VarDCT AC metadata grid"))?;
+    let ac_metadata = dc_group
+        .ac_metadata
+        .as_ref()
+        .ok_or(Error::Unsupported("VarDCT AC metadata grid"))?;
     let strategy_channel = ac_metadata
         .channels
         .iter()
-        .find(|channel| channel.channel_index == 2)?;
+        .find(|channel| channel.channel_index == 2)
+        .ok_or(Error::Unsupported("VarDCT AC metadata grid"))?;
     let count = strategy_channel.width as usize;
     if strategy_channel.height != 2 || strategy_channel.samples.len() < count * 2 {
-        return None;
+        return Err(Error::Unsupported("VarDCT AC metadata grid"));
     }
 
     let grid_width = dc_group.payload.group.width.div_ceil(8) as usize;
@@ -1493,17 +1704,26 @@ fn first_vardct_ac_block(
     let group_max_y = group_min_y + metadata.payload.group.height.div_ceil(8).min(256 / 8) as usize;
     let mut valid = vec![false; grid_width * grid_height];
     let mut cursor = 0usize;
+    let mut blocks = Vec::new();
     for y in 0..grid_height {
         for x in 0..grid_width {
             let index = y * grid_width + x;
             if valid[index] {
                 continue;
             }
-            let raw_strategy = *strategy_channel.samples.get(cursor)? as usize;
-            let block_x = *STRATEGY_BLOCKS_X.get(raw_strategy)?;
-            let block_y = *STRATEGY_BLOCKS_Y.get(raw_strategy)?;
+            let raw_strategy = *strategy_channel
+                .samples
+                .get(cursor)
+                .ok_or(Error::InvalidCodestream("invalid AC metadata stream"))?
+                as usize;
+            let block_x = *STRATEGY_BLOCKS_X
+                .get(raw_strategy)
+                .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+            let block_y = *STRATEGY_BLOCKS_Y
+                .get(raw_strategy)
+                .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
             if x >= group_min_x && x < group_max_x && y >= group_min_y && y < group_max_y {
-                return Some(VarDctFirstAcBlock {
+                blocks.push(VarDctFirstAcBlock {
                     block_x: x,
                     block_y: y,
                     raw_strategy,
@@ -1520,11 +1740,11 @@ fn first_vardct_ac_block(
             }
             cursor += 1;
             if cursor > count {
-                return None;
+                return Err(Error::InvalidCodestream("invalid AC metadata stream"));
             }
         }
     }
-    None
+    Ok(blocks)
 }
 
 fn vardct_block_context(
@@ -1587,24 +1807,52 @@ fn zero_density_context(
     Ok((COEFF_NUM_NONZERO_CONTEXT[nonzeros_left] + COEFF_FREQ_CONTEXT[k]) * 2 + prev)
 }
 
-fn checksum_coefficient_events(events: &[VarDctAcCoefficientEvent]) -> u64 {
-    events.iter().fold(0xcbf29ce484222325, |hash, event| {
-        [
-            event.k as u64,
-            event.zero_density_context as u64,
-            event.context as u64,
-            event.clustered_context as u64,
-            event.start_bits as u64,
-            event.end_bits as u64,
-            u64::from(event.u_coeff),
-            event.coeff as i64 as u64,
-            event.prev_after as u64,
-            event.remaining_nzeros as u64,
-        ]
-        .into_iter()
-        .fold(hash, |hash, value| {
-            (hash ^ value).wrapping_mul(0x100000001b3)
-        })
+fn predict_from_top_and_left(
+    row_nzeros: &[i32],
+    stride: usize,
+    x: usize,
+    y: usize,
+    default_value: i32,
+) -> i32 {
+    let top = y
+        .checked_sub(1)
+        .and_then(|top_y| row_nzeros.get(top_y * stride + x))
+        .copied();
+    if x == 0 {
+        return top.unwrap_or(default_value);
+    }
+    let left = row_nzeros
+        .get(y * stride + x - 1)
+        .copied()
+        .unwrap_or(default_value);
+    match top {
+        Some(top) => (top + left + 1) / 2,
+        None => left,
+    }
+}
+
+fn checksum_i32_slice(values: &[i32]) -> u64 {
+    values.iter().fold(0xcbf29ce484222325, |hash, value| {
+        (hash ^ i64::from(*value) as u64).wrapping_mul(0x100000001b3)
+    })
+}
+
+fn checksum_coefficient_event(hash: u64, event: &VarDctAcCoefficientEvent) -> u64 {
+    [
+        event.k as u64,
+        event.zero_density_context as u64,
+        event.context as u64,
+        event.clustered_context as u64,
+        event.start_bits as u64,
+        event.end_bits as u64,
+        u64::from(event.u_coeff),
+        event.coeff as i64 as u64,
+        event.prev_after as u64,
+        event.remaining_nzeros as u64,
+    ]
+    .into_iter()
+    .fold(hash, |hash, value| {
+        (hash ^ value).wrapping_mul(0x100000001b3)
     })
 }
 

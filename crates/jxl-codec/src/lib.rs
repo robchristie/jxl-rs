@@ -52,13 +52,13 @@ pub use modular::{
 };
 pub use transform::{CustomTransformData, OpsinInverseMatrix};
 pub use vardct::{
-    VarDctAcCoefficientEvent, VarDctAcCoefficientProbe, VarDctAcGlobalMetadata,
-    VarDctAcGlobalPassMetadata, VarDctAcGroupCursorMetadata, VarDctAcGroupMetadata,
-    VarDctAnsHistogramProbe, VarDctAnsHistogramProbeKind, VarDctAnsHistogramProbeStage,
-    VarDctBlockContextMapMetadata, VarDctCoeffOrderMetadata, VarDctColorCorrelationMetadata,
-    VarDctContextMapProbe, VarDctContextMapProbeKind, VarDctContextMapProbeStage,
-    VarDctDcDequantMetadata, VarDctDcGroupCursorMetadata, VarDctDcGroupMetadata,
-    VarDctDcGroupPayloadMetadata, VarDctDecodePlan, VarDctFrameMetadata,
+    VarDctAcBlockSummary, VarDctAcChannelTrace, VarDctAcCoefficientEvent, VarDctAcCoefficientProbe,
+    VarDctAcGlobalMetadata, VarDctAcGlobalPassMetadata, VarDctAcGroupCursorMetadata,
+    VarDctAcGroupMetadata, VarDctAnsHistogramProbe, VarDctAnsHistogramProbeKind,
+    VarDctAnsHistogramProbeStage, VarDctBlockContextMapMetadata, VarDctCoeffOrderMetadata,
+    VarDctColorCorrelationMetadata, VarDctContextMapProbe, VarDctContextMapProbeKind,
+    VarDctContextMapProbeStage, VarDctDcDequantMetadata, VarDctDcGroupCursorMetadata,
+    VarDctDcGroupMetadata, VarDctDcGroupPayloadMetadata, VarDctDecodePlan, VarDctFrameMetadata,
     VarDctGlobalCursorMetadata, VarDctGlobalMetadata, VarDctGroupMetadata,
     VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata, VarDctHistogramProbeStage,
     VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata, VarDctQuantizerMetadata,

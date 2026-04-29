@@ -573,6 +573,18 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             "1:32:0:1:4:2:4:256:2:302:11:32:34:17:23:Some(98):Some(0):2461791933791546484",
         ]
     );
+    let channel_trace = plan.ac_group_metadata[0].channel_trace.as_ref().unwrap();
+    assert_eq!(channel_trace.channel, 1);
+    assert_eq!(channel_trace.blocks_decoded, 477);
+    assert_eq!(channel_trace.coefficient_events_decoded, 9983);
+    assert_eq!(channel_trace.final_bits, 35936);
+    assert_eq!(channel_trace.row_nzeros_checksum, 12510740321947942186);
+    assert_eq!(
+        channel_trace.coefficient_event_checksum,
+        16906932721961906726
+    );
+    assert_eq!(channel_trace.block_summaries.len(), 8);
+    assert!(plan.ac_group_metadata[1].channel_trace.is_none());
     assert_eq!(plan.modular_global_tree_payload_start_bits, Some(192));
     assert_eq!(plan.modular_global_tree_payload_end_bits, Some(1232));
     assert_eq!(plan.modular_global_tree_payload_len_bits, Some(1040));
