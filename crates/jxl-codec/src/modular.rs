@@ -196,7 +196,7 @@ pub struct ModularTreeMetadata {
 }
 
 #[derive(Debug, Clone)]
-struct ModularTreeCoding {
+pub(crate) struct ModularTreeCoding {
     tree: MaTree,
     code: AnsCode,
     context_map: Vec<u8>,
@@ -514,6 +514,17 @@ fn read_tree_coding(
         code,
         context_map,
     })
+}
+
+pub(crate) fn read_modular_global_tree_coding(
+    reader: &mut BitReader<'_>,
+    metadata: &ImageMetadata,
+    frame_header: &FrameHeader,
+) -> Result<ModularTreeCoding> {
+    if !reader.read_bool()? {
+        return Err(Error::InvalidCodestream("modular frame has no global tree"));
+    }
+    read_tree_coding(reader, global_tree_size_limit(metadata, frame_header)?)
 }
 
 fn read_modular_group_sections(
@@ -1787,27 +1798,46 @@ fn decode_group_residuals(
         .get(group_payload_range(group)?)
         .ok_or(Error::InvalidCodestream("modular group outside codestream"))?;
     let mut reader = BitReader::new(payload);
-    let header = read_modular_group_header_metadata(&mut reader)?;
+    let (_, decoded) = decode_modular_stream_from_reader(
+        &mut reader,
+        group.section_physical_index,
+        group.stream_id,
+        &group.channels,
+        Some(global_tree),
+    )?;
+    Ok(decoded)
+}
+
+pub(crate) fn decode_modular_stream_from_reader(
+    reader: &mut BitReader<'_>,
+    section_physical_index: usize,
+    stream_id: usize,
+    channels: &[ModularGroupChannelPlan],
+    global_tree: Option<&ModularTreeCoding>,
+) -> Result<(ModularGroupHeader, ModularDecodedGroup)> {
+    let header = read_modular_group_header_metadata(reader)?;
     let tree = if header.use_global_tree {
-        global_tree.clone()
+        global_tree.cloned().ok_or(Error::InvalidCodestream(
+            "modular stream references a missing global tree",
+        ))?
     } else {
-        read_tree_coding(&mut reader, MAX_TREE_SIZE)?
+        read_tree_coding(reader, MAX_TREE_SIZE)?
     };
     let mut symbol_reader = AnsSymbolReader::new(
         tree.code.clone(),
-        &mut reader,
-        channel_distance_multiplier(&group.channels),
+        reader,
+        channel_distance_multiplier(channels),
     )?;
     let mut decoded_channels = Vec::new();
-    for (local_channel, channel) in group.channels.iter().enumerate() {
+    for (local_channel, channel) in channels.iter().enumerate() {
         decoded_channels.push(decode_channel_residuals(
-            &mut reader,
+            reader,
             &mut symbol_reader,
             &tree,
             &header.weighted_predictor,
             channel,
             local_channel,
-            group.stream_id,
+            stream_id,
         )?);
     }
     if !symbol_reader.check_final_state() {
@@ -1815,12 +1845,15 @@ fn decode_group_residuals(
             "invalid modular residual ANS state",
         ));
     }
-    Ok(ModularDecodedGroup {
-        section_physical_index: group.section_physical_index,
-        stream_id: group.stream_id,
-        channels: decoded_channels,
-        bits_consumed: reader.bits_consumed(),
-    })
+    Ok((
+        header,
+        ModularDecodedGroup {
+            section_physical_index,
+            stream_id,
+            channels: decoded_channels,
+            bits_consumed: reader.bits_consumed(),
+        },
+    ))
 }
 
 fn group_payload_range(group: &ModularSectionMetadata) -> Result<std::ops::Range<usize>> {

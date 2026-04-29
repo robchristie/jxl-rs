@@ -4,8 +4,13 @@ use crate::entropy::decode_context_map;
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
 use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_payload_range};
+use crate::metadata::ImageMetadata;
 use crate::metadata::unpack_signed;
-use crate::modular::{ModularGroupHeader, read_modular_group_header_metadata};
+use crate::modular::{
+    ModularGroupChannelPlan, ModularGroupHeader, ModularTreeCoding,
+    decode_modular_stream_from_reader, read_modular_global_tree_coding,
+    read_modular_group_header_metadata,
+};
 use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -62,6 +67,7 @@ pub struct VarDctPassGroupSectionMetadata {
 pub struct VarDctDecodePlan {
     pub frame: VarDctFrameMetadata,
     pub global: Option<VarDctGlobalMetadata>,
+    pub modular_global_tree_error: Option<Error>,
     pub global_payload: Option<VarDctSectionPayloadMetadata>,
     pub ac_global_payload: Option<VarDctSectionPayloadMetadata>,
     pub ac_group_payloads: Vec<VarDctPassGroupPayloadMetadata>,
@@ -271,6 +277,7 @@ pub fn read_vardct_frame_metadata(
 
 pub fn read_vardct_decode_plan(
     codestream: &[u8],
+    metadata: &ImageMetadata,
     frame_header: &FrameHeader,
     frame_data: &FrameData,
 ) -> Result<Option<VarDctDecodePlan>> {
@@ -287,6 +294,19 @@ pub fn read_vardct_decode_plan(
         .as_ref()
         .map(|section| read_vardct_global_metadata(codestream, section))
         .transpose()?;
+    let (global_tree, modular_global_tree_error) = match (&global_payload, &global) {
+        (Some(payload), Some(global)) => match read_vardct_modular_global_tree(
+            codestream,
+            metadata,
+            frame_header,
+            payload,
+            global,
+        ) {
+            Ok(tree) => (Some(tree), None),
+            Err(error) => (None, Some(error)),
+        },
+        _ => (None, None),
+    };
     let ac_global_payload = frame
         .ac_global_section
         .as_ref()
@@ -308,7 +328,15 @@ pub fn read_vardct_decode_plan(
     let dc_group_metadata = dc_group_payloads
         .iter()
         .cloned()
-        .map(|payload| read_vardct_dc_group_metadata(codestream, payload))
+        .map(|payload| {
+            read_vardct_dc_group_metadata(
+                codestream,
+                frame_header,
+                payload,
+                global_tree.as_ref(),
+                modular_global_tree_error.as_ref(),
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     let ac_group_payloads = frame
         .ac_group_sections
@@ -325,6 +353,7 @@ pub fn read_vardct_decode_plan(
     Ok(Some(VarDctDecodePlan {
         frame,
         global,
+        modular_global_tree_error,
         global_payload,
         ac_global_payload,
         ac_group_payloads,
@@ -335,7 +364,10 @@ pub fn read_vardct_decode_plan(
 
 fn read_vardct_dc_group_metadata(
     codestream: &[u8],
+    frame_header: &FrameHeader,
     payload: VarDctDcGroupPayloadMetadata,
+    global_tree: Option<&ModularTreeCoding>,
+    global_tree_error: Option<&Error>,
 ) -> Result<VarDctDcGroupMetadata> {
     let bytes = codestream
         .get(payload.section.payload_range.clone())
@@ -346,14 +378,47 @@ fn read_vardct_dc_group_metadata(
         .as_ref()
         .ok()
         .map(|_| reader.bits_consumed());
+    let mut stream_reader = reader.clone();
     let (extra_precision_bits, var_dct_dc_header, parse_error) = match extra_precision_result {
         Ok(extra_precision_bits) => match read_modular_group_header_metadata(&mut reader) {
-            Ok(header) => (Some(extra_precision_bits), Some(header), None),
+            Ok(header) => {
+                let channels = vardct_dc_channel_plan(frame_header, &payload)?;
+                if header.use_global_tree && global_tree.is_none() {
+                    (
+                        Some(extra_precision_bits),
+                        Some(header),
+                        Some(
+                            global_tree_error
+                                .cloned()
+                                .unwrap_or(Error::InvalidCodestream(
+                                    "modular stream references a missing global tree",
+                                )),
+                        ),
+                    )
+                } else {
+                    match decode_modular_stream_from_reader(
+                        &mut stream_reader,
+                        payload.section.section.section_physical_index,
+                        payload.var_dct_dc_stream_id,
+                        &channels,
+                        global_tree,
+                    ) {
+                        Ok((decoded_header, _)) => {
+                            (Some(extra_precision_bits), Some(decoded_header), None)
+                        }
+                        Err(error) => (Some(extra_precision_bits), Some(header), Some(error)),
+                    }
+                }
+            }
             Err(error) => (Some(extra_precision_bits), None, Some(error)),
         },
         Err(error) => (None, None, Some(error)),
     };
     let header_end = var_dct_dc_header.as_ref().map(|_| reader.bits_consumed());
+    let var_dct_dc_end = parse_error
+        .is_none()
+        .then_some(stream_reader.bits_consumed())
+        .filter(|_| var_dct_dc_header.is_some());
     Ok(VarDctDcGroupMetadata {
         payload,
         cursor: VarDctDcGroupCursorMetadata {
@@ -361,8 +426,8 @@ fn read_vardct_dc_group_metadata(
             extra_precision_end_bits: extra_precision_end,
             var_dct_dc_start_bits: extra_precision_end,
             var_dct_dc_header_end_bits: header_end,
-            var_dct_dc_end_bits: None,
-            modular_dc_start_bits: None,
+            var_dct_dc_end_bits: var_dct_dc_end,
+            modular_dc_start_bits: var_dct_dc_end,
             modular_dc_end_bits: None,
             ac_metadata_start_bits: None,
             ac_metadata_end_bits: None,
@@ -371,6 +436,65 @@ fn read_vardct_dc_group_metadata(
         var_dct_dc_header,
         parse_error,
     })
+}
+
+fn read_vardct_modular_global_tree(
+    codestream: &[u8],
+    metadata: &ImageMetadata,
+    frame_header: &FrameHeader,
+    payload: &VarDctSectionPayloadMetadata,
+    global: &VarDctGlobalMetadata,
+) -> Result<ModularTreeCoding> {
+    let bytes = codestream
+        .get(payload.payload_range.clone())
+        .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
+    let mut reader = BitReader::new(bytes);
+    reader.skip_bits(global.bits_consumed)?;
+    read_modular_global_tree_coding(&mut reader, metadata, frame_header)
+}
+
+fn vardct_dc_channel_plan(
+    frame_header: &FrameHeader,
+    payload: &VarDctDcGroupPayloadMetadata,
+) -> Result<Vec<ModularGroupChannelPlan>> {
+    let mut channels = Vec::with_capacity(3);
+    for channel_index in 0..3 {
+        let (hshift, vshift) = vardct_chroma_shift(frame_header, channel_index)?;
+        if hshift < 0 || vshift < 0 {
+            return Err(Error::InvalidCodestream("invalid VarDCT DC chroma shift"));
+        }
+        channels.push(ModularGroupChannelPlan {
+            channel_index,
+            width: payload.group.width >> hshift as u32,
+            height: payload.group.height >> vshift as u32,
+            x0: 0,
+            y0: 0,
+            hshift,
+            vshift,
+        });
+    }
+    Ok(channels)
+}
+
+fn vardct_chroma_shift(frame_header: &FrameHeader, channel: usize) -> Result<(i32, i32)> {
+    const H_SHIFT: [i32; 4] = [0, 1, 1, 0];
+    const V_SHIFT: [i32; 4] = [0, 1, 0, 1];
+    let mode = *frame_header
+        .chroma_subsampling
+        .channel_mode
+        .get(channel)
+        .ok_or(Error::InvalidCodestream("invalid chroma channel"))? as usize;
+    let hshift = i32::from(frame_header.chroma_subsampling.max_h_shift)
+        - H_SHIFT
+            .get(mode)
+            .copied()
+            .ok_or(Error::InvalidCodestream("invalid chroma mode"))?;
+    let vshift = i32::from(frame_header.chroma_subsampling.max_v_shift)
+        - V_SHIFT
+            .get(mode)
+            .copied()
+            .ok_or(Error::InvalidCodestream("invalid chroma mode"))?;
+    Ok((hshift, vshift))
 }
 
 fn read_vardct_global_metadata(
@@ -851,7 +975,8 @@ mod tests {
         codestream[12] = 0b0000_0011;
         codestream[13] = 0b0000_1000;
 
-        let plan = read_vardct_decode_plan(&codestream, &frame_header, &frame_data)
+        let metadata = ImageMetadata::default();
+        let plan = read_vardct_decode_plan(&codestream, &metadata, &frame_header, &frame_data)
             .unwrap()
             .unwrap();
 
@@ -892,7 +1017,7 @@ mod tests {
         assert!(!dc_header.use_global_tree);
         assert!(dc_header.weighted_predictor.all_default);
         assert!(dc_header.transforms.is_empty());
-        assert_eq!(dc_metadata.parse_error, None);
+        assert_eq!(dc_metadata.parse_error, Some(Error::Truncated));
         assert_eq!(plan.ac_group_payloads.len(), 2);
         assert_eq!(plan.ac_group_payloads[0].section.payload_range, 25..36);
         assert_eq!(plan.ac_group_payloads[0].group.group, 0);
@@ -906,7 +1031,9 @@ mod tests {
         let frame_data = frame_data(vec![frame_section(0, 0, FrameSectionKind::Combined, 8, 8)]);
         let codestream = vec![0; 12];
 
-        let error = read_vardct_decode_plan(&codestream, &frame_header, &frame_data).unwrap_err();
+        let metadata = ImageMetadata::default();
+        let error = read_vardct_decode_plan(&codestream, &metadata, &frame_header, &frame_data)
+            .unwrap_err();
 
         assert_eq!(
             error,
@@ -920,7 +1047,9 @@ mod tests {
         let frame_data = frame_data(vec![frame_section(0, 0, FrameSectionKind::Combined, 0, 1)]);
         let codestream = vec![1];
 
-        let error = read_vardct_decode_plan(&codestream, &frame_header, &frame_data).unwrap_err();
+        let metadata = ImageMetadata::default();
+        let error = read_vardct_decode_plan(&codestream, &metadata, &frame_header, &frame_data)
+            .unwrap_err();
 
         assert_eq!(error, Error::Truncated);
     }
