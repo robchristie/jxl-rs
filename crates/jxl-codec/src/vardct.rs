@@ -4,10 +4,7 @@ use crate::entropy::decode_context_map;
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
 use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_payload_range};
-use crate::metadata::{ImageMetadata, unpack_signed};
-use crate::modular::{
-    ModularGroupHeader, global_tree_size_limit, read_group_header, read_tree_metadata,
-};
+use crate::metadata::unpack_signed;
 use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -67,7 +64,7 @@ pub struct VarDctDecodePlan {
     pub global_payload: Option<VarDctSectionPayloadMetadata>,
     pub ac_global_payload: Option<VarDctSectionPayloadMetadata>,
     pub ac_group_payloads: Vec<VarDctPassGroupPayloadMetadata>,
-    pub dc_group_payloads: Vec<VarDctGroupPayloadMetadata>,
+    pub dc_group_payloads: Vec<VarDctDcGroupPayloadMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +77,15 @@ pub struct VarDctSectionPayloadMetadata {
 pub struct VarDctGroupPayloadMetadata {
     pub section: VarDctSectionPayloadMetadata,
     pub group: VarDctGroupMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctDcGroupPayloadMetadata {
+    pub section: VarDctSectionPayloadMetadata,
+    pub group: VarDctGroupMetadata,
+    pub var_dct_dc_stream_id: usize,
+    pub modular_dc_stream_id: usize,
+    pub ac_metadata_stream_id: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,8 +103,6 @@ pub struct VarDctGlobalMetadata {
     pub quantizer: VarDctQuantizerMetadata,
     pub block_context_map: VarDctBlockContextMapMetadata,
     pub color_correlation: VarDctColorCorrelationMetadata,
-    pub modular_global: Option<VarDctModularGlobalMetadata>,
-    pub modular_global_error: Option<Error>,
     pub bits_consumed: usize,
 }
 
@@ -108,8 +112,6 @@ pub struct VarDctGlobalCursorMetadata {
     pub quantizer_end_bits: usize,
     pub block_context_end_bits: usize,
     pub color_correlation_end_bits: usize,
-    pub modular_global_start_bits: usize,
-    pub modular_global_end_bits: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,15 +147,6 @@ pub struct VarDctColorCorrelationMetadata {
     pub base_correlation_b: f32,
     pub ytox_dc: i32,
     pub ytob_dc: i32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VarDctModularGlobalMetadata {
-    pub has_global_tree: bool,
-    pub global_tree_contexts: Option<usize>,
-    pub global_tree_context_map_size: Option<usize>,
-    pub group_header: ModularGroupHeader,
-    pub bits_consumed: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,7 +247,6 @@ pub fn read_vardct_frame_metadata(
 
 pub fn read_vardct_decode_plan(
     codestream: &[u8],
-    metadata: &ImageMetadata,
     frame_header: &FrameHeader,
     frame_data: &FrameData,
 ) -> Result<Option<VarDctDecodePlan>> {
@@ -269,7 +261,7 @@ pub fn read_vardct_decode_plan(
         .transpose()?;
     let global = global_payload
         .as_ref()
-        .map(|section| read_vardct_global_metadata(codestream, metadata, frame_header, section))
+        .map(|section| read_vardct_global_metadata(codestream, section))
         .transpose()?;
     let ac_global_payload = frame
         .ac_global_section
@@ -280,9 +272,12 @@ pub fn read_vardct_decode_plan(
         .dc_group_sections
         .iter()
         .map(|section| {
-            Ok(VarDctGroupPayloadMetadata {
+            Ok(VarDctDcGroupPayloadMetadata {
                 section: section_payload_metadata(codestream, frame_data, &section.section)?,
                 group: section.group,
+                var_dct_dc_stream_id: 1 + section.group.group,
+                modular_dc_stream_id: 1 + frame.dc_groups.len() + section.group.group,
+                ac_metadata_stream_id: 1 + 2 * frame.dc_groups.len() + section.group.group,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -310,8 +305,6 @@ pub fn read_vardct_decode_plan(
 
 fn read_vardct_global_metadata(
     codestream: &[u8],
-    metadata: &ImageMetadata,
-    frame_header: &FrameHeader,
     section: &VarDctSectionPayloadMetadata,
 ) -> Result<VarDctGlobalMetadata> {
     let payload = codestream
@@ -326,22 +319,11 @@ fn read_vardct_global_metadata(
     let block_context_end_bits = reader.bits_consumed();
     let color_correlation = read_vardct_color_correlation(&mut reader)?;
     let color_correlation_end_bits = reader.bits_consumed();
-    let modular_global_start_bits = reader.bits_consumed();
-    let modular_global_result = read_vardct_modular_global(&mut reader, metadata, frame_header);
-    let (modular_global, modular_global_error) = match modular_global_result {
-        Ok(metadata) => (Some(metadata), None),
-        Err(error) => (None, Some(error)),
-    };
-    let modular_global_end_bits = modular_global
-        .as_ref()
-        .map(|metadata| modular_global_start_bits + metadata.bits_consumed);
     let cursor = VarDctGlobalCursorMetadata {
         dc_dequant_end_bits,
         quantizer_end_bits,
         block_context_end_bits,
         color_correlation_end_bits,
-        modular_global_start_bits,
-        modular_global_end_bits,
     };
     Ok(VarDctGlobalMetadata {
         section: section.clone(),
@@ -350,8 +332,6 @@ fn read_vardct_global_metadata(
         quantizer,
         block_context_map,
         color_correlation,
-        modular_global,
-        modular_global_error,
         bits_consumed: reader.bits_consumed(),
     })
 }
@@ -535,40 +515,6 @@ fn read_vardct_color_correlation(
     })
 }
 
-fn read_vardct_modular_global(
-    reader: &mut BitReader<'_>,
-    metadata: &ImageMetadata,
-    frame_header: &FrameHeader,
-) -> Result<VarDctModularGlobalMetadata> {
-    let start_bits = reader.bits_consumed();
-    let has_global_tree = reader.read_bool()?;
-    let global_tree_metadata = if has_global_tree {
-        Some(read_tree_metadata(
-            reader,
-            global_tree_size_limit(metadata, frame_header)?,
-        )?)
-    } else {
-        None
-    };
-    let group_header = read_group_header(reader)?;
-    if group_header.use_global_tree && !has_global_tree {
-        return Err(Error::InvalidCodestream(
-            "modular stream references a missing global tree",
-        ));
-    }
-    Ok(VarDctModularGlobalMetadata {
-        has_global_tree,
-        global_tree_contexts: global_tree_metadata
-            .as_ref()
-            .map(|metadata| metadata.contexts),
-        global_tree_context_map_size: global_tree_metadata
-            .as_ref()
-            .map(|metadata| metadata.context_map_size),
-        group_header,
-        bits_consumed: reader.bits_consumed() - start_bits,
-    })
-}
-
 fn section_payload_metadata(
     codestream: &[u8],
     frame_data: &FrameData,
@@ -722,7 +668,6 @@ mod tests {
         FrameType, LoopFilter, Passes, YCbCrChromaSubsampling,
     };
     use crate::frame_data::{FrameSection, FrameToc};
-    use crate::metadata::ImageMetadata;
 
     #[test]
     fn classifies_multi_section_vardct_sections() {
@@ -833,16 +778,11 @@ mod tests {
         ]);
         let mut codestream = vec![0; 64];
         codestream[10] = 1;
-        codestream[12] = 0b0001_0011;
+        codestream[12] = 0b0000_0011;
 
-        let plan = read_vardct_decode_plan(
-            &codestream,
-            &ImageMetadata::default(),
-            &frame_header,
-            &frame_data,
-        )
-        .unwrap()
-        .unwrap();
+        let plan = read_vardct_decode_plan(&codestream, &frame_header, &frame_data)
+            .unwrap()
+            .unwrap();
 
         assert!(!plan.frame.is_combined);
         let global = plan.global.as_ref().unwrap();
@@ -854,19 +794,11 @@ mod tests {
         assert_eq!(global.block_context_map.context_map_size, 39);
         assert!(global.color_correlation.all_default);
         assert_eq!(global.color_correlation.color_factor, 84);
-        let modular_global = global.modular_global.as_ref().unwrap();
-        assert!(!modular_global.has_global_tree);
-        assert_eq!(modular_global.bits_consumed, 5);
-        assert!(!modular_global.group_header.use_global_tree);
-        assert_eq!(modular_global.group_header.transforms.len(), 0);
-        assert_eq!(global.modular_global_error, None);
         assert_eq!(global.cursor.dc_dequant_end_bits, 1);
         assert_eq!(global.cursor.quantizer_end_bits, 16);
         assert_eq!(global.cursor.block_context_end_bits, 17);
         assert_eq!(global.cursor.color_correlation_end_bits, 18);
-        assert_eq!(global.cursor.modular_global_start_bits, 18);
-        assert_eq!(global.cursor.modular_global_end_bits, Some(23));
-        assert_eq!(global.bits_consumed, 23);
+        assert_eq!(global.bits_consumed, 18);
         assert_eq!(plan.global_payload.as_ref().unwrap().payload_range, 10..13);
         assert_eq!(
             plan.ac_global_payload.as_ref().unwrap().payload_range,
@@ -888,13 +820,7 @@ mod tests {
         let frame_data = frame_data(vec![frame_section(0, 0, FrameSectionKind::Combined, 8, 8)]);
         let codestream = vec![0; 12];
 
-        let error = read_vardct_decode_plan(
-            &codestream,
-            &ImageMetadata::default(),
-            &frame_header,
-            &frame_data,
-        )
-        .unwrap_err();
+        let error = read_vardct_decode_plan(&codestream, &frame_header, &frame_data).unwrap_err();
 
         assert_eq!(
             error,
@@ -908,13 +834,7 @@ mod tests {
         let frame_data = frame_data(vec![frame_section(0, 0, FrameSectionKind::Combined, 0, 1)]);
         let codestream = vec![1];
 
-        let error = read_vardct_decode_plan(
-            &codestream,
-            &ImageMetadata::default(),
-            &frame_header,
-            &frame_data,
-        )
-        .unwrap_err();
+        let error = read_vardct_decode_plan(&codestream, &frame_header, &frame_data).unwrap_err();
 
         assert_eq!(error, Error::Truncated);
     }

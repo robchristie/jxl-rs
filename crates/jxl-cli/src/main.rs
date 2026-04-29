@@ -445,7 +445,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|plan| plan.global.as_ref())
             {
                 println!(
-                    "First frame VarDCT global metadata: bits={} dc_dequant_default={} global_scale={} quant_dc={} block_contexts={} block_ctx_map={} color_default={} color_factor={} modular_tree={} modular_bits={}",
+                    "First frame VarDCT global metadata: bits={} dc_dequant_default={} global_scale={} quant_dc={} block_contexts={} block_ctx_map={} color_default={} color_factor={}",
                     global.bits_consumed,
                     global.dc_dequant.all_default,
                     global.quantizer.global_scale,
@@ -453,26 +453,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     global.block_context_map.num_contexts,
                     global.block_context_map.context_map_size,
                     global.color_correlation.all_default,
-                    global.color_correlation.color_factor,
-                    global
-                        .modular_global
-                        .as_ref()
-                        .map(|metadata| metadata.has_global_tree)
-                        .unwrap_or(false),
-                    global
-                        .modular_global
-                        .as_ref()
-                        .map(|metadata| metadata.bits_consumed)
-                        .unwrap_or(0)
+                    global.color_correlation.color_factor
                 );
                 println!(
-                    "First frame VarDCT global cursor: dc_dequant={} quantizer={} block_context={} color_correlation={} modular_start={} modular_end={:?}",
+                    "First frame VarDCT global cursor: dc_dequant={} quantizer={} block_context={} color_correlation={}",
                     global.cursor.dc_dequant_end_bits,
                     global.cursor.quantizer_end_bits,
                     global.cursor.block_context_end_bits,
-                    global.cursor.color_correlation_end_bits,
-                    global.cursor.modular_global_start_bits,
-                    global.cursor.modular_global_end_bits
+                    global.cursor.color_correlation_end_bits
                 );
             }
             if let Some(section) = &vardct.ac_global_section {

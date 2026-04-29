@@ -433,13 +433,34 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert!(!plan.dc_group_payloads.is_empty());
     assert!(!plan.ac_group_payloads.is_empty());
 
+    assert_eq!(plan.dc_group_payloads.len(), plan.frame.dc_groups.len());
+    for dc_group in &plan.dc_group_payloads {
+        assert!(dc_group.section.payload_range.start < dc_group.section.payload_range.end);
+        assert_eq!(
+            dc_group.section.payload_range.len(),
+            dc_group.section.section.payload_size as usize
+        );
+        assert_eq!(dc_group.var_dct_dc_stream_id, 1 + dc_group.group.group);
+        assert_eq!(
+            dc_group.modular_dc_stream_id,
+            1 + plan.frame.dc_groups.len() + dc_group.group.group
+        );
+        assert_eq!(
+            dc_group.ac_metadata_stream_id,
+            1 + 2 * plan.frame.dc_groups.len() + dc_group.group.group
+        );
+    }
+    let selected_dc = plan.frame.dc_sections_for_region(ImageRegion {
+        x: 0,
+        y: 0,
+        width: 64,
+        height: 64,
+    });
+    assert!(!selected_dc.is_empty());
+    assert_eq!(selected_dc[0].group.group, 0);
+
     let global = plan.global.as_ref().unwrap();
     assert_vardct_global_cursor_in_payload(global, global.section.section.payload_size);
-    assert_eq!(global.modular_global, None);
-    assert_eq!(
-        global.modular_global_error,
-        Some(jxl_codec::Error::Truncated)
-    );
 }
 
 fn parse_ppm_rgb(bytes: &[u8]) -> PpmRgb {
@@ -510,18 +531,8 @@ fn assert_vardct_global_cursor_in_payload(
     assert!(cursor.quantizer_end_bits > cursor.dc_dequant_end_bits);
     assert!(cursor.block_context_end_bits >= cursor.quantizer_end_bits);
     assert!(cursor.color_correlation_end_bits >= cursor.block_context_end_bits);
-    assert_eq!(
-        cursor.modular_global_start_bits,
-        cursor.color_correlation_end_bits
-    );
-    assert!(cursor.modular_global_start_bits <= payload_bits);
-    if let Some(end_bits) = cursor.modular_global_end_bits {
-        assert!(end_bits >= cursor.modular_global_start_bits);
-        assert!(end_bits <= payload_bits);
-        assert_eq!(end_bits, global.bits_consumed);
-    } else {
-        assert!(global.modular_global_error.is_some());
-    }
+    assert!(cursor.color_correlation_end_bits <= payload_bits);
+    assert_eq!(cursor.color_correlation_end_bits, global.bits_consumed);
 }
 
 fn write_progressive_squeeze_source_ppm(path: &Path) {
@@ -678,24 +689,7 @@ fn parses_checked_in_fixture_vardct_metadata() {
     let global = vardct_plan.global.as_ref().unwrap();
     assert!(global.bits_consumed > 0);
     assert!(global.bits_consumed <= vardct.sections[0].payload_size as usize * 8);
-    let cursor = global.cursor;
-    let payload_bits = vardct.sections[0].payload_size as usize * 8;
-    assert!(cursor.dc_dequant_end_bits > 0);
-    assert!(cursor.quantizer_end_bits > cursor.dc_dequant_end_bits);
-    assert!(cursor.block_context_end_bits >= cursor.quantizer_end_bits);
-    assert!(cursor.color_correlation_end_bits >= cursor.block_context_end_bits);
-    assert_eq!(
-        cursor.modular_global_start_bits,
-        cursor.color_correlation_end_bits
-    );
-    assert!(cursor.modular_global_start_bits <= payload_bits);
-    if let Some(end_bits) = cursor.modular_global_end_bits {
-        assert!(end_bits >= cursor.modular_global_start_bits);
-        assert!(end_bits <= payload_bits);
-        assert_eq!(end_bits, global.bits_consumed);
-    } else {
-        assert!(global.modular_global_error.is_some());
-    }
+    assert_vardct_global_cursor_in_payload(global, vardct.sections[0].payload_size);
     assert!(global.dc_dequant.all_default);
     assert_eq!(global.dc_dequant.coefficients, None);
     assert!(global.quantizer.global_scale > 0);
@@ -710,23 +704,6 @@ fn parses_checked_in_fixture_vardct_metadata() {
     assert!(global.color_correlation.color_factor > 0);
     assert!(global.color_correlation.base_correlation_x.abs() <= 4.0);
     assert!(global.color_correlation.base_correlation_b.abs() <= 4.0);
-    if let Some(modular_global) = &global.modular_global {
-        assert!(modular_global.bits_consumed > 0);
-        assert_eq!(
-            modular_global.has_global_tree,
-            modular_global.global_tree_contexts.is_some()
-        );
-        assert_eq!(
-            modular_global.global_tree_contexts.is_some(),
-            modular_global.global_tree_context_map_size.is_some()
-        );
-        assert!(global.modular_global_error.is_none());
-    } else {
-        assert_eq!(
-            global.modular_global_error,
-            Some(jxl_codec::Error::Truncated)
-        );
-    }
     assert_eq!(
         vardct_plan
             .global_payload
