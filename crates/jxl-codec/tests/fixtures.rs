@@ -482,6 +482,24 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(selected_dc[0].group.group, 0);
 
     let global = plan.global.as_ref().unwrap();
+    assert_eq!(global.cursor.dc_dequant_default_end_bits, 1);
+    assert_eq!(global.cursor.dc_dequant_end_bits, 1);
+    assert_eq!(global.cursor.quantizer_global_scale_end_bits, 15);
+    assert_eq!(global.cursor.quantizer_quant_dc_end_bits, 22);
+    assert_eq!(global.cursor.quantizer_end_bits, 22);
+    assert_eq!(global.cursor.block_context_default_end_bits, 23);
+    assert_eq!(global.cursor.block_context_dc_thresholds_end_bits, 35);
+    assert_eq!(global.cursor.block_context_qf_thresholds_end_bits, 39);
+    assert_eq!(global.cursor.block_context_map_start_bits, Some(39));
+    assert_eq!(global.cursor.block_context_map_end_bits, Some(205));
+    assert_eq!(global.cursor.block_context_end_bits, 205);
+    assert_eq!(global.cursor.color_correlation_default_end_bits, 206);
+    assert_eq!(global.cursor.color_correlation_color_factor_end_bits, None);
+    assert_eq!(global.cursor.color_correlation_base_x_end_bits, None);
+    assert_eq!(global.cursor.color_correlation_base_b_end_bits, None);
+    assert_eq!(global.cursor.color_correlation_ytox_dc_end_bits, None);
+    assert_eq!(global.cursor.color_correlation_ytob_dc_end_bits, None);
+    assert_eq!(global.cursor.color_correlation_end_bits, 206);
     assert_eq!(plan.modular_global_tree_direct_start_bits, Some(206));
     assert_eq!(
         plan.modular_global_tree_direct_start_absolute_bits,

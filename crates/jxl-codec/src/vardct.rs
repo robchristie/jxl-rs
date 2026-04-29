@@ -283,9 +283,23 @@ pub struct VarDctGlobalMetadata {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VarDctGlobalCursorMetadata {
+    pub dc_dequant_default_end_bits: usize,
     pub dc_dequant_end_bits: usize,
+    pub quantizer_global_scale_end_bits: usize,
+    pub quantizer_quant_dc_end_bits: usize,
     pub quantizer_end_bits: usize,
+    pub block_context_default_end_bits: usize,
+    pub block_context_dc_thresholds_end_bits: usize,
+    pub block_context_qf_thresholds_end_bits: usize,
+    pub block_context_map_start_bits: Option<usize>,
+    pub block_context_map_end_bits: Option<usize>,
     pub block_context_end_bits: usize,
+    pub color_correlation_default_end_bits: usize,
+    pub color_correlation_color_factor_end_bits: Option<usize>,
+    pub color_correlation_base_x_end_bits: Option<usize>,
+    pub color_correlation_base_b_end_bits: Option<usize>,
+    pub color_correlation_ytox_dc_end_bits: Option<usize>,
+    pub color_correlation_ytob_dc_end_bits: Option<usize>,
     pub color_correlation_end_bits: usize,
 }
 
@@ -295,6 +309,12 @@ pub struct VarDctDcDequantMetadata {
     pub coefficients: Option<[f32; 3]>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct VarDctDcDequantRead {
+    metadata: VarDctDcDequantMetadata,
+    default_end_bits: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VarDctQuantizerMetadata {
     pub global_scale: u32,
@@ -302,6 +322,13 @@ pub struct VarDctQuantizerMetadata {
     pub scale: f32,
     pub inv_global_scale: f32,
     pub inv_quant_dc: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct VarDctQuantizerRead {
+    metadata: VarDctQuantizerMetadata,
+    global_scale_end_bits: usize,
+    quant_dc_end_bits: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +341,16 @@ pub struct VarDctBlockContextMapMetadata {
     pub num_dc_contexts: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct VarDctBlockContextMapRead {
+    metadata: VarDctBlockContextMapMetadata,
+    default_end_bits: usize,
+    dc_thresholds_end_bits: usize,
+    qf_thresholds_end_bits: usize,
+    context_map_start_bits: Option<usize>,
+    context_map_end_bits: Option<usize>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VarDctColorCorrelationMetadata {
     pub all_default: bool,
@@ -322,6 +359,17 @@ pub struct VarDctColorCorrelationMetadata {
     pub base_correlation_b: f32,
     pub ytox_dc: i32,
     pub ytob_dc: i32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct VarDctColorCorrelationRead {
+    metadata: VarDctColorCorrelationMetadata,
+    default_end_bits: usize,
+    color_factor_end_bits: Option<usize>,
+    base_x_end_bits: Option<usize>,
+    base_b_end_bits: Option<usize>,
+    ytox_dc_end_bits: Option<usize>,
+    ytob_dc_end_bits: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -868,24 +916,39 @@ fn read_vardct_global_metadata(
     let color_correlation = read_vardct_color_correlation(&mut reader)?;
     let color_correlation_end_bits = reader.bits_consumed();
     let cursor = VarDctGlobalCursorMetadata {
+        dc_dequant_default_end_bits: dc_dequant.default_end_bits,
         dc_dequant_end_bits,
+        quantizer_global_scale_end_bits: quantizer.global_scale_end_bits,
+        quantizer_quant_dc_end_bits: quantizer.quant_dc_end_bits,
         quantizer_end_bits,
+        block_context_default_end_bits: block_context_map.default_end_bits,
+        block_context_dc_thresholds_end_bits: block_context_map.dc_thresholds_end_bits,
+        block_context_qf_thresholds_end_bits: block_context_map.qf_thresholds_end_bits,
+        block_context_map_start_bits: block_context_map.context_map_start_bits,
+        block_context_map_end_bits: block_context_map.context_map_end_bits,
         block_context_end_bits,
+        color_correlation_default_end_bits: color_correlation.default_end_bits,
+        color_correlation_color_factor_end_bits: color_correlation.color_factor_end_bits,
+        color_correlation_base_x_end_bits: color_correlation.base_x_end_bits,
+        color_correlation_base_b_end_bits: color_correlation.base_b_end_bits,
+        color_correlation_ytox_dc_end_bits: color_correlation.ytox_dc_end_bits,
+        color_correlation_ytob_dc_end_bits: color_correlation.ytob_dc_end_bits,
         color_correlation_end_bits,
     };
     Ok(VarDctGlobalMetadata {
         section: section.clone(),
         cursor,
-        dc_dequant,
-        quantizer,
-        block_context_map,
-        color_correlation,
+        dc_dequant: dc_dequant.metadata,
+        quantizer: quantizer.metadata,
+        block_context_map: block_context_map.metadata,
+        color_correlation: color_correlation.metadata,
         bits_consumed: reader.bits_consumed(),
     })
 }
 
-fn read_vardct_dc_dequant(reader: &mut BitReader<'_>) -> Result<VarDctDcDequantMetadata> {
+fn read_vardct_dc_dequant(reader: &mut BitReader<'_>) -> Result<VarDctDcDequantRead> {
     let all_default = reader.read_bool()?;
+    let default_end_bits = reader.bits_consumed();
     let coefficients = if all_default {
         None
     } else {
@@ -900,13 +963,16 @@ fn read_vardct_dc_dequant(reader: &mut BitReader<'_>) -> Result<VarDctDcDequantM
         }
         Some(coefficients)
     };
-    Ok(VarDctDcDequantMetadata {
-        all_default,
-        coefficients,
+    Ok(VarDctDcDequantRead {
+        metadata: VarDctDcDequantMetadata {
+            all_default,
+            coefficients,
+        },
+        default_end_bits,
     })
 }
 
-fn read_vardct_quantizer(reader: &mut BitReader<'_>) -> Result<VarDctQuantizerMetadata> {
+fn read_vardct_quantizer(reader: &mut BitReader<'_>) -> Result<VarDctQuantizerRead> {
     const GLOBAL_SCALE_DENOM: f32 = 65_536.0;
     let global_scale = reader.read_u32_selector(
         bits_offset(11, 1),
@@ -914,41 +980,53 @@ fn read_vardct_quantizer(reader: &mut BitReader<'_>) -> Result<VarDctQuantizerMe
         bits_offset(12, 4097),
         bits_offset(16, 8193),
     )?;
+    let global_scale_end_bits = reader.bits_consumed();
     let quant_dc = reader.read_u32_selector(
         val(16),
         bits_offset(5, 1),
         bits_offset(8, 1),
         bits_offset(16, 1),
     )?;
+    let quant_dc_end_bits = reader.bits_consumed();
     if global_scale == 0 || quant_dc == 0 {
         return Err(Error::InvalidCodestream("invalid VarDCT quantizer"));
     }
     let inv_global_scale = GLOBAL_SCALE_DENOM / global_scale as f32;
-    Ok(VarDctQuantizerMetadata {
-        global_scale,
-        quant_dc,
-        scale: global_scale as f32 / GLOBAL_SCALE_DENOM,
-        inv_global_scale,
-        inv_quant_dc: inv_global_scale / quant_dc as f32,
+    Ok(VarDctQuantizerRead {
+        metadata: VarDctQuantizerMetadata {
+            global_scale,
+            quant_dc,
+            scale: global_scale as f32 / GLOBAL_SCALE_DENOM,
+            inv_global_scale,
+            inv_quant_dc: inv_global_scale / quant_dc as f32,
+        },
+        global_scale_end_bits,
+        quant_dc_end_bits,
     })
 }
 
-fn read_vardct_block_context_map(
-    reader: &mut BitReader<'_>,
-) -> Result<VarDctBlockContextMapMetadata> {
+fn read_vardct_block_context_map(reader: &mut BitReader<'_>) -> Result<VarDctBlockContextMapRead> {
     const NUM_ORDERS: usize = 13;
     const DEFAULT_CONTEXT_MAP_SIZE: usize = 3 * NUM_ORDERS;
     const DEFAULT_NUM_CONTEXTS: usize = 15;
 
     let all_default = reader.read_bool()?;
+    let default_end_bits = reader.bits_consumed();
     if all_default {
-        return Ok(VarDctBlockContextMapMetadata {
-            all_default,
-            dc_thresholds: [Vec::new(), Vec::new(), Vec::new()],
-            qf_thresholds: Vec::new(),
-            context_map_size: DEFAULT_CONTEXT_MAP_SIZE,
-            num_contexts: DEFAULT_NUM_CONTEXTS,
-            num_dc_contexts: 1,
+        return Ok(VarDctBlockContextMapRead {
+            metadata: VarDctBlockContextMapMetadata {
+                all_default,
+                dc_thresholds: [Vec::new(), Vec::new(), Vec::new()],
+                qf_thresholds: Vec::new(),
+                context_map_size: DEFAULT_CONTEXT_MAP_SIZE,
+                num_contexts: DEFAULT_NUM_CONTEXTS,
+                num_dc_contexts: 1,
+            },
+            default_end_bits,
+            dc_thresholds_end_bits: default_end_bits,
+            qf_thresholds_end_bits: default_end_bits,
+            context_map_start_bits: None,
+            context_map_end_bits: None,
         });
     }
 
@@ -972,6 +1050,7 @@ fn read_vardct_block_context_map(
             thresholds.push(unpack_signed(threshold));
         }
     }
+    let dc_thresholds_end_bits = reader.bits_consumed();
 
     let qf_len = reader.read_bits(4)? as usize;
     let mut qf_thresholds = Vec::with_capacity(qf_len);
@@ -984,6 +1063,7 @@ fn read_vardct_block_context_map(
         )?;
         qf_thresholds.push(threshold + 1);
     }
+    let qf_thresholds_end_bits = reader.bits_consumed();
 
     if num_dc_contexts * (qf_thresholds.len() + 1) > 64 {
         return Err(Error::InvalidCodestream(
@@ -993,38 +1073,54 @@ fn read_vardct_block_context_map(
 
     let context_map_size = 3 * NUM_ORDERS * num_dc_contexts * (qf_thresholds.len() + 1);
     let mut context_map = vec![0; context_map_size];
+    let context_map_start_bits = reader.bits_consumed();
     let num_contexts = decode_context_map(reader, &mut context_map)?;
+    let context_map_end_bits = reader.bits_consumed();
     if num_contexts > 16 {
         return Err(Error::InvalidCodestream(
             "VarDCT block context map has too many contexts",
         ));
     }
-    Ok(VarDctBlockContextMapMetadata {
-        all_default,
-        dc_thresholds,
-        qf_thresholds,
-        context_map_size,
-        num_contexts,
-        num_dc_contexts,
+    Ok(VarDctBlockContextMapRead {
+        metadata: VarDctBlockContextMapMetadata {
+            all_default,
+            dc_thresholds,
+            qf_thresholds,
+            context_map_size,
+            num_contexts,
+            num_dc_contexts,
+        },
+        default_end_bits,
+        dc_thresholds_end_bits,
+        qf_thresholds_end_bits,
+        context_map_start_bits: Some(context_map_start_bits),
+        context_map_end_bits: Some(context_map_end_bits),
     })
 }
 
-fn read_vardct_color_correlation(
-    reader: &mut BitReader<'_>,
-) -> Result<VarDctColorCorrelationMetadata> {
+fn read_vardct_color_correlation(reader: &mut BitReader<'_>) -> Result<VarDctColorCorrelationRead> {
     const DEFAULT_COLOR_FACTOR: u32 = 84;
     const DEFAULT_BASE_CORRELATION_X: f32 = 0.0;
     const DEFAULT_BASE_CORRELATION_B: f32 = 1.0;
 
     let all_default = reader.read_bool()?;
+    let default_end_bits = reader.bits_consumed();
     if all_default {
-        return Ok(VarDctColorCorrelationMetadata {
-            all_default,
-            color_factor: DEFAULT_COLOR_FACTOR,
-            base_correlation_x: DEFAULT_BASE_CORRELATION_X,
-            base_correlation_b: DEFAULT_BASE_CORRELATION_B,
-            ytox_dc: 0,
-            ytob_dc: 0,
+        return Ok(VarDctColorCorrelationRead {
+            metadata: VarDctColorCorrelationMetadata {
+                all_default,
+                color_factor: DEFAULT_COLOR_FACTOR,
+                base_correlation_x: DEFAULT_BASE_CORRELATION_X,
+                base_correlation_b: DEFAULT_BASE_CORRELATION_B,
+                ytox_dc: 0,
+                ytob_dc: 0,
+            },
+            default_end_bits,
+            color_factor_end_bits: None,
+            base_x_end_bits: None,
+            base_b_end_bits: None,
+            ytox_dc_end_bits: None,
+            ytob_dc_end_bits: None,
         });
     }
 
@@ -1034,31 +1130,44 @@ fn read_vardct_color_correlation(
         bits_offset(8, 2),
         bits_offset(16, 258),
     )?;
+    let color_factor_end_bits = reader.bits_consumed();
     if color_factor == 0 {
         return Err(Error::InvalidCodestream("invalid VarDCT color factor"));
     }
     let base_correlation_x = reader.read_f16()?;
+    let base_x_end_bits = reader.bits_consumed();
     if base_correlation_x.abs() > 4.0 {
         return Err(Error::InvalidCodestream(
             "VarDCT base X correlation is out of range",
         ));
     }
     let base_correlation_b = reader.read_f16()?;
+    let base_b_end_bits = reader.bits_consumed();
     if base_correlation_b.abs() > 4.0 {
         return Err(Error::InvalidCodestream(
             "VarDCT base B correlation is out of range",
         ));
     }
     let ytox_dc = reader.read_bits(8)? as i32 - 128;
+    let ytox_dc_end_bits = reader.bits_consumed();
     let ytob_dc = reader.read_bits(8)? as i32 - 128;
+    let ytob_dc_end_bits = reader.bits_consumed();
 
-    Ok(VarDctColorCorrelationMetadata {
-        all_default,
-        color_factor,
-        base_correlation_x,
-        base_correlation_b,
-        ytox_dc,
-        ytob_dc,
+    Ok(VarDctColorCorrelationRead {
+        metadata: VarDctColorCorrelationMetadata {
+            all_default,
+            color_factor,
+            base_correlation_x,
+            base_correlation_b,
+            ytox_dc,
+            ytob_dc,
+        },
+        default_end_bits,
+        color_factor_end_bits: Some(color_factor_end_bits),
+        base_x_end_bits: Some(base_x_end_bits),
+        base_b_end_bits: Some(base_b_end_bits),
+        ytox_dc_end_bits: Some(ytox_dc_end_bits),
+        ytob_dc_end_bits: Some(ytob_dc_end_bits),
     })
 }
 
