@@ -17,9 +17,9 @@ pub use jxl_codec::{
     SqueezeParams, TocEntry, ToneMapping, TransferFunction, TransformId,
     VarDctBlockContextMapMetadata, VarDctColorCorrelationMetadata, VarDctDcDequantMetadata,
     VarDctDecodePlan, VarDctFrameMetadata, VarDctGlobalMetadata, VarDctGroupMetadata,
-    VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata, VarDctPassGroupPayloadMetadata,
-    VarDctPassGroupSectionMetadata, VarDctQuantizerMetadata, VarDctSectionMetadata,
-    VarDctSectionPayloadMetadata, WeightedPredictorHeader, WhitePoint,
+    VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata, VarDctModularGlobalMetadata,
+    VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata, VarDctQuantizerMetadata,
+    VarDctSectionMetadata, VarDctSectionPayloadMetadata, WeightedPredictorHeader, WhitePoint,
 };
 
 #[derive(Debug, Clone, PartialEq)]

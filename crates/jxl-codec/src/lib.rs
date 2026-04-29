@@ -54,7 +54,7 @@ pub use transform::{CustomTransformData, OpsinInverseMatrix};
 pub use vardct::{
     VarDctBlockContextMapMetadata, VarDctColorCorrelationMetadata, VarDctDcDequantMetadata,
     VarDctDecodePlan, VarDctFrameMetadata, VarDctGlobalMetadata, VarDctGroupMetadata,
-    VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata, VarDctPassGroupPayloadMetadata,
-    VarDctPassGroupSectionMetadata, VarDctQuantizerMetadata, VarDctSectionMetadata,
-    VarDctSectionPayloadMetadata,
+    VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata, VarDctModularGlobalMetadata,
+    VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata, VarDctQuantizerMetadata,
+    VarDctSectionMetadata, VarDctSectionPayloadMetadata,
 };

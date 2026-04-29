@@ -592,6 +592,23 @@ fn parses_checked_in_fixture_vardct_metadata() {
     assert!(global.color_correlation.color_factor > 0);
     assert!(global.color_correlation.base_correlation_x.abs() <= 4.0);
     assert!(global.color_correlation.base_correlation_b.abs() <= 4.0);
+    if let Some(modular_global) = &global.modular_global {
+        assert!(modular_global.bits_consumed > 0);
+        assert_eq!(
+            modular_global.has_global_tree,
+            modular_global.global_tree_contexts.is_some()
+        );
+        assert_eq!(
+            modular_global.global_tree_contexts.is_some(),
+            modular_global.global_tree_context_map_size.is_some()
+        );
+        assert!(global.modular_global_error.is_none());
+    } else {
+        assert_eq!(
+            global.modular_global_error,
+            Some(jxl_codec::Error::Truncated)
+        );
+    }
     assert_eq!(
         vardct_plan
             .global_payload

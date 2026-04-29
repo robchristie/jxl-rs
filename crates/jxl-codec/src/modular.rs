@@ -488,7 +488,7 @@ fn read_global_section(
     })
 }
 
-fn read_tree_metadata(
+pub(crate) fn read_tree_metadata(
     reader: &mut BitReader<'_>,
     tree_size_limit: usize,
 ) -> Result<ModularTreeMetadata> {
@@ -2681,7 +2681,10 @@ fn skip_dc_dequant_matrices(reader: &mut BitReader<'_>) -> Result<()> {
     Ok(())
 }
 
-fn global_tree_size_limit(metadata: &ImageMetadata, frame_header: &FrameHeader) -> Result<usize> {
+pub(crate) fn global_tree_size_limit(
+    metadata: &ImageMetadata,
+    frame_header: &FrameHeader,
+) -> Result<usize> {
     let nb_chans = if metadata.color_encoding.color_space == crate::metadata::ColorSpace::Gray
         && frame_header.color_transform == ColorTransform::None
     {
@@ -2707,7 +2710,7 @@ fn global_tree_size_limit(metadata: &ImageMetadata, frame_header: &FrameHeader) 
     Ok(MAX_TREE_SIZE.min(1024 + (samples / 16) as usize))
 }
 
-fn read_group_header(reader: &mut BitReader<'_>) -> Result<ModularGroupHeader> {
+pub(crate) fn read_group_header(reader: &mut BitReader<'_>) -> Result<ModularGroupHeader> {
     let use_global_tree = reader.read_bool()?;
     let weighted_predictor = read_weighted_predictor_header(reader)?;
     let num_transforms =

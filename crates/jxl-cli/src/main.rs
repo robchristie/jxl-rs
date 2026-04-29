@@ -445,7 +445,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|plan| plan.global.as_ref())
             {
                 println!(
-                    "First frame VarDCT global metadata: bits={} dc_dequant_default={} global_scale={} quant_dc={} block_contexts={} block_ctx_map={} color_default={} color_factor={}",
+                    "First frame VarDCT global metadata: bits={} dc_dequant_default={} global_scale={} quant_dc={} block_contexts={} block_ctx_map={} color_default={} color_factor={} modular_tree={} modular_bits={}",
                     global.bits_consumed,
                     global.dc_dequant.all_default,
                     global.quantizer.global_scale,
@@ -453,7 +453,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     global.block_context_map.num_contexts,
                     global.block_context_map.context_map_size,
                     global.color_correlation.all_default,
-                    global.color_correlation.color_factor
+                    global.color_correlation.color_factor,
+                    global
+                        .modular_global
+                        .as_ref()
+                        .map(|metadata| metadata.has_global_tree)
+                        .unwrap_or(false),
+                    global
+                        .modular_global
+                        .as_ref()
+                        .map(|metadata| metadata.bits_consumed)
+                        .unwrap_or(0)
                 );
             }
             if let Some(section) = &vardct.ac_global_section {
