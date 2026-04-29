@@ -565,6 +565,14 @@ fn parses_checked_in_fixture_vardct_metadata() {
     assert_eq!(vardct.sections.len(), 1);
     assert_eq!(vardct.sections[0].section_kind, FrameSectionKind::Combined);
     assert_eq!(vardct.sections[0].payload_size, 45);
+    assert!(vardct.is_combined);
+    assert_eq!(
+        vardct.global_section.as_ref().unwrap().section_kind,
+        FrameSectionKind::Combined
+    );
+    assert!(vardct.ac_global_section.is_none());
+    assert!(vardct.dc_group_sections.is_empty());
+    assert!(vardct.ac_group_sections.is_empty());
     assert_eq!(vardct.ac_groups.len(), 1);
     assert_eq!(vardct.ac_groups[0].group, 0);
     assert_eq!(vardct.ac_groups[0].x, 0);
@@ -580,6 +588,26 @@ fn parses_checked_in_fixture_vardct_metadata() {
             height: 1,
         }),
         vec![0]
+    );
+    assert!(
+        vardct
+            .ac_sections_for_region(ImageRegion {
+                x: 4,
+                y: 4,
+                width: 1,
+                height: 1,
+            })
+            .is_empty()
+    );
+    assert!(
+        vardct
+            .dc_sections_for_region(ImageRegion {
+                x: 4,
+                y: 4,
+                width: 1,
+                height: 1,
+            })
+            .is_empty()
     );
 
     let pq = parse_fixture("reference/libjxl/testdata/jxl/pq_gradient.jxl");

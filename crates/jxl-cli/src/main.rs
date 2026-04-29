@@ -142,8 +142,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(vardct) = &info.first_frame_vardct {
             println!(
-                "First frame VarDCT: sections={} ac_groups={} dc_groups={}",
+                "First frame VarDCT: sections={} combined={} ac_groups={} dc_groups={}",
                 vardct.sections.len(),
+                vardct.is_combined,
                 vardct.ac_groups.len(),
                 vardct.dc_groups.len()
             );
@@ -419,15 +420,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         if let Some(vardct) = &info.first_frame_vardct {
             println!(
-                "First frame VarDCT plan: {}x{} group_dim={} groups={}x{} dc_groups={}x{}",
+                "First frame VarDCT plan: {}x{} group_dim={} groups={}x{} dc_groups={}x{} combined={}",
                 vardct.width,
                 vardct.height,
                 vardct.group_dim,
                 vardct.groups_x,
                 vardct.groups_y,
                 vardct.dc_groups_x,
-                vardct.dc_groups_y
+                vardct.dc_groups_y,
+                vardct.is_combined
             );
+            if let Some(section) = &vardct.global_section {
+                println!(
+                    "First frame VarDCT global section: logical={} kind={:?} offset={} size={}",
+                    section.section_logical_id,
+                    section.section_kind,
+                    section.codestream_offset,
+                    section.payload_size
+                );
+            }
+            if let Some(section) = &vardct.ac_global_section {
+                println!(
+                    "First frame VarDCT AC global section: logical={} offset={} size={}",
+                    section.section_logical_id, section.codestream_offset, section.payload_size
+                );
+            }
             for section in &vardct.sections {
                 println!(
                     "First frame VarDCT section {}: logical={} kind={:?} offset={} size={}",
@@ -444,10 +461,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     group.group, group.width, group.height, group.x, group.y
                 );
             }
+            for section in &vardct.ac_group_sections {
+                println!(
+                    "First frame VarDCT AC section: pass={} group={} physical={} size={}",
+                    section.pass,
+                    section.group.group,
+                    section.section.section_physical_index,
+                    section.section.payload_size
+                );
+            }
             for group in &vardct.dc_groups {
                 println!(
                     "First frame VarDCT DC group {}: rect={}x{} at ({},{})",
                     group.group, group.width, group.height, group.x, group.y
+                );
+            }
+            for section in &vardct.dc_group_sections {
+                println!(
+                    "First frame VarDCT DC section: group={} physical={} size={}",
+                    section.group.group,
+                    section.section.section_physical_index,
+                    section.section.payload_size
                 );
             }
         }

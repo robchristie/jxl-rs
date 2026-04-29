@@ -48,4 +48,7 @@ pub use modular::{
     WeightedPredictorHeader,
 };
 pub use transform::{CustomTransformData, OpsinInverseMatrix};
-pub use vardct::{VarDctFrameMetadata, VarDctGroupMetadata, VarDctSectionMetadata};
+pub use vardct::{
+    VarDctFrameMetadata, VarDctGroupMetadata, VarDctGroupSectionMetadata,
+    VarDctPassGroupSectionMetadata, VarDctSectionMetadata,
+};

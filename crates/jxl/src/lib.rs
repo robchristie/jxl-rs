@@ -15,7 +15,8 @@ pub use jxl_codec::{
     ModularPredictor, ModularResiduals, ModularSectionMetadata, ModularTransform,
     ModularTreeMetadata, OpsinInverseMatrix, Orientation, Primaries, RenderingIntent, Result,
     SqueezeParams, TocEntry, ToneMapping, TransferFunction, TransformId, VarDctFrameMetadata,
-    VarDctGroupMetadata, VarDctSectionMetadata, WeightedPredictorHeader, WhitePoint,
+    VarDctGroupMetadata, VarDctGroupSectionMetadata, VarDctPassGroupSectionMetadata,
+    VarDctSectionMetadata, WeightedPredictorHeader, WhitePoint,
 };
 
 #[derive(Debug, Clone, PartialEq)]
