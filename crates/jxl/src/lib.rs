@@ -184,26 +184,26 @@ impl Decoder {
     /// samples are ROI-local: sample `(0, 0)` corresponds to the requested
     /// image-space coordinate `(roi.x, roi.y)`.
     ///
-    /// ROI decode is currently supported only for modular still images whose
-    /// cropped channels can be assembled without modular transforms, meta
-    /// channels, shifted/subsampled channels, or VarDCT reconstruction.
+    /// ROI decode is currently supported for modular still images. Unsupported
+    /// paths, including VarDCT reconstruction and unsupported channel geometry,
+    /// return [`Error::Unsupported`].
     pub fn decode_channels(&self, input: &[u8]) -> Result<DecodedChannels> {
         self.validate_shared_options()?;
         decode_channels_buffered(input, self.codec_config())
     }
 
     pub fn decode(&self, input: &[u8]) -> Result<DecodedImage> {
-        self.validate_full_image_output_options()?;
+        self.validate_shared_options()?;
         decode_buffered(input, self.codec_config())
     }
 
     pub fn decode_rgba8(&self, input: &[u8]) -> Result<RgbaImage> {
-        self.validate_full_image_output_options()?;
+        self.validate_shared_options()?;
         decode_rgba8_buffered(input, self.codec_config())
     }
 
     pub fn decode_rgba16(&self, input: &[u8]) -> Result<Rgba16Image> {
-        self.validate_full_image_output_options()?;
+        self.validate_shared_options()?;
         decode_rgba16_buffered(input, self.codec_config())
     }
 
@@ -213,14 +213,6 @@ impl Decoder {
         }
         if self.options.threads == ThreadingMode::Threads(0) {
             return Err(Error::Unsupported("zero decoder threads"));
-        }
-        Ok(())
-    }
-
-    fn validate_full_image_output_options(&self) -> Result<()> {
-        self.validate_shared_options()?;
-        if self.options.roi.is_some() {
-            return Err(Error::Unsupported("region-of-interest decode"));
         }
         Ok(())
     }
@@ -745,18 +737,9 @@ mod tests {
             width: 8,
             height: 8,
         });
-        assert_eq!(
-            roi_decoder.decode(&bytes),
-            Err(Error::Unsupported("region-of-interest decode"))
-        );
-        assert_eq!(
-            roi_decoder.decode_rgba8(&bytes),
-            Err(Error::Unsupported("region-of-interest decode"))
-        );
-        assert_eq!(
-            roi_decoder.decode_rgba16(&bytes),
-            Err(Error::Unsupported("region-of-interest decode"))
-        );
+        assert_eq!(roi_decoder.decode(&bytes).unwrap().width, 8);
+        assert_eq!(roi_decoder.decode_rgba8(&bytes).unwrap().height, 8);
+        assert_eq!(roi_decoder.decode_rgba16(&bytes).unwrap().width, 8);
 
         let memory_decoder = Decoder::new().memory_limit(1024);
         assert_eq!(
@@ -787,6 +770,52 @@ mod tests {
         let roi_image = Decoder::new().roi(roi).decode_channels(&bytes).unwrap();
 
         assert_roi_matches_full_channels(&roi_image, &full, roi);
+    }
+
+    #[test]
+    fn decode_roi_supports_rct_modular_pixels_and_rgba() {
+        let bytes = std::fs::read(workspace_path(
+            "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
+        ))
+        .unwrap();
+        let roi = Rect {
+            x: 7,
+            y: 11,
+            width: 19,
+            height: 17,
+        };
+        let full = decode(&bytes).unwrap();
+        let roi_image = Decoder::new().roi(roi).decode(&bytes).unwrap();
+        assert_roi_matches_full_image(&roi_image, &full, roi);
+
+        let full_rgba8 = decode_rgba8(&bytes).unwrap();
+        let roi_rgba8 = Decoder::new().roi(roi).decode_rgba8(&bytes).unwrap();
+        assert_roi_matches_full_rgba8(&roi_rgba8, &full_rgba8, roi);
+
+        let full_rgba16 = decode_rgba16(&bytes).unwrap();
+        let roi_rgba16 = Decoder::new().roi(roi).decode_rgba16(&bytes).unwrap();
+        assert_roi_matches_full_rgba16(&roi_rgba16, &full_rgba16, roi);
+    }
+
+    #[test]
+    fn decode_roi_supports_palette_modular_pixels_and_rgba() {
+        let bytes = std::fs::read(workspace_path(
+            "reference/libjxl/testdata/jxl/pq_gradient.jxl",
+        ))
+        .unwrap();
+        let roi = Rect {
+            x: 600,
+            y: 0,
+            width: 32,
+            height: 32,
+        };
+        let full = decode(&bytes).unwrap();
+        let roi_image = Decoder::new().roi(roi).decode(&bytes).unwrap();
+        assert_roi_matches_full_image(&roi_image, &full, roi);
+
+        let full_rgba8 = decode_rgba8(&bytes).unwrap();
+        let roi_rgba8 = Decoder::new().roi(roi).decode_rgba8(&bytes).unwrap();
+        assert_roi_matches_full_rgba8(&roi_rgba8, &full_rgba8, roi);
     }
 
     #[test]
@@ -1089,6 +1118,16 @@ mod tests {
             .decode_channels(&encoded_bytes)
             .unwrap();
         assert_roi_matches_full_channels(&roi_channels, &full_channels, roi);
+
+        let roi_decoded = Decoder::new().roi(roi).decode(&encoded_bytes).unwrap();
+        assert_roi_matches_full_image(&roi_decoded, &decoded, roi);
+
+        let full_rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+        let roi_rgba8 = Decoder::new()
+            .roi(roi)
+            .decode_rgba8(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_rgba8(&roi_rgba8, &full_rgba8, roi);
     }
 
     #[test]
@@ -1421,6 +1460,48 @@ mod tests {
         }
     }
 
+    fn assert_roi_matches_full_image(roi_image: &DecodedImage, full: &DecodedImage, roi: Rect) {
+        assert_eq!(roi_image.width, roi.width);
+        assert_eq!(roi_image.height, roi.height);
+        assert_eq!(roi_image.color_channels, full.color_channels);
+        assert_eq!(roi_image.alpha, full.alpha);
+        assert_eq!(roi_image.bit_depth, full.bit_depth);
+        let channels = decoded_image_output_channels(full);
+        match (&roi_image.pixels, &full.pixels) {
+            (PixelData::U8(roi_pixels), PixelData::U8(full_pixels)) => {
+                assert_eq!(
+                    roi_pixels,
+                    &window_interleaved_u8(full_pixels, full.width, channels, roi)
+                );
+            }
+            (PixelData::U16(roi_pixels), PixelData::U16(full_pixels)) => {
+                assert_eq!(
+                    roi_pixels,
+                    &window_interleaved_u16(full_pixels, full.width, channels, roi)
+                );
+            }
+            _ => panic!("ROI and full pixel bit depths differed"),
+        }
+    }
+
+    fn assert_roi_matches_full_rgba8(roi_image: &RgbaImage, full: &RgbaImage, roi: Rect) {
+        assert_eq!(roi_image.width, roi.width);
+        assert_eq!(roi_image.height, roi.height);
+        assert_eq!(
+            roi_image.pixels,
+            window_interleaved_u8(&full.pixels, full.width, 4, roi)
+        );
+    }
+
+    fn assert_roi_matches_full_rgba16(roi_image: &Rgba16Image, full: &Rgba16Image, roi: Rect) {
+        assert_eq!(roi_image.width, roi.width);
+        assert_eq!(roi_image.height, roi.height);
+        assert_eq!(
+            roi_image.pixels,
+            window_interleaved_u16(&full.pixels, full.width, 4, roi)
+        );
+    }
+
     fn assert_roi_matches_full_channels(
         roi_image: &DecodedChannels,
         full: &DecodedChannels,
@@ -1453,6 +1534,30 @@ mod tests {
                 _ => panic!("ROI and full channel bit depths differed"),
             }
         }
+    }
+
+    fn window_interleaved_u8(samples: &[u8], width: u32, channels: usize, roi: Rect) -> Vec<u8> {
+        let mut output = Vec::with_capacity(roi.width as usize * roi.height as usize * channels);
+        let row_stride = width as usize * channels;
+        let x = roi.x as usize * channels;
+        let copy_width = roi.width as usize * channels;
+        for y in roi.y as usize..(roi.y + roi.height) as usize {
+            let start = y * row_stride + x;
+            output.extend_from_slice(&samples[start..start + copy_width]);
+        }
+        output
+    }
+
+    fn window_interleaved_u16(samples: &[u16], width: u32, channels: usize, roi: Rect) -> Vec<u16> {
+        let mut output = Vec::with_capacity(roi.width as usize * roi.height as usize * channels);
+        let row_stride = width as usize * channels;
+        let x = roi.x as usize * channels;
+        let copy_width = roi.width as usize * channels;
+        for y in roi.y as usize..(roi.y + roi.height) as usize {
+            let start = y * row_stride + x;
+            output.extend_from_slice(&samples[start..start + copy_width]);
+        }
+        output
     }
 
     fn window_u8(samples: &[u8], width: u32, roi: Rect) -> Vec<u8> {
