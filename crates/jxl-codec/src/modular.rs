@@ -5,6 +5,7 @@ use crate::error::{Error, Result};
 use crate::frame::{ColorTransform, FrameEncoding, FrameHeader};
 use crate::frame_data::{FrameData, FrameSection, FrameSectionKind};
 use crate::metadata::{ImageMetadata, unpack_signed};
+use rayon::prelude::*;
 
 const TREE_CONTEXTS: usize = 6;
 const SPLIT_VAL_CONTEXT: usize = 0;
@@ -619,7 +620,8 @@ impl ModularGroupExecutor {
             Self::Serial => decode_modular_group_residuals_serial(codestream, groups, global_tree),
             Self::RequestedThreads(threads) => {
                 debug_assert!(threads > 0);
-                decode_modular_group_residuals_serial(codestream, groups, global_tree)
+                let groups = groups.into_iter().collect::<Vec<_>>();
+                decode_modular_group_residuals_parallel(codestream, &groups, global_tree, threads)
             }
         }
     }
@@ -692,6 +694,24 @@ fn decode_modular_group_residuals_serial<'a>(
         decoded_groups.push(decode_group_residuals(codestream, group, global_tree)?);
     }
     Ok(decoded_groups)
+}
+
+fn decode_modular_group_residuals_parallel(
+    codestream: &[u8],
+    groups: &[&ModularSectionMetadata],
+    global_tree: &ModularTreeCoding,
+    threads: usize,
+) -> Result<Vec<ModularDecodedGroup>> {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build()
+        .map_err(|_| Error::Unsupported("modular group thread pool"))?;
+    pool.install(|| {
+        groups
+            .par_iter()
+            .map(|group| decode_group_residuals(codestream, group, global_tree))
+            .collect()
+    })
 }
 
 fn decode_global_residuals(

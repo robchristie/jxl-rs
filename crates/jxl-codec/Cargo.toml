@@ -7,4 +7,5 @@ repository.workspace = true
 
 [dependencies]
 half.workspace = true
+rayon.workspace = true
 thiserror.workspace = true
