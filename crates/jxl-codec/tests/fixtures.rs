@@ -381,6 +381,67 @@ fn generated_progressive_squeeze_pixels_match_reference_djxl_when_available() {
     assert_eq!(actual, reference.samples);
 }
 
+#[test]
+fn generated_split_vardct_exposes_global_cursor_when_available() {
+    let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+        eprintln!("skipping generated split VarDCT fixture; reference tools are not built");
+        return;
+    };
+
+    let input = unique_temp_path("jxl-rs-vardct-source", "ppm");
+    let encoded = unique_temp_path("jxl-rs-vardct", "jxl");
+    let reference_output = unique_temp_path("jxl-rs-vardct-reference", "ppm");
+    write_split_vardct_source_ppm(&input);
+
+    let cjxl_output = Command::new(&cjxl)
+        .arg(&input)
+        .arg(&encoded)
+        .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&input);
+    assert!(
+        cjxl_output.status.success(),
+        "reference cjxl failed: {}",
+        String::from_utf8_lossy(&cjxl_output.stderr)
+    );
+
+    let djxl_output = Command::new(&djxl)
+        .arg(&encoded)
+        .arg(&reference_output)
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        djxl_output.status.success(),
+        "reference djxl failed: {}",
+        String::from_utf8_lossy(&djxl_output.stderr)
+    );
+    let _ = std::fs::remove_file(&reference_output);
+
+    let encoded_bytes = std::fs::read(&encoded).unwrap();
+    let _ = std::fs::remove_file(&encoded);
+    let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+    let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+
+    assert!(
+        !plan.frame.is_combined,
+        "generated VarDCT fixture unexpectedly used a combined section"
+    );
+    assert!(plan.global_payload.is_some());
+    assert!(plan.ac_global_payload.is_some());
+    assert!(!plan.dc_group_payloads.is_empty());
+    assert!(!plan.ac_group_payloads.is_empty());
+
+    let global = plan.global.as_ref().unwrap();
+    assert_vardct_global_cursor_in_payload(global, global.section.section.payload_size);
+    assert_eq!(global.modular_global, None);
+    assert_eq!(
+        global.modular_global_error,
+        Some(jxl_codec::Error::Truncated)
+    );
+}
+
 fn parse_ppm_rgb(bytes: &[u8]) -> PpmRgb {
     let (magic, offset) = netpbm_token(bytes, 0);
     assert_eq!(magic, b"P6");
@@ -439,6 +500,30 @@ fn parse_ascii_u32(bytes: &[u8]) -> u32 {
     std::str::from_utf8(bytes).unwrap().parse().unwrap()
 }
 
+fn assert_vardct_global_cursor_in_payload(
+    global: &jxl_codec::VarDctGlobalMetadata,
+    payload_size: u32,
+) {
+    let cursor = global.cursor;
+    let payload_bits = payload_size as usize * 8;
+    assert!(cursor.dc_dequant_end_bits > 0);
+    assert!(cursor.quantizer_end_bits > cursor.dc_dequant_end_bits);
+    assert!(cursor.block_context_end_bits >= cursor.quantizer_end_bits);
+    assert!(cursor.color_correlation_end_bits >= cursor.block_context_end_bits);
+    assert_eq!(
+        cursor.modular_global_start_bits,
+        cursor.color_correlation_end_bits
+    );
+    assert!(cursor.modular_global_start_bits <= payload_bits);
+    if let Some(end_bits) = cursor.modular_global_end_bits {
+        assert!(end_bits >= cursor.modular_global_start_bits);
+        assert!(end_bits <= payload_bits);
+        assert_eq!(end_bits, global.bits_consumed);
+    } else {
+        assert!(global.modular_global_error.is_some());
+    }
+}
+
 fn write_progressive_squeeze_source_ppm(path: &Path) {
     let width = 128u32;
     let height = 128u32;
@@ -447,6 +532,21 @@ fn write_progressive_squeeze_source_ppm(path: &Path) {
     for _ in 0..width * height * 3 {
         state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
         bytes.push((state >> 24) as u8);
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn write_split_vardct_source_ppm(path: &Path) {
+    let width = 320u32;
+    let height = 192u32;
+    let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
+    for y in 0..height {
+        for x in 0..width {
+            let checker = (((x / 16) ^ (y / 16)) & 1) * 48;
+            bytes.push(((x * 255 / (width - 1)) ^ checker) as u8);
+            bytes.push(((y * 255 / (height - 1)) ^ checker) as u8);
+            bytes.push((((x + y) * 255 / (width + height - 2)) ^ checker) as u8);
+        }
     }
     std::fs::write(path, bytes).unwrap();
 }
