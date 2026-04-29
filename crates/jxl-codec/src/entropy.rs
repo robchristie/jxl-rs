@@ -325,6 +325,21 @@ pub(crate) struct AnsHistogramProbe {
     pub error_stage: Option<AnsHistogramProbeStage>,
     pub error_bits: Option<usize>,
     pub error: Option<Error>,
+    pub log_count_entries: Vec<AnsHistogramLogCountProbe>,
+    pub log_count_error_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AnsHistogramLogCountProbe {
+    pub index: usize,
+    pub start_bits: usize,
+    pub end_bits: usize,
+    pub huffman_bits: u8,
+    pub huffman_value: u8,
+    pub logcount: i32,
+    pub rle_length: Option<usize>,
+    pub rle_end_bits: Option<usize>,
+    pub next_index: usize,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1324,6 +1339,8 @@ fn probe_read_histogram(
         error_stage: None,
         error_bits: None,
         error: None,
+        log_count_entries: Vec::new(),
+        log_count_error_index: None,
     };
     let range = 1i32 << precision_bits;
 
@@ -1494,9 +1511,11 @@ fn probe_read_histogram(
     let mut omit_pos = None;
     let mut i = 0;
     while i < length {
+        let token_start_bits = reader.bits_consumed();
         let idx = match reader.peek_bits(7) {
             Ok(idx) => idx as usize,
             Err(error) => {
+                probe.log_count_error_index = Some(i);
                 probe_histogram_error(
                     &mut probe,
                     reader,
@@ -1508,6 +1527,7 @@ fn probe_read_histogram(
         };
         let (bits, value) = HISTOGRAM_LOGCOUNT_HUFFMAN[idx];
         if let Err(error) = reader.skip_bits(bits as usize) {
+            probe.log_count_error_index = Some(i);
             probe_histogram_error(
                 &mut probe,
                 reader,
@@ -1516,11 +1536,13 @@ fn probe_read_histogram(
             );
             return (probe, None);
         }
+        let token_end_bits = reader.bits_consumed();
         logcounts[i] = i32::from(value) - 1;
         if logcounts[i] == ANS_LOG_TAB_SIZE as i32 {
             let rle_length = match decode_var_len_uint8(reader) {
                 Ok(value) => value,
                 Err(error) => {
+                    probe.log_count_error_index = Some(i);
                     probe_histogram_error(
                         &mut probe,
                         reader,
@@ -1531,14 +1553,38 @@ fn probe_read_histogram(
                 }
             };
             same[i] = rle_length + 5;
-            i += rle_length + 4;
+            let next_index = i + rle_length + 4;
+            probe.log_count_entries.push(AnsHistogramLogCountProbe {
+                index: i,
+                start_bits: token_start_bits,
+                end_bits: token_end_bits,
+                huffman_bits: bits,
+                huffman_value: value,
+                logcount: logcounts[i],
+                rle_length: Some(rle_length),
+                rle_end_bits: Some(reader.bits_consumed()),
+                next_index,
+            });
+            i = next_index;
             continue;
         }
+        let next_index = i + 1;
+        probe.log_count_entries.push(AnsHistogramLogCountProbe {
+            index: i,
+            start_bits: token_start_bits,
+            end_bits: token_end_bits,
+            huffman_bits: bits,
+            huffman_value: value,
+            logcount: logcounts[i],
+            rle_length: None,
+            rle_end_bits: None,
+            next_index,
+        });
         if logcounts[i] > omit_log {
             omit_log = logcounts[i];
             omit_pos = Some(i);
         }
-        i += 1;
+        i = next_index;
     }
 
     let omit_pos = match omit_pos {

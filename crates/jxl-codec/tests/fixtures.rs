@@ -627,6 +627,28 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(histograms[0].length, Some(57));
     assert_eq!(histograms[0].shift, Some(4));
     assert_eq!(histograms[0].omit_pos, Some(27));
+    assert_eq!(histograms[0].log_count_entries.len(), 57);
+    assert_eq!(histograms[0].log_count_entries[0].start_bits, 607);
+    assert_eq!(histograms[0].log_count_entries[56].end_bits, 831);
+    assert!(
+        histograms[0]
+            .log_count_entries
+            .iter()
+            .all(|entry| entry.rle_length.is_none())
+    );
+    assert_eq!(
+        histograms[0]
+            .log_count_entries
+            .iter()
+            .map(|entry| entry.logcount)
+            .collect::<Vec<_>>(),
+        vec![
+            6, 5, 5, 6, 6, -1, -1, 7, 6, -1, -1, 7, 7, -1, -1, 6, 7, -1, -1, 7, 7, -1, -1, 7, 8, 1,
+            0, 9, 7, 0, -1, 7, 8, 1, -1, 8, 7, -1, -1, 7, 7, -1, -1, 7, 7, -1, -1, 6, 6, -1, -1, 4,
+            4, -1, -1, -1, 0,
+        ]
+    );
+    assert_eq!(histograms[0].log_count_error_index, None);
     assert_eq!(histograms[0].error_stage, None);
     assert_eq!(histograms[1].start_bits, 874);
     assert_eq!(histograms[1].end_bits, Some(914));
@@ -643,6 +665,31 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(histograms[1].length, Some(7));
     assert_eq!(histograms[1].shift, Some(0));
     assert_eq!(histograms[1].omit_pos, Some(0));
+    assert_eq!(
+        histograms[1]
+            .log_count_entries
+            .iter()
+            .map(|entry| entry.logcount)
+            .collect::<Vec<_>>(),
+        vec![10, 10, 10, 7, 7, 4, 5]
+    );
+    assert_eq!(
+        histograms[1]
+            .log_count_entries
+            .iter()
+            .map(|entry| (entry.start_bits, entry.end_bits))
+            .collect::<Vec<_>>(),
+        vec![
+            (883, 889),
+            (889, 895),
+            (895, 901),
+            (901, 904),
+            (904, 907),
+            (907, 911),
+            (911, 914),
+        ]
+    );
+    assert_eq!(histograms[1].log_count_error_index, None);
     assert_eq!(histograms[1].error_stage, None);
     assert_eq!(histograms[2].start_bits, 914);
     assert_eq!(histograms[2].end_bits, Some(936));
@@ -669,6 +716,58 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(histograms[3].length, Some(23));
     assert_eq!(histograms[3].shift, Some(2));
     assert_eq!(histograms[3].omit_pos, None);
+    assert_eq!(
+        histograms[3]
+            .log_count_entries
+            .iter()
+            .map(|entry| entry.index)
+            .collect::<Vec<_>>(),
+        vec![
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 20, 21
+        ]
+    );
+    assert_eq!(
+        histograms[3]
+            .log_count_entries
+            .iter()
+            .map(|entry| entry.logcount)
+            .collect::<Vec<_>>(),
+        vec![
+            9, -1, 5, -1, 8, -1, -1, -1, 9, -1, -1, -1, 4, -1, 4, -1, 12, 5, -1
+        ]
+    );
+    assert_eq!(
+        histograms[3]
+            .log_count_entries
+            .iter()
+            .map(|entry| (entry.start_bits, entry.end_bits))
+            .collect::<Vec<_>>(),
+        vec![
+            (949, 952),
+            (952, 957),
+            (957, 960),
+            (960, 965),
+            (965, 968),
+            (968, 973),
+            (973, 978),
+            (978, 983),
+            (983, 986),
+            (986, 991),
+            (991, 996),
+            (996, 1001),
+            (1001, 1005),
+            (1005, 1010),
+            (1010, 1014),
+            (1014, 1019),
+            (1019, 1026),
+            (1027, 1030),
+            (1030, 1035),
+        ]
+    );
+    assert_eq!(histograms[3].log_count_entries[16].rle_length, Some(0));
+    assert_eq!(histograms[3].log_count_entries[16].rle_end_bits, Some(1027));
+    assert_eq!(histograms[3].log_count_entries[16].next_index, 20);
+    assert_eq!(histograms[3].log_count_error_index, Some(22));
     assert_eq!(
         histograms[3].error_stage,
         Some(jxl_codec::VarDctAnsHistogramProbeStage::CustomLogCount)

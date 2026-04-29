@@ -1,9 +1,9 @@
 use crate::bitstream::{BitReader, bits_offset, val};
 use crate::decode::ImageRegion;
 use crate::entropy::{
-    AnsHistogramProbe, AnsHistogramProbeKind, AnsHistogramProbeStage, ContextMapProbe,
-    ContextMapProbeKind, ContextMapProbeStage, HistogramCodingProbeStage, decode_context_map,
-    probe_decode_context_map,
+    AnsHistogramLogCountProbe, AnsHistogramProbe, AnsHistogramProbeKind, AnsHistogramProbeStage,
+    ContextMapProbe, ContextMapProbeKind, ContextMapProbeStage, HistogramCodingProbeStage,
+    decode_context_map, probe_decode_context_map,
 };
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
@@ -249,6 +249,37 @@ pub struct VarDctAnsHistogramProbe {
     pub error_stage: Option<VarDctAnsHistogramProbeStage>,
     pub error_bits: Option<usize>,
     pub error: Option<Error>,
+    pub log_count_entries: Vec<VarDctAnsHistogramLogCountProbe>,
+    pub log_count_error_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAnsHistogramLogCountProbe {
+    pub index: usize,
+    pub start_bits: usize,
+    pub end_bits: usize,
+    pub huffman_bits: u8,
+    pub huffman_value: u8,
+    pub logcount: i32,
+    pub rle_length: Option<usize>,
+    pub rle_end_bits: Option<usize>,
+    pub next_index: usize,
+}
+
+impl From<&AnsHistogramLogCountProbe> for VarDctAnsHistogramLogCountProbe {
+    fn from(probe: &AnsHistogramLogCountProbe) -> Self {
+        Self {
+            index: probe.index,
+            start_bits: probe.start_bits,
+            end_bits: probe.end_bits,
+            huffman_bits: probe.huffman_bits,
+            huffman_value: probe.huffman_value,
+            logcount: probe.logcount,
+            rle_length: probe.rle_length,
+            rle_end_bits: probe.rle_end_bits,
+            next_index: probe.next_index,
+        }
+    }
 }
 
 impl From<&AnsHistogramProbe> for VarDctAnsHistogramProbe {
@@ -266,6 +297,12 @@ impl From<&AnsHistogramProbe> for VarDctAnsHistogramProbe {
             error_stage: probe.error_stage.map(VarDctAnsHistogramProbeStage::from),
             error_bits: probe.error_bits,
             error: probe.error.clone(),
+            log_count_entries: probe
+                .log_count_entries
+                .iter()
+                .map(VarDctAnsHistogramLogCountProbe::from)
+                .collect(),
+            log_count_error_index: probe.log_count_error_index,
         }
     }
 }
