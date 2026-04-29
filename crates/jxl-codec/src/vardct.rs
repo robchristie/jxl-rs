@@ -1,3 +1,4 @@
+use crate::bitstream::{BitReader, bits_offset, val};
 use crate::decode::ImageRegion;
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
@@ -54,9 +55,10 @@ pub struct VarDctPassGroupSectionMetadata {
     pub group: VarDctGroupMetadata,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VarDctDecodePlan {
     pub frame: VarDctFrameMetadata,
+    pub global: Option<VarDctGlobalMetadata>,
     pub global_payload: Option<VarDctSectionPayloadMetadata>,
     pub ac_global_payload: Option<VarDctSectionPayloadMetadata>,
     pub ac_group_payloads: Vec<VarDctPassGroupPayloadMetadata>,
@@ -80,6 +82,29 @@ pub struct VarDctPassGroupPayloadMetadata {
     pub section: VarDctSectionPayloadMetadata,
     pub pass: usize,
     pub group: VarDctGroupMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VarDctGlobalMetadata {
+    pub section: VarDctSectionPayloadMetadata,
+    pub dc_dequant: VarDctDcDequantMetadata,
+    pub quantizer: VarDctQuantizerMetadata,
+    pub bits_consumed: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VarDctDcDequantMetadata {
+    pub all_default: bool,
+    pub coefficients: Option<[f32; 3]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VarDctQuantizerMetadata {
+    pub global_scale: u32,
+    pub quant_dc: u32,
+    pub scale: f32,
+    pub inv_global_scale: f32,
+    pub inv_quant_dc: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,6 +217,10 @@ pub fn read_vardct_decode_plan(
         .as_ref()
         .map(|section| section_payload_metadata(codestream, frame_data, section))
         .transpose()?;
+    let global = global_payload
+        .as_ref()
+        .map(|section| read_vardct_global_metadata(codestream, section))
+        .transpose()?;
     let ac_global_payload = frame
         .ac_global_section
         .as_ref()
@@ -221,11 +250,79 @@ pub fn read_vardct_decode_plan(
 
     Ok(Some(VarDctDecodePlan {
         frame,
+        global,
         global_payload,
         ac_global_payload,
         ac_group_payloads,
         dc_group_payloads,
     }))
+}
+
+fn read_vardct_global_metadata(
+    codestream: &[u8],
+    section: &VarDctSectionPayloadMetadata,
+) -> Result<VarDctGlobalMetadata> {
+    let payload = codestream
+        .get(section.payload_range.clone())
+        .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
+    let mut reader = BitReader::new(payload);
+    let dc_dequant = read_vardct_dc_dequant(&mut reader)?;
+    let quantizer = read_vardct_quantizer(&mut reader)?;
+    Ok(VarDctGlobalMetadata {
+        section: section.clone(),
+        dc_dequant,
+        quantizer,
+        bits_consumed: reader.bits_consumed(),
+    })
+}
+
+fn read_vardct_dc_dequant(reader: &mut BitReader<'_>) -> Result<VarDctDcDequantMetadata> {
+    let all_default = reader.read_bool()?;
+    let coefficients = if all_default {
+        None
+    } else {
+        let mut coefficients = [0.0f32; 3];
+        for coefficient in &mut coefficients {
+            *coefficient = reader.read_f16()? * (1.0 / 128.0);
+            if *coefficient <= 0.0 {
+                return Err(Error::InvalidCodestream(
+                    "invalid DC dequant matrix coefficient",
+                ));
+            }
+        }
+        Some(coefficients)
+    };
+    Ok(VarDctDcDequantMetadata {
+        all_default,
+        coefficients,
+    })
+}
+
+fn read_vardct_quantizer(reader: &mut BitReader<'_>) -> Result<VarDctQuantizerMetadata> {
+    const GLOBAL_SCALE_DENOM: f32 = 65_536.0;
+    let global_scale = reader.read_u32_selector(
+        bits_offset(11, 1),
+        bits_offset(11, 2049),
+        bits_offset(12, 4097),
+        bits_offset(16, 8193),
+    )?;
+    let quant_dc = reader.read_u32_selector(
+        val(16),
+        bits_offset(5, 1),
+        bits_offset(8, 1),
+        bits_offset(16, 1),
+    )?;
+    if global_scale == 0 || quant_dc == 0 {
+        return Err(Error::InvalidCodestream("invalid VarDCT quantizer"));
+    }
+    let inv_global_scale = GLOBAL_SCALE_DENOM / global_scale as f32;
+    Ok(VarDctQuantizerMetadata {
+        global_scale,
+        quant_dc,
+        scale: global_scale as f32 / GLOBAL_SCALE_DENOM,
+        inv_global_scale,
+        inv_quant_dc: inv_global_scale / quant_dc as f32,
+    })
 }
 
 fn section_payload_metadata(
@@ -489,13 +586,19 @@ mod tests {
                 13,
             ),
         ]);
-        let codestream = vec![0; 64];
+        let mut codestream = vec![0; 64];
+        codestream[10] = 1;
 
         let plan = read_vardct_decode_plan(&codestream, &frame_header, &frame_data)
             .unwrap()
             .unwrap();
 
         assert!(!plan.frame.is_combined);
+        let global = plan.global.as_ref().unwrap();
+        assert!(global.dc_dequant.all_default);
+        assert_eq!(global.quantizer.global_scale, 1);
+        assert_eq!(global.quantizer.quant_dc, 16);
+        assert_eq!(global.bits_consumed, 16);
         assert_eq!(plan.global_payload.as_ref().unwrap().payload_range, 10..13);
         assert_eq!(
             plan.ac_global_payload.as_ref().unwrap().payload_range,
@@ -523,6 +626,17 @@ mod tests {
             error,
             Error::InvalidCodestream("frame section outside codestream")
         );
+    }
+
+    #[test]
+    fn rejects_truncated_vardct_global_prefix() {
+        let frame_header = vardct_header(8, 8);
+        let frame_data = frame_data(vec![frame_section(0, 0, FrameSectionKind::Combined, 0, 1)]);
+        let codestream = vec![1];
+
+        let error = read_vardct_decode_plan(&codestream, &frame_header, &frame_data).unwrap_err();
+
+        assert_eq!(error, Error::Truncated);
     }
 
     fn section(

@@ -575,6 +575,16 @@ fn parses_checked_in_fixture_vardct_metadata() {
     assert!(vardct.dc_group_sections.is_empty());
     assert!(vardct.ac_group_sections.is_empty());
     assert!(vardct_plan.frame.is_combined);
+    let global = vardct_plan.global.as_ref().unwrap();
+    assert!(global.bits_consumed > 0);
+    assert!(global.bits_consumed <= vardct.sections[0].payload_size as usize * 8);
+    assert!(global.dc_dequant.all_default);
+    assert_eq!(global.dc_dequant.coefficients, None);
+    assert!(global.quantizer.global_scale > 0);
+    assert!(global.quantizer.quant_dc > 0);
+    assert!(global.quantizer.scale > 0.0);
+    assert!(global.quantizer.inv_global_scale > 0.0);
+    assert!(global.quantizer.inv_quant_dc > 0.0);
     assert_eq!(
         vardct_plan
             .global_payload

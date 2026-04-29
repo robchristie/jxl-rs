@@ -439,6 +439,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     section.payload_size
                 );
             }
+            if let Some(global) = info
+                .first_frame_vardct_plan
+                .as_ref()
+                .and_then(|plan| plan.global.as_ref())
+            {
+                println!(
+                    "First frame VarDCT global metadata: bits={} dc_dequant_default={} global_scale={} quant_dc={}",
+                    global.bits_consumed,
+                    global.dc_dequant.all_default,
+                    global.quantizer.global_scale,
+                    global.quantizer.quant_dc
+                );
+            }
             if let Some(section) = &vardct.ac_global_section {
                 println!(
                     "First frame VarDCT AC global section: logical={} offset={} size={}",
