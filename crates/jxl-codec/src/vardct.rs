@@ -544,6 +544,11 @@ pub struct VarDctDcGroupMetadata {
     pub extra_precision_bits: Option<u8>,
     pub var_dct_dc_header: Option<ModularGroupHeader>,
     pub var_dct_dc: Option<ModularDecodedGroup>,
+    pub modular_dc: Option<ModularDecodedGroup>,
+    pub modular_dc_error: Option<Error>,
+    pub ac_metadata_count: Option<usize>,
+    pub ac_metadata: Option<ModularDecodedGroup>,
+    pub ac_metadata_error: Option<Error>,
     pub parse_error: Option<Error>,
 }
 
@@ -1107,6 +1112,49 @@ fn read_vardct_dc_group_metadata(
         .is_none()
         .then_some(stream_reader.bits_consumed())
         .filter(|_| var_dct_dc_header.is_some());
+    let (modular_dc, modular_dc_error, modular_dc_end) = match var_dct_dc_end {
+        Some(start_bits) => {
+            let mut modular_dc_reader = BitReader::new(bytes);
+            modular_dc_reader.skip_bits(start_bits)?;
+            let decoded = ModularDecodedGroup {
+                section_physical_index: payload.section.section.section_physical_index,
+                stream_id: payload.modular_dc_stream_id,
+                channels: Vec::new(),
+                bits_consumed: modular_dc_reader.bits_consumed(),
+            };
+            (Some(decoded), None, Some(modular_dc_reader.bits_consumed()))
+        }
+        None => (None, None, None),
+    };
+    let (ac_metadata_count, ac_metadata, ac_metadata_error, ac_metadata_end) = match modular_dc_end
+    {
+        Some(start_bits) => {
+            let mut ac_reader = BitReader::new(bytes);
+            ac_reader.skip_bits(start_bits)?;
+            match read_vardct_ac_metadata_count(&mut ac_reader, &payload) {
+                Ok(count) => {
+                    let channels = vardct_ac_metadata_channel_plan(&payload, count);
+                    match decode_modular_stream_from_reader(
+                        &mut ac_reader,
+                        payload.section.section.section_physical_index,
+                        payload.ac_metadata_stream_id,
+                        &channels,
+                        global_tree,
+                    ) {
+                        Ok((_, decoded)) => (
+                            Some(count),
+                            Some(decoded),
+                            None,
+                            Some(ac_reader.bits_consumed()),
+                        ),
+                        Err(error) => (Some(count), None, Some(error), None),
+                    }
+                }
+                Err(error) => (None, None, Some(error), None),
+            }
+        }
+        None => (None, None, None, None),
+    };
     Ok(VarDctDcGroupMetadata {
         payload,
         cursor: VarDctDcGroupCursorMetadata {
@@ -1116,13 +1164,18 @@ fn read_vardct_dc_group_metadata(
             var_dct_dc_header_end_bits: header_end,
             var_dct_dc_end_bits: var_dct_dc_end,
             modular_dc_start_bits: var_dct_dc_end,
-            modular_dc_end_bits: None,
-            ac_metadata_start_bits: None,
-            ac_metadata_end_bits: None,
+            modular_dc_end_bits: modular_dc_end,
+            ac_metadata_start_bits: modular_dc_end,
+            ac_metadata_end_bits: ac_metadata_end,
         },
         extra_precision_bits,
         var_dct_dc_header,
         var_dct_dc,
+        modular_dc,
+        modular_dc_error,
+        ac_metadata_count,
+        ac_metadata,
+        ac_metadata_error,
         parse_error,
     })
 }
@@ -1430,6 +1483,64 @@ fn vardct_dc_channel_plan(
     Ok(channels)
 }
 
+fn read_vardct_ac_metadata_count(
+    reader: &mut BitReader<'_>,
+    payload: &VarDctDcGroupPayloadMetadata,
+) -> Result<usize> {
+    let upper_bound = (payload.group.width.div_ceil(8) as usize)
+        .checked_mul(payload.group.height.div_ceil(8) as usize)
+        .ok_or(Error::InvalidCodestream("VarDCT AC metadata size overflow"))?;
+    Ok(reader.read_bits(ceil_log2_nonzero(upper_bound))? as usize + 1)
+}
+
+fn vardct_ac_metadata_channel_plan(
+    payload: &VarDctDcGroupPayloadMetadata,
+    count: usize,
+) -> Vec<ModularGroupChannelPlan> {
+    let width_blocks = payload.group.width.div_ceil(8);
+    let height_blocks = payload.group.height.div_ceil(8);
+    let color_tiles_x = width_blocks.div_ceil(8);
+    let color_tiles_y = height_blocks.div_ceil(8);
+    vec![
+        ModularGroupChannelPlan {
+            channel_index: 0,
+            width: color_tiles_x,
+            height: color_tiles_y,
+            x0: 0,
+            y0: 0,
+            hshift: 3,
+            vshift: 3,
+        },
+        ModularGroupChannelPlan {
+            channel_index: 1,
+            width: color_tiles_x,
+            height: color_tiles_y,
+            x0: 0,
+            y0: 0,
+            hshift: 3,
+            vshift: 3,
+        },
+        ModularGroupChannelPlan {
+            channel_index: 2,
+            width: count as u32,
+            height: 2,
+            x0: 0,
+            y0: 0,
+            hshift: 0,
+            vshift: 0,
+        },
+        ModularGroupChannelPlan {
+            channel_index: 3,
+            width: width_blocks,
+            height: height_blocks,
+            x0: 0,
+            y0: 0,
+            hshift: 0,
+            vshift: 0,
+        },
+    ]
+}
+
 fn vardct_chroma_shift(frame_header: &FrameHeader, channel: usize) -> Result<(i32, i32)> {
     const H_SHIFT: [i32; 4] = [0, 1, 1, 0];
     const V_SHIFT: [i32; 4] = [0, 1, 0, 1];
@@ -1449,6 +1560,10 @@ fn vardct_chroma_shift(frame_header: &FrameHeader, channel: usize) -> Result<(i3
             .copied()
             .ok_or(Error::InvalidCodestream("invalid chroma mode"))?;
     Ok((hshift, vshift))
+}
+
+fn ceil_log2_nonzero(value: usize) -> usize {
+    usize::BITS as usize - (value - 1).leading_zeros() as usize
 }
 
 fn read_vardct_global_metadata(

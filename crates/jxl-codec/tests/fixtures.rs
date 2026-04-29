@@ -498,9 +498,47 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
                 (2, 0, 0, 40, 24, 960, -162, 150, -6856),
             ]
         );
-        assert_eq!(metadata.cursor.modular_dc_end_bits, None);
-        assert_eq!(metadata.cursor.ac_metadata_start_bits, None);
-        assert_eq!(metadata.cursor.ac_metadata_end_bits, None);
+        let modular_dc = metadata.modular_dc.as_ref().unwrap();
+        assert_eq!(modular_dc.section_physical_index, 1);
+        assert_eq!(modular_dc.stream_id, dc_group.modular_dc_stream_id);
+        assert!(modular_dc.channels.is_empty());
+        assert_eq!(modular_dc.bits_consumed, 18911);
+        assert_eq!(metadata.modular_dc_error, None);
+        assert_eq!(metadata.cursor.modular_dc_end_bits, Some(18911));
+        assert_eq!(metadata.cursor.ac_metadata_start_bits, Some(18911));
+        assert_eq!(metadata.cursor.ac_metadata_end_bits, Some(21222));
+        assert_eq!(metadata.ac_metadata_count, Some(597));
+        assert_eq!(metadata.ac_metadata_error, None);
+        let ac_metadata = metadata.ac_metadata.as_ref().unwrap();
+        assert_eq!(ac_metadata.section_physical_index, 1);
+        assert_eq!(ac_metadata.stream_id, dc_group.ac_metadata_stream_id);
+        assert_eq!(ac_metadata.bits_consumed, 21222);
+        assert_eq!(
+            ac_metadata
+                .channels
+                .iter()
+                .map(|channel| (
+                    channel.channel_index,
+                    channel.x0,
+                    channel.y0,
+                    channel.width,
+                    channel.height,
+                    channel.samples.len(),
+                    channel.samples.iter().min().copied().unwrap_or_default(),
+                    channel.samples.iter().max().copied().unwrap_or_default(),
+                    channel
+                        .samples
+                        .iter()
+                        .fold(0i64, |sum, sample| sum + i64::from(*sample)),
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, 0, 0, 5, 3, 15, -1, 1, -1),
+                (1, 0, 0, 5, 3, 15, -37, 0, -245),
+                (2, 0, 0, 597, 2, 1194, 0, 15, 5720),
+                (3, 0, 0, 40, 24, 960, 0, 7, 6650),
+            ]
+        );
     }
     let selected_dc = plan.frame.dc_sections_for_region(ImageRegion {
         x: 0,

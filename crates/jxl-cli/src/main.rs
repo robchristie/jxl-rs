@@ -544,6 +544,53 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
                     }
+                    println!(
+                        "First frame VarDCT modular DC stream group {}: stream_id={} bits={} channels={} error={:?}",
+                        group.payload.group.group,
+                        group.payload.modular_dc_stream_id,
+                        group.cursor.modular_dc_end_bits.unwrap_or_default(),
+                        group
+                            .modular_dc
+                            .as_ref()
+                            .map(|decoded| decoded.channels.len())
+                            .unwrap_or_default(),
+                        group.modular_dc_error
+                    );
+                    println!(
+                        "First frame VarDCT AC metadata stream group {}: stream_id={} count={} bits={} channels={} error={:?}",
+                        group.payload.group.group,
+                        group.payload.ac_metadata_stream_id,
+                        group.ac_metadata_count.unwrap_or_default(),
+                        group.cursor.ac_metadata_end_bits.unwrap_or_default(),
+                        group
+                            .ac_metadata
+                            .as_ref()
+                            .map(|decoded| decoded.channels.len())
+                            .unwrap_or_default(),
+                        group.ac_metadata_error
+                    );
+                    if let Some(decoded) = &group.ac_metadata {
+                        for channel in &decoded.channels {
+                            let min = channel.samples.iter().min().copied().unwrap_or_default();
+                            let max = channel.samples.iter().max().copied().unwrap_or_default();
+                            let sum = channel
+                                .samples
+                                .iter()
+                                .fold(0i64, |sum, sample| sum + i64::from(*sample));
+                            println!(
+                                "First frame VarDCT AC metadata channel {}: {}x{} at ({},{}) samples={} min={} max={} sum={}",
+                                channel.channel_index,
+                                channel.width,
+                                channel.height,
+                                channel.x0,
+                                channel.y0,
+                                channel.samples.len(),
+                                min,
+                                max,
+                                sum
+                            );
+                        }
+                    }
                 }
             }
         }
