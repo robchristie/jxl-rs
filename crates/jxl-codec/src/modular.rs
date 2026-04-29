@@ -998,21 +998,57 @@ fn modular_region_transform_supported(transform: &ModularTransform) -> bool {
 }
 
 fn modular_region_dependency_rect(plan: &ModularDecodePlan, rect: ImageRect) -> ImageRect {
-    if plan
+    let mut has_horizontal_squeeze = false;
+    let mut has_vertical_squeeze = false;
+    for squeeze in plan
         .global
         .group_header
         .transforms
         .iter()
-        .any(|transform| transform.id == TransformId::Squeeze)
+        .filter(|transform| transform.id == TransformId::Squeeze)
+        .flat_map(|transform| &transform.squeezes)
     {
+        has_horizontal_squeeze |= squeeze.horizontal;
+        has_vertical_squeeze |= !squeeze.horizontal;
+    }
+
+    if has_horizontal_squeeze || has_vertical_squeeze {
+        let y = if has_vertical_squeeze { 0 } else { rect.y };
+        let mut height = if has_vertical_squeeze {
+            if rect.y == 0 {
+                let bottom = rect.y.saturating_add(rect.height);
+                let alignment = max_non_meta_vshift(&plan.channel_plan)
+                    .and_then(|shift| 1u32.checked_shl(shift as u32))
+                    .unwrap_or(1);
+                bottom
+                    .saturating_add(alignment)
+                    .div_ceil(alignment)
+                    .saturating_mul(alignment)
+            } else {
+                plan.channel_plan.height
+            }
+        } else {
+            rect.height
+        };
+        height = height.min(plan.channel_plan.height);
         return ImageRect {
             x: 0,
-            y: 0,
+            y,
             width: plan.channel_plan.width,
-            height: plan.channel_plan.height,
+            height,
         };
     }
     rect
+}
+
+fn max_non_meta_vshift(channel_plan: &ModularChannelPlan) -> Option<i32> {
+    channel_plan
+        .channels
+        .iter()
+        .skip(channel_plan.nb_meta_channels)
+        .map(|channel| channel.vshift)
+        .filter(|shift| *shift >= 0)
+        .max()
 }
 
 fn modular_region_channel_rects(
@@ -3224,6 +3260,95 @@ mod tests {
             Err(Error::Unsupported(
                 "modular region assembly with transforms"
             ))
+        );
+    }
+
+    #[test]
+    fn squeezed_modular_dependency_region_crops_vertical_prefix() {
+        let mut plan = region_test_plan(128, 128, 3);
+        for channel in &mut plan.channel_plan.channels {
+            channel.vshift = 5;
+        }
+        plan.global.group_header.transforms.push(ModularTransform {
+            id: TransformId::Squeeze,
+            begin_c: 0,
+            rct_type: None,
+            num_c: None,
+            nb_colors: None,
+            nb_deltas: None,
+            predictor: None,
+            squeezes: vec![
+                SqueezeParams {
+                    horizontal: true,
+                    in_place: true,
+                    begin_c: 0,
+                    num_c: 3,
+                },
+                SqueezeParams {
+                    horizontal: false,
+                    in_place: true,
+                    begin_c: 0,
+                    num_c: 3,
+                },
+            ],
+        });
+
+        assert_eq!(
+            modular_region_dependency_rect(&plan, image_rect(19, 0, 37, 29)),
+            image_rect(0, 0, 128, 64)
+        );
+    }
+
+    #[test]
+    fn interior_vertical_squeeze_dependency_region_keeps_full_height() {
+        let mut plan = region_test_plan(128, 128, 3);
+        for channel in &mut plan.channel_plan.channels {
+            channel.vshift = 5;
+        }
+        plan.global.group_header.transforms.push(ModularTransform {
+            id: TransformId::Squeeze,
+            begin_c: 0,
+            rct_type: None,
+            num_c: None,
+            nb_colors: None,
+            nb_deltas: None,
+            predictor: None,
+            squeezes: vec![SqueezeParams {
+                horizontal: false,
+                in_place: true,
+                begin_c: 0,
+                num_c: 3,
+            }],
+        });
+
+        assert_eq!(
+            modular_region_dependency_rect(&plan, image_rect(19, 23, 37, 29)),
+            image_rect(0, 0, 128, 128)
+        );
+    }
+
+    #[test]
+    fn horizontal_squeeze_dependency_region_preserves_requested_rows() {
+        let mut plan = region_test_plan(128, 128, 3);
+        plan.global.group_header.transforms.push(ModularTransform {
+            id: TransformId::Squeeze,
+            begin_c: 0,
+            rct_type: None,
+            num_c: None,
+            nb_colors: None,
+            nb_deltas: None,
+            predictor: None,
+            squeezes: vec![SqueezeParams {
+                horizontal: true,
+                in_place: true,
+                begin_c: 0,
+                num_c: 3,
+            }],
+        });
+
+        assert_eq!(
+            modular_region_dependency_rect(&plan, image_rect(19, 23, 37, 29)),
+            image_rect(0, 23, 128, 29)
         );
     }
 

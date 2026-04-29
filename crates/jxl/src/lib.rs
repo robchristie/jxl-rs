@@ -1128,6 +1128,18 @@ mod tests {
             .decode_rgba8(&encoded_bytes)
             .unwrap();
         assert_roi_matches_full_rgba8(&roi_rgba8, &full_rgba8, roi);
+
+        let top_roi = Rect {
+            x: 19,
+            y: 0,
+            width: 37,
+            height: 29,
+        };
+        let top_roi_channels = Decoder::new()
+            .roi(top_roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_channels(&top_roi_channels, &full_channels, top_roi);
     }
 
     #[test]
