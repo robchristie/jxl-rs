@@ -1,7 +1,7 @@
 use crate::bitstream::{BitReader, bits_offset, val};
 use crate::decode::ImageRegion;
 use crate::entropy::{
-    AnsHistogramLogCountProbe, AnsHistogramPopulationProbe, AnsHistogramProbe,
+    AnsAliasTableProbe, AnsHistogramLogCountProbe, AnsHistogramPopulationProbe, AnsHistogramProbe,
     AnsHistogramProbeKind, AnsHistogramProbeStage, ContextMapProbe, ContextMapProbeKind,
     ContextMapProbeStage, HistogramCodingProbeStage, decode_context_map, probe_decode_context_map,
 };
@@ -256,6 +256,7 @@ pub struct VarDctAnsHistogramProbe {
     pub total_count_before_omit: Option<i32>,
     pub omit_count: Option<i32>,
     pub final_counts: Option<Vec<i32>>,
+    pub alias_table: Option<VarDctAnsAliasTableProbe>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -316,6 +317,33 @@ impl From<&AnsHistogramPopulationProbe> for VarDctAnsHistogramPopulationProbe {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAnsAliasTableProbe {
+    pub table_size: usize,
+    pub entry_size: u32,
+    pub distribution_len: usize,
+    pub nonzero_symbols: usize,
+    pub count_sum: i32,
+    pub first_nonzero_symbol: Option<usize>,
+    pub last_nonzero_symbol: Option<usize>,
+    pub table_checksum: u64,
+}
+
+impl From<&AnsAliasTableProbe> for VarDctAnsAliasTableProbe {
+    fn from(probe: &AnsAliasTableProbe) -> Self {
+        Self {
+            table_size: probe.table_size,
+            entry_size: probe.entry_size,
+            distribution_len: probe.distribution_len,
+            nonzero_symbols: probe.nonzero_symbols,
+            count_sum: probe.count_sum,
+            first_nonzero_symbol: probe.first_nonzero_symbol,
+            last_nonzero_symbol: probe.last_nonzero_symbol,
+            table_checksum: probe.table_checksum,
+        }
+    }
+}
+
 impl From<&AnsHistogramProbe> for VarDctAnsHistogramProbe {
     fn from(probe: &AnsHistogramProbe) -> Self {
         Self {
@@ -346,6 +374,10 @@ impl From<&AnsHistogramProbe> for VarDctAnsHistogramProbe {
             total_count_before_omit: probe.total_count_before_omit,
             omit_count: probe.omit_count,
             final_counts: probe.final_counts.clone(),
+            alias_table: probe
+                .alias_table
+                .as_ref()
+                .map(VarDctAnsAliasTableProbe::from),
         }
     }
 }

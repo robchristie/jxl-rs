@@ -332,6 +332,7 @@ pub(crate) struct AnsHistogramProbe {
     pub total_count_before_omit: Option<i32>,
     pub omit_count: Option<i32>,
     pub final_counts: Option<Vec<i32>>,
+    pub alias_table: Option<AnsAliasTableProbe>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,6 +359,18 @@ pub(crate) struct AnsHistogramPopulationProbe {
     pub count: i32,
     pub copied: bool,
     pub omitted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AnsAliasTableProbe {
+    pub table_size: usize,
+    pub entry_size: u32,
+    pub distribution_len: usize,
+    pub nonzero_symbols: usize,
+    pub count_sum: i32,
+    pub first_nonzero_symbol: Option<usize>,
+    pub last_nonzero_symbol: Option<usize>,
+    pub table_checksum: u64,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -888,7 +901,7 @@ pub(crate) fn probe_decode_histograms(
         let mut table = vec![AliasEntry::default(); table_size];
         let mut ans_histograms = Vec::with_capacity(num_histograms);
         for index in 0..num_histograms {
-            let (histogram_probe, counts) = probe_read_histogram(ANS_LOG_TAB_SIZE, reader);
+            let (mut histogram_probe, counts) = probe_read_histogram(ANS_LOG_TAB_SIZE, reader);
             let mut counts = match counts {
                 Some(counts) => counts,
                 None => {
@@ -943,6 +956,7 @@ pub(crate) fn probe_decode_histograms(
             while counts.last() == Some(&0) {
                 counts.pop();
             }
+            let alias_distribution = counts.clone();
             if let Err(error) =
                 init_alias_table(counts, ANS_LOG_TAB_SIZE, log_alpha_size, &mut table)
             {
@@ -963,6 +977,12 @@ pub(crate) fn probe_decode_histograms(
                     ..histogram_probe_error(reader, HistogramCodingProbeStage::AnsAliasTable, error)
                 };
             }
+            histogram_probe.alias_table = Some(probe_alias_table(
+                &alias_distribution,
+                ANS_LOG_TAB_SIZE,
+                log_alpha_size,
+                &table,
+            ));
             ans_histograms.push(histogram_probe);
         }
         return HistogramCodingProbe {
@@ -1364,6 +1384,7 @@ fn probe_read_histogram(
         total_count_before_omit: None,
         omit_count: None,
         final_counts: None,
+        alias_table: None,
     };
     let range = 1i32 << precision_bits;
 
@@ -1945,6 +1966,54 @@ fn init_alias_table(
         table[index].freq1_xor_freq0 = freq1 ^ freq0;
     }
     Ok(())
+}
+
+fn probe_alias_table(
+    distribution: &[i32],
+    log_range: usize,
+    log_alpha_size: usize,
+    table: &[AliasEntry],
+) -> AnsAliasTableProbe {
+    let table_size = 1usize << log_alpha_size;
+    let entry_size = (1u32 << log_range) >> log_alpha_size;
+    let mut nonzero_symbols = 0;
+    let mut count_sum = 0;
+    let mut first_nonzero_symbol = None;
+    let mut last_nonzero_symbol = None;
+    for (symbol, &count) in distribution.iter().enumerate() {
+        count_sum += count;
+        if count != 0 {
+            nonzero_symbols += 1;
+            first_nonzero_symbol.get_or_insert(symbol);
+            last_nonzero_symbol = Some(symbol);
+        }
+    }
+
+    let mut table_checksum = 0xcbf2_9ce4_8422_2325u64;
+    for (index, entry) in table.iter().enumerate() {
+        for value in [
+            index as u64,
+            u64::from(entry.cutoff),
+            u64::from(entry.right_value),
+            u64::from(entry.freq0),
+            u64::from(entry.offsets1),
+            u64::from(entry.freq1_xor_freq0),
+        ] {
+            table_checksum ^= value;
+            table_checksum = table_checksum.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+
+    AnsAliasTableProbe {
+        table_size,
+        entry_size,
+        distribution_len: distribution.len(),
+        nonzero_symbols,
+        count_sum,
+        first_nonzero_symbol,
+        last_nonzero_symbol,
+        table_checksum,
+    }
 }
 
 fn lookup_alias(

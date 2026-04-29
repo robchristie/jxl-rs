@@ -708,6 +708,15 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             ][..]
         )
     );
+    let alias = histograms[0].alias_table.as_ref().unwrap();
+    assert_eq!(alias.table_size, 64);
+    assert_eq!(alias.entry_size, 64);
+    assert_eq!(alias.distribution_len, 57);
+    assert_eq!(alias.nonzero_symbols, 34);
+    assert_eq!(alias.count_sum, 4096);
+    assert_eq!(alias.first_nonzero_symbol, Some(0));
+    assert_eq!(alias.last_nonzero_symbol, Some(56));
+    assert_eq!(alias.table_checksum, 14675649862238370290);
     assert_eq!(histograms[0].error_stage, None);
     assert_eq!(histograms[1].start_bits, 874);
     assert_eq!(histograms[1].end_bits, Some(914));
@@ -760,6 +769,15 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         histograms[1].final_counts.as_deref(),
         Some(&[1744, 1024, 1024, 128, 128, 16, 32][..])
     );
+    let alias = histograms[1].alias_table.as_ref().unwrap();
+    assert_eq!(alias.table_size, 64);
+    assert_eq!(alias.entry_size, 64);
+    assert_eq!(alias.distribution_len, 7);
+    assert_eq!(alias.nonzero_symbols, 7);
+    assert_eq!(alias.count_sum, 4096);
+    assert_eq!(alias.first_nonzero_symbol, Some(0));
+    assert_eq!(alias.last_nonzero_symbol, Some(6));
+    assert_eq!(alias.table_checksum, 3386431582421457645);
     assert_eq!(histograms[1].error_stage, None);
     assert_eq!(histograms[2].start_bits, 914);
     assert_eq!(histograms[2].end_bits, Some(936));
@@ -778,6 +796,15 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         histograms[2].final_counts.as_deref(),
         Some(&[43, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4053][..])
     );
+    let alias = histograms[2].alias_table.as_ref().unwrap();
+    assert_eq!(alias.table_size, 64);
+    assert_eq!(alias.entry_size, 64);
+    assert_eq!(alias.distribution_len, 15);
+    assert_eq!(alias.nonzero_symbols, 2);
+    assert_eq!(alias.count_sum, 4096);
+    assert_eq!(alias.first_nonzero_symbol, Some(0));
+    assert_eq!(alias.last_nonzero_symbol, Some(14));
+    assert_eq!(alias.table_checksum, 5755618891534445105);
     assert_eq!(histograms[2].error_stage, None);
     assert_eq!(histograms[3].start_bits, 936);
     assert_eq!(histograms[3].end_bits, None);
@@ -845,6 +872,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert!(histograms[3].population_entries.is_empty());
     assert_eq!(histograms[3].population_error_index, None);
     assert_eq!(histograms[3].final_counts, None);
+    assert_eq!(histograms[3].alias_table, None);
     assert_eq!(
         histograms[3].error_stage,
         Some(jxl_codec::VarDctAnsHistogramProbeStage::CustomLogCount)
