@@ -1,5 +1,5 @@
 use crate::bitstream::{BitReader, bits_offset, val};
-use crate::decode::{DecodeConfig, ModularGroupExecution};
+use crate::decode::{DecodeConfig, ImageRegion, ModularGroupExecution};
 use crate::entropy::{AnsCode, AnsSymbolReader, decode_histograms};
 use crate::error::{Error, Result};
 use crate::frame::{ColorTransform, FrameEncoding, FrameHeader};
@@ -58,6 +58,17 @@ struct ImageRect {
     y: u32,
     width: u32,
     height: u32,
+}
+
+impl From<ImageRegion> for ImageRect {
+    fn from(region: ImageRegion) -> Self {
+        Self {
+            x: region.x,
+            y: region.y,
+            width: region.width,
+            height: region.height,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -334,17 +345,20 @@ pub fn read_modular_frame_metadata(
     }
 
     let plan = read_modular_decode_plan(codestream, metadata, frame_header, frame_data)?;
+    let region = config.region.map(ImageRect::from);
     let residuals = decode_modular_residuals(
         codestream,
         frame_header,
         frame_data,
         &plan,
         ModularGroupExecutor::from(config.modular_group_execution),
+        region,
     )
     .ok();
-    let image = residuals
-        .as_ref()
-        .and_then(|residuals| assemble_modular_image(&plan, residuals).ok());
+    let image = residuals.as_ref().and_then(|residuals| match region {
+        Some(region) => assemble_modular_image_region(&plan, residuals, region).ok(),
+        None => assemble_modular_image(&plan, residuals).ok(),
+    });
     let ModularDecodePlan {
         global,
         channel_plan,
@@ -577,6 +591,7 @@ fn decode_modular_residuals(
     frame_data: &FrameData,
     plan: &ModularDecodePlan,
     executor: ModularGroupExecutor,
+    region: Option<ImageRect>,
 ) -> Result<ModularResiduals> {
     let (global, global_tree) =
         decode_global_residuals(codestream, frame_header, frame_data, &plan.channel_plan)?;
@@ -586,7 +601,7 @@ fn decode_modular_residuals(
         width: plan.channel_plan.width,
         height: plan.channel_plan.height,
     };
-    let groups = executor.select_groups_for_rect(&plan.groups, full_image);
+    let groups = executor.select_groups_for_rect(&plan.groups, region.unwrap_or(full_image));
     let decoded_groups =
         executor.decode_groups(codestream, groups.iter().copied(), &global_tree)?;
     Ok(ModularResiduals {

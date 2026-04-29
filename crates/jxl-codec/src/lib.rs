@@ -26,7 +26,7 @@ pub use container::{
     BoxRecord, Container, ContainerBox, ExtractedCodestream, FileFormat, Signature, parse_file,
     parse_file_with_config,
 };
-pub use decode::{DecodeConfig, ModularGroupExecution};
+pub use decode::{DecodeConfig, ImageRegion, ModularGroupExecution};
 pub use error::{Error, Result};
 pub use frame::{
     AnimationFrame as FrameAnimation, BlendMode, BlendingInfo, ColorTransform, FrameEncoding,

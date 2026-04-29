@@ -220,6 +220,7 @@ impl Decoder {
                     jxl_codec::ModularGroupExecution::RequestedThreads(threads)
                 }
             },
+            region: None,
         }
     }
 }

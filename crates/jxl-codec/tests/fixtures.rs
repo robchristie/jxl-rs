@@ -6,8 +6,8 @@ use std::{
 
 use jxl_codec::{
     BlendMode, ColorSpace, ColorTransform, DecodeConfig, ExtraChannelType, FileFormat,
-    FrameEncoding, FrameSectionKind, FrameType, ModularGroupExecution, TransferFunction,
-    TransformId, parse_file, parse_file_with_config,
+    FrameEncoding, FrameSectionKind, FrameType, ImageRegion, ModularGroupExecution,
+    TransferFunction, TransformId, parse_file, parse_file_with_config,
 };
 
 #[test]
@@ -90,6 +90,7 @@ fn configured_parse_matches_default_serial_parse() {
         &bytes,
         DecodeConfig {
             modular_group_execution: ModularGroupExecution::Serial,
+            region: None,
         },
     )
     .unwrap();
@@ -107,6 +108,7 @@ fn requested_threads_parse_matches_serial_for_now() {
         &bytes,
         DecodeConfig {
             modular_group_execution: ModularGroupExecution::Serial,
+            region: None,
         },
     )
     .unwrap();
@@ -114,6 +116,7 @@ fn requested_threads_parse_matches_serial_for_now() {
         &bytes,
         DecodeConfig {
             modular_group_execution: ModularGroupExecution::RequestedThreads(2),
+            region: None,
         },
     )
     .unwrap();
@@ -131,6 +134,7 @@ fn rejects_zero_requested_threads() {
         &bytes,
         DecodeConfig {
             modular_group_execution: ModularGroupExecution::RequestedThreads(0),
+            region: None,
         },
     )
     .unwrap_err();
@@ -138,6 +142,59 @@ fn rejects_zero_requested_threads() {
     assert_eq!(
         err,
         jxl_codec::Error::Unsupported("zero modular group threads")
+    );
+}
+
+#[test]
+fn region_config_selects_intersecting_modular_groups() {
+    let bytes = std::fs::read(workspace_path(
+        "reference/libjxl/testdata/jxl/pq_gradient.jxl",
+    ))
+    .unwrap();
+    let (_, codestream) = parse_file_with_config(
+        &bytes,
+        DecodeConfig {
+            modular_group_execution: ModularGroupExecution::Serial,
+            region: Some(ImageRegion {
+                x: 600,
+                y: 0,
+                width: 32,
+                height: 32,
+            }),
+        },
+    )
+    .unwrap();
+
+    let modular = codestream.first_frame_modular.as_ref().unwrap();
+    let residuals = modular.residuals.as_ref().unwrap();
+    assert_eq!(residuals.groups.len(), 1);
+    assert_eq!(residuals.groups[0].stream_id, 22);
+    assert!(modular.image.is_none());
+}
+
+#[test]
+fn rejects_empty_decode_region() {
+    let bytes = std::fs::read(workspace_path(
+        "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
+    ))
+    .unwrap();
+    let err = parse_file_with_config(
+        &bytes,
+        DecodeConfig {
+            modular_group_execution: ModularGroupExecution::Serial,
+            region: Some(ImageRegion {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 1,
+            }),
+        },
+    )
+    .unwrap_err();
+
+    assert_eq!(
+        err,
+        jxl_codec::Error::InvalidCodestream("empty decode region")
     );
 }
 
