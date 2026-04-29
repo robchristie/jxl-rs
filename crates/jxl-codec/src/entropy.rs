@@ -327,6 +327,11 @@ pub(crate) struct AnsHistogramProbe {
     pub error: Option<Error>,
     pub log_count_entries: Vec<AnsHistogramLogCountProbe>,
     pub log_count_error_index: Option<usize>,
+    pub population_entries: Vec<AnsHistogramPopulationProbe>,
+    pub population_error_index: Option<usize>,
+    pub total_count_before_omit: Option<i32>,
+    pub omit_count: Option<i32>,
+    pub final_counts: Option<Vec<i32>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -340,6 +345,19 @@ pub(crate) struct AnsHistogramLogCountProbe {
     pub rle_length: Option<usize>,
     pub rle_end_bits: Option<usize>,
     pub next_index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AnsHistogramPopulationProbe {
+    pub index: usize,
+    pub start_bits: usize,
+    pub end_bits: usize,
+    pub code: i32,
+    pub bitcount: usize,
+    pub extra_bits: Option<u64>,
+    pub count: i32,
+    pub copied: bool,
+    pub omitted: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -1341,6 +1359,11 @@ fn probe_read_histogram(
         error: None,
         log_count_entries: Vec::new(),
         log_count_error_index: None,
+        population_entries: Vec::new(),
+        population_error_index: None,
+        total_count_before_omit: None,
+        omit_count: None,
+        final_counts: None,
     };
     let range = 1i32 << precision_bits;
 
@@ -1412,6 +1435,7 @@ fn probe_read_histogram(
             counts[symbols[1]] = range - counts[symbols[0]];
         }
         probe.end_bits = Some(reader.bits_consumed());
+        probe.final_counts = Some(counts.clone());
         return (probe, Some(counts));
     }
 
@@ -1447,7 +1471,9 @@ fn probe_read_histogram(
             return (probe, None);
         }
         probe.end_bits = Some(reader.bits_consumed());
-        return (probe, Some(create_flat_histogram(alphabet_size, range)));
+        let counts = create_flat_histogram(alphabet_size, range);
+        probe.final_counts = Some(counts.clone());
+        return (probe, Some(counts));
     }
 
     probe.kind = Some(AnsHistogramProbeKind::Custom);
@@ -1614,6 +1640,11 @@ fn probe_read_histogram(
     let mut prev = 0;
     let mut numsame = 0;
     for i in 0..length {
+        let entry_start_bits = reader.bits_consumed();
+        let mut copied = false;
+        let mut omitted = false;
+        let mut bitcount = 0;
+        let mut extra_bits = None;
         if same[i] != 0 {
             numsame = same[i] - 1;
             prev = if i > 0 { counts[i - 1] } else { 0 };
@@ -1621,17 +1652,23 @@ fn probe_read_histogram(
         if numsame > 0 {
             counts[i] = prev;
             numsame -= 1;
+            copied = true;
         } else {
             let code = logcounts[i];
             if i == omit_pos || code < 0 {
-                continue;
+                omitted = i == omit_pos;
             } else if shift == 0 || code == 0 {
                 counts[i] = 1 << code;
             } else {
-                let bitcount = get_population_count_precision(code as u32, shift);
-                counts[i] = match reader.read_bits(bitcount as usize) {
-                    Ok(bits) => (1 << code) + ((bits as i32) << (code as u32 - bitcount)),
+                let population_bits = get_population_count_precision(code as u32, shift);
+                bitcount = population_bits as usize;
+                counts[i] = match reader.read_bits(bitcount) {
+                    Ok(bits) => {
+                        extra_bits = Some(bits);
+                        (1 << code) + ((bits as i32) << (code as u32 - population_bits))
+                    }
                     Err(error) => {
+                        probe.population_error_index = Some(i);
                         probe_histogram_error(
                             &mut probe,
                             reader,
@@ -1643,9 +1680,22 @@ fn probe_read_histogram(
                 };
             }
         }
+        probe.population_entries.push(AnsHistogramPopulationProbe {
+            index: i,
+            start_bits: entry_start_bits,
+            end_bits: reader.bits_consumed(),
+            code: logcounts[i],
+            bitcount,
+            extra_bits,
+            count: counts[i],
+            copied,
+            omitted,
+        });
         total_count += counts[i];
     }
     counts[omit_pos] = range - total_count;
+    probe.total_count_before_omit = Some(total_count);
+    probe.omit_count = Some(counts[omit_pos]);
     if counts[omit_pos] <= 0 {
         probe_histogram_error(
             &mut probe,
@@ -1656,6 +1706,14 @@ fn probe_read_histogram(
         return (probe, None);
     }
     probe.end_bits = Some(reader.bits_consumed());
+    if let Some(entry) = probe
+        .population_entries
+        .iter_mut()
+        .find(|entry| entry.index == omit_pos)
+    {
+        entry.count = counts[omit_pos];
+    }
+    probe.final_counts = Some(counts.clone());
     (probe, Some(counts))
 }
 

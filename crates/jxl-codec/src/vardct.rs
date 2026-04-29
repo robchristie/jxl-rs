@@ -1,9 +1,9 @@
 use crate::bitstream::{BitReader, bits_offset, val};
 use crate::decode::ImageRegion;
 use crate::entropy::{
-    AnsHistogramLogCountProbe, AnsHistogramProbe, AnsHistogramProbeKind, AnsHistogramProbeStage,
-    ContextMapProbe, ContextMapProbeKind, ContextMapProbeStage, HistogramCodingProbeStage,
-    decode_context_map, probe_decode_context_map,
+    AnsHistogramLogCountProbe, AnsHistogramPopulationProbe, AnsHistogramProbe,
+    AnsHistogramProbeKind, AnsHistogramProbeStage, ContextMapProbe, ContextMapProbeKind,
+    ContextMapProbeStage, HistogramCodingProbeStage, decode_context_map, probe_decode_context_map,
 };
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
@@ -251,6 +251,11 @@ pub struct VarDctAnsHistogramProbe {
     pub error: Option<Error>,
     pub log_count_entries: Vec<VarDctAnsHistogramLogCountProbe>,
     pub log_count_error_index: Option<usize>,
+    pub population_entries: Vec<VarDctAnsHistogramPopulationProbe>,
+    pub population_error_index: Option<usize>,
+    pub total_count_before_omit: Option<i32>,
+    pub omit_count: Option<i32>,
+    pub final_counts: Option<Vec<i32>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -282,6 +287,35 @@ impl From<&AnsHistogramLogCountProbe> for VarDctAnsHistogramLogCountProbe {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAnsHistogramPopulationProbe {
+    pub index: usize,
+    pub start_bits: usize,
+    pub end_bits: usize,
+    pub code: i32,
+    pub bitcount: usize,
+    pub extra_bits: Option<u64>,
+    pub count: i32,
+    pub copied: bool,
+    pub omitted: bool,
+}
+
+impl From<&AnsHistogramPopulationProbe> for VarDctAnsHistogramPopulationProbe {
+    fn from(probe: &AnsHistogramPopulationProbe) -> Self {
+        Self {
+            index: probe.index,
+            start_bits: probe.start_bits,
+            end_bits: probe.end_bits,
+            code: probe.code,
+            bitcount: probe.bitcount,
+            extra_bits: probe.extra_bits,
+            count: probe.count,
+            copied: probe.copied,
+            omitted: probe.omitted,
+        }
+    }
+}
+
 impl From<&AnsHistogramProbe> for VarDctAnsHistogramProbe {
     fn from(probe: &AnsHistogramProbe) -> Self {
         Self {
@@ -303,6 +337,15 @@ impl From<&AnsHistogramProbe> for VarDctAnsHistogramProbe {
                 .map(VarDctAnsHistogramLogCountProbe::from)
                 .collect(),
             log_count_error_index: probe.log_count_error_index,
+            population_entries: probe
+                .population_entries
+                .iter()
+                .map(VarDctAnsHistogramPopulationProbe::from)
+                .collect(),
+            population_error_index: probe.population_error_index,
+            total_count_before_omit: probe.total_count_before_omit,
+            omit_count: probe.omit_count,
+            final_counts: probe.final_counts.clone(),
         }
     }
 }

@@ -649,6 +649,65 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         ]
     );
     assert_eq!(histograms[0].log_count_error_index, None);
+    assert_eq!(histograms[0].population_entries.len(), 57);
+    assert_eq!(histograms[0].population_entries[0].start_bits, 831);
+    assert_eq!(histograms[0].population_entries[56].end_bits, 874);
+    assert_eq!(
+        histograms[0]
+            .population_entries
+            .iter()
+            .filter(|entry| entry.bitcount > 0)
+            .map(|entry| (
+                entry.index,
+                entry.start_bits,
+                entry.end_bits,
+                entry.bitcount,
+                entry.extra_bits,
+                entry.count,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 831, 832, 1, Some(0), 64),
+            (1, 832, 833, 1, Some(1), 48),
+            (2, 833, 834, 1, Some(1), 48),
+            (3, 834, 835, 1, Some(1), 96),
+            (4, 835, 836, 1, Some(1), 96),
+            (7, 836, 838, 2, Some(0), 128),
+            (8, 838, 839, 1, Some(1), 96),
+            (11, 839, 841, 2, Some(0), 128),
+            (12, 841, 843, 2, Some(0), 128),
+            (15, 843, 844, 1, Some(1), 96),
+            (16, 844, 846, 2, Some(3), 224),
+            (19, 846, 848, 2, Some(3), 224),
+            (20, 848, 850, 2, Some(1), 160),
+            (23, 850, 852, 2, Some(1), 160),
+            (24, 852, 854, 2, Some(0), 256),
+            (28, 854, 856, 2, Some(2), 192),
+            (31, 856, 858, 2, Some(3), 224),
+            (32, 858, 860, 2, Some(0), 256),
+            (35, 860, 862, 2, Some(0), 256),
+            (36, 862, 864, 2, Some(1), 160),
+            (39, 864, 866, 2, Some(1), 160),
+            (40, 866, 868, 2, Some(1), 160),
+            (43, 868, 870, 2, Some(1), 160),
+            (44, 870, 872, 2, Some(0), 128),
+            (47, 872, 873, 1, Some(0), 64),
+            (48, 873, 874, 1, Some(0), 64),
+        ]
+    );
+    assert_eq!(histograms[0].population_error_index, None);
+    assert_eq!(histograms[0].total_count_before_omit, Some(3815));
+    assert_eq!(histograms[0].omit_count, Some(281));
+    assert_eq!(
+        histograms[0].final_counts.as_deref(),
+        Some(
+            &[
+                64, 48, 48, 96, 96, 0, 0, 128, 96, 0, 0, 128, 128, 0, 0, 96, 224, 0, 0, 224, 160,
+                0, 0, 160, 256, 2, 1, 281, 192, 1, 0, 224, 256, 2, 0, 256, 160, 0, 0, 160, 160, 0,
+                0, 160, 128, 0, 0, 64, 64, 0, 0, 16, 16, 0, 0, 0, 1,
+            ][..]
+        )
+    );
     assert_eq!(histograms[0].error_stage, None);
     assert_eq!(histograms[1].start_bits, 874);
     assert_eq!(histograms[1].end_bits, Some(914));
@@ -690,6 +749,17 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         ]
     );
     assert_eq!(histograms[1].log_count_error_index, None);
+    assert_eq!(histograms[1].population_entries.len(), 7);
+    assert!(histograms[1].population_entries.iter().all(|entry| {
+        entry.start_bits == 914 && entry.end_bits == 914 && entry.bitcount == 0 && !entry.copied
+    }));
+    assert_eq!(histograms[1].population_error_index, None);
+    assert_eq!(histograms[1].total_count_before_omit, Some(2352));
+    assert_eq!(histograms[1].omit_count, Some(1744));
+    assert_eq!(
+        histograms[1].final_counts.as_deref(),
+        Some(&[1744, 1024, 1024, 128, 128, 16, 32][..])
+    );
     assert_eq!(histograms[1].error_stage, None);
     assert_eq!(histograms[2].start_bits, 914);
     assert_eq!(histograms[2].end_bits, Some(936));
@@ -704,6 +774,10 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         Some(jxl_codec::VarDctAnsHistogramProbeKind::Simple)
     );
     assert_eq!(histograms[2].simple_symbol_count, Some(2));
+    assert_eq!(
+        histograms[2].final_counts.as_deref(),
+        Some(&[43, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4053][..])
+    );
     assert_eq!(histograms[2].error_stage, None);
     assert_eq!(histograms[3].start_bits, 936);
     assert_eq!(histograms[3].end_bits, None);
@@ -768,6 +842,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(histograms[3].log_count_entries[16].rle_end_bits, Some(1027));
     assert_eq!(histograms[3].log_count_entries[16].next_index, 20);
     assert_eq!(histograms[3].log_count_error_index, Some(22));
+    assert!(histograms[3].population_entries.is_empty());
+    assert_eq!(histograms[3].population_error_index, None);
+    assert_eq!(histograms[3].final_counts, None);
     assert_eq!(
         histograms[3].error_stage,
         Some(jxl_codec::VarDctAnsHistogramProbeStage::CustomLogCount)
