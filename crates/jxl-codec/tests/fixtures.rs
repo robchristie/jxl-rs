@@ -550,6 +550,43 @@ fn parses_checked_in_fixture_first_frame_toc() {
 }
 
 #[test]
+fn parses_checked_in_fixture_vardct_metadata() {
+    let container =
+        parse_fixture("reference/libjxl/testdata/jxl/boxes/square-extended-size-container.jxl");
+    let vardct = container.first_frame_vardct.as_ref().unwrap();
+
+    assert_eq!(vardct.width, 8);
+    assert_eq!(vardct.height, 8);
+    assert_eq!(vardct.group_dim, 256);
+    assert_eq!(vardct.groups_x, 1);
+    assert_eq!(vardct.groups_y, 1);
+    assert_eq!(vardct.dc_groups_x, 1);
+    assert_eq!(vardct.dc_groups_y, 1);
+    assert_eq!(vardct.sections.len(), 1);
+    assert_eq!(vardct.sections[0].section_kind, FrameSectionKind::Combined);
+    assert_eq!(vardct.sections[0].payload_size, 45);
+    assert_eq!(vardct.ac_groups.len(), 1);
+    assert_eq!(vardct.ac_groups[0].group, 0);
+    assert_eq!(vardct.ac_groups[0].x, 0);
+    assert_eq!(vardct.ac_groups[0].y, 0);
+    assert_eq!(vardct.ac_groups[0].width, 8);
+    assert_eq!(vardct.ac_groups[0].height, 8);
+    assert_eq!(vardct.dc_groups.len(), 1);
+    assert_eq!(
+        vardct.ac_groups_intersecting_region(ImageRegion {
+            x: 4,
+            y: 4,
+            width: 1,
+            height: 1,
+        }),
+        vec![0]
+    );
+
+    let pq = parse_fixture("reference/libjxl/testdata/jxl/pq_gradient.jxl");
+    assert!(pq.first_frame_vardct.is_none());
+}
+
+#[test]
 fn parses_checked_in_fixture_modular_global_metadata() {
     let pq = parse_fixture("reference/libjxl/testdata/jxl/pq_gradient.jxl");
     let modular = pq.first_frame_modular.as_ref().unwrap();

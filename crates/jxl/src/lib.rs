@@ -14,8 +14,8 @@ pub use jxl_codec::{
     ModularGroupChannelPlan, ModularGroupHeader, ModularImage, ModularImageChannel,
     ModularPredictor, ModularResiduals, ModularSectionMetadata, ModularTransform,
     ModularTreeMetadata, OpsinInverseMatrix, Orientation, Primaries, RenderingIntent, Result,
-    SqueezeParams, TocEntry, ToneMapping, TransferFunction, TransformId, WeightedPredictorHeader,
-    WhitePoint,
+    SqueezeParams, TocEntry, ToneMapping, TransferFunction, TransformId, VarDctFrameMetadata,
+    VarDctGroupMetadata, VarDctSectionMetadata, WeightedPredictorHeader, WhitePoint,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -30,6 +30,7 @@ pub struct ImageInfo {
     pub first_frame: Option<FrameHeader>,
     pub first_frame_data: Option<FrameData>,
     pub first_frame_modular: Option<ModularFrameMetadata>,
+    pub first_frame_vardct: Option<VarDctFrameMetadata>,
     pub boxes: Vec<BoxRecord>,
 }
 
@@ -250,6 +251,7 @@ pub fn inspect(input: &[u8]) -> Result<ImageInfo> {
         first_frame: codestream.first_frame,
         first_frame_data: codestream.first_frame_data,
         first_frame_modular: codestream.first_frame_modular,
+        first_frame_vardct: codestream.first_frame_vardct,
         boxes: extracted
             .container
             .map(|container| container.boxes)
@@ -1030,6 +1032,12 @@ mod tests {
             "reference/libjxl/testdata/jxl/boxes/square-extended-size-container.jxl",
         ))
         .unwrap();
+        let info = inspect(&bytes).unwrap();
+        assert!(info.first_frame_modular.is_none());
+        assert_eq!(
+            info.first_frame_vardct.as_ref().unwrap().sections[0].section_kind,
+            FrameSectionKind::Combined
+        );
         let roi_decoder = Decoder::new().roi(Rect {
             x: 0,
             y: 0,

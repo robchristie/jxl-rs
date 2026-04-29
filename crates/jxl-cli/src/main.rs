@@ -140,6 +140,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 modular.groups.len()
             );
         }
+        if let Some(vardct) = &info.first_frame_vardct {
+            println!(
+                "First frame VarDCT: sections={} ac_groups={} dc_groups={}",
+                vardct.sections.len(),
+                vardct.ac_groups.len(),
+                vardct.dc_groups.len()
+            );
+        }
     } else {
         println!("First frame: not parsed");
     }
@@ -407,6 +415,40 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         tree.context_map_size
                     );
                 }
+            }
+        }
+        if let Some(vardct) = &info.first_frame_vardct {
+            println!(
+                "First frame VarDCT plan: {}x{} group_dim={} groups={}x{} dc_groups={}x{}",
+                vardct.width,
+                vardct.height,
+                vardct.group_dim,
+                vardct.groups_x,
+                vardct.groups_y,
+                vardct.dc_groups_x,
+                vardct.dc_groups_y
+            );
+            for section in &vardct.sections {
+                println!(
+                    "First frame VarDCT section {}: logical={} kind={:?} offset={} size={}",
+                    section.section_physical_index,
+                    section.section_logical_id,
+                    section.section_kind,
+                    section.codestream_offset,
+                    section.payload_size
+                );
+            }
+            for group in &vardct.ac_groups {
+                println!(
+                    "First frame VarDCT AC group {}: rect={}x{} at ({},{})",
+                    group.group, group.width, group.height, group.x, group.y
+                );
+            }
+            for group in &vardct.dc_groups {
+                println!(
+                    "First frame VarDCT DC group {}: rect={}x{} at ({},{})",
+                    group.group, group.width, group.height, group.x, group.y
+                );
             }
         }
     }

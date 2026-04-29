@@ -15,6 +15,7 @@ pub mod frame_data;
 pub mod metadata;
 pub mod modular;
 pub mod transform;
+pub mod vardct;
 
 pub(crate) mod entropy;
 pub(crate) mod icc;
@@ -47,3 +48,4 @@ pub use modular::{
     WeightedPredictorHeader,
 };
 pub use transform::{CustomTransformData, OpsinInverseMatrix};
+pub use vardct::{VarDctFrameMetadata, VarDctGroupMetadata, VarDctSectionMetadata};
