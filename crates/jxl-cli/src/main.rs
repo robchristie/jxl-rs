@@ -551,7 +551,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     if let Some(probe) = &metadata.coefficient_probe {
                         println!(
-                            "First frame VarDCT AC coeff probe: pass={} group={} block=({}, {}) channel={} strategy={} order={} block_ctx={} nzero_ctx={} clustered_ctx={} bits={}..{} nzeros={}",
+                            "First frame VarDCT AC coeff probe: pass={} group={} block=({}, {}) channel={} strategy={} order={} covered={} size={} block_ctx={} nzero_ctx={} clustered_ctx={} nzero_bits={}..{} nzeros={} events={} block_bits={:?} remaining={:?} checksum={}",
                             metadata.payload.pass,
                             metadata.payload.group.group,
                             probe.block_x,
@@ -559,12 +559,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             probe.channel,
                             probe.raw_strategy,
                             probe.order,
+                            probe.covered_blocks,
+                            probe.block_size,
                             probe.block_context,
                             probe.nonzero_context,
                             probe.clustered_context,
                             probe.start_bits,
-                            probe.end_bits,
-                            probe.nzeros
+                            probe.nzeros_end_bits,
+                            probe.nzeros,
+                            probe.coefficient_events.len(),
+                            probe.block_end_bits,
+                            probe.remaining_nzeros,
+                            probe.coefficient_event_checksum
                         );
                     }
                 }

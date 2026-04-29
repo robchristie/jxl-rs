@@ -545,25 +545,32 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .iter()
             .map(|metadata| {
                 let probe = metadata.coefficient_probe.as_ref().unwrap();
-                (
+                format!(
+                    "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{:?}:{:?}:{}",
                     metadata.payload.group.group,
                     probe.block_x,
                     probe.block_y,
                     probe.channel,
                     probe.raw_strategy,
                     probe.order,
+                    probe.covered_blocks,
+                    probe.block_size,
                     probe.block_context,
                     probe.nonzero_context,
                     probe.clustered_context,
                     probe.start_bits,
-                    probe.end_bits,
+                    probe.nzeros_end_bits,
                     probe.nzeros,
+                    probe.coefficient_events.len(),
+                    probe.block_end_bits,
+                    probe.remaining_nzeros,
+                    probe.coefficient_event_checksum,
                 )
             })
             .collect::<Vec<_>>(),
         vec![
-            (0, 0, 0, 1, 4, 2, 2, 302, 11, 32, 34, 18),
-            (1, 32, 0, 1, 4, 2, 2, 302, 11, 32, 34, 17),
+            "0:0:0:1:4:2:4:256:2:302:11:32:34:18:33:Some(114):Some(0):1755776318511458984",
+            "1:32:0:1:4:2:4:256:2:302:11:32:34:17:23:Some(98):Some(0):2461791933791546484",
         ]
     );
     assert_eq!(plan.modular_global_tree_payload_start_bits, Some(192));

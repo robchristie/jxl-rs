@@ -645,12 +645,32 @@ pub struct VarDctAcCoefficientProbe {
     pub channel: usize,
     pub raw_strategy: usize,
     pub order: usize,
+    pub covered_blocks: usize,
+    pub block_size: usize,
     pub block_context: usize,
     pub nonzero_context: usize,
     pub clustered_context: usize,
     pub start_bits: usize,
-    pub end_bits: usize,
+    pub nzeros_end_bits: usize,
     pub nzeros: u32,
+    pub block_end_bits: Option<usize>,
+    pub remaining_nzeros: Option<usize>,
+    pub coefficient_events: Vec<VarDctAcCoefficientEvent>,
+    pub coefficient_event_checksum: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcCoefficientEvent {
+    pub k: usize,
+    pub zero_density_context: usize,
+    pub context: usize,
+    pub clustered_context: usize,
+    pub start_bits: usize,
+    pub end_bits: usize,
+    pub u_coeff: u32,
+    pub coeff: i32,
+    pub prev_after: usize,
+    pub remaining_nzeros: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1341,6 +1361,12 @@ fn probe_first_vardct_ac_coefficient(
     let order = *STRATEGY_ORDER
         .get(first_block.raw_strategy)
         .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+    let covered_blocks =
+        STRATEGY_BLOCKS_X[first_block.raw_strategy] * STRATEGY_BLOCKS_Y[first_block.raw_strategy];
+    let block_size = covered_blocks * DCT_BLOCK_SIZE;
+    if block_size > FIRST_AC_BLOCK_EVENT_LIMIT + covered_blocks {
+        return Err(Error::Unsupported("large VarDCT AC coefficient probe"));
+    }
     let block_context = vardct_block_context(&global.block_context_map, order, 1)?;
     let nonzero_context =
         vardct_nonzero_context(32, block_context, global.block_context_map.num_contexts);
@@ -1351,7 +1377,64 @@ fn probe_first_vardct_ac_coefficient(
     );
     let start_bits = reader.bits_consumed();
     let nzeros = symbol_reader.read_hybrid_uint_clustered(clustered_context, reader)?;
-    let end_bits = reader.bits_consumed();
+    let nzeros_end_bits = reader.bits_consumed();
+    if nzeros as usize > block_size - covered_blocks {
+        return Err(Error::InvalidCodestream("invalid VarDCT AC nzeros"));
+    }
+
+    let zero_density_context_offset = global.block_context_map.num_contexts * NONZERO_BUCKETS
+        + ZERO_DENSITY_CONTEXT_COUNT * block_context;
+    let log2_covered_blocks = covered_blocks.ilog2() as usize;
+    let mut remaining_nzeros = nzeros as usize;
+    let mut prev = if remaining_nzeros > block_size / 16 {
+        0
+    } else {
+        1
+    };
+    let mut coefficient_events = Vec::new();
+    for k in covered_blocks..block_size {
+        if remaining_nzeros == 0 {
+            break;
+        }
+        let zero_density_context = zero_density_context(
+            remaining_nzeros,
+            k,
+            covered_blocks,
+            log2_covered_blocks,
+            prev,
+        )?;
+        let context = zero_density_context_offset + zero_density_context;
+        let clustered_context = usize::from(
+            *context_map
+                .get(context)
+                .ok_or(Error::InvalidCodestream("invalid AC entropy context"))?,
+        );
+        let start_bits = reader.bits_consumed();
+        let u_coeff = symbol_reader.read_hybrid_uint_clustered(clustered_context, reader)?;
+        let end_bits = reader.bits_consumed();
+        let coeff = unpack_signed(u_coeff);
+        prev = usize::from(u_coeff != 0);
+        remaining_nzeros = remaining_nzeros.saturating_sub(prev);
+        coefficient_events.push(VarDctAcCoefficientEvent {
+            k,
+            zero_density_context,
+            context,
+            clustered_context,
+            start_bits,
+            end_bits,
+            u_coeff,
+            coeff,
+            prev_after: prev,
+            remaining_nzeros,
+        });
+    }
+    if remaining_nzeros != 0 {
+        return Err(Error::InvalidCodestream(
+            "invalid VarDCT AC nzeros at end of block",
+        ));
+    }
+    let block_end_bits = Some(reader.bits_consumed());
+    let coefficient_event_checksum = checksum_coefficient_events(&coefficient_events);
 
     Ok(VarDctAcCoefficientProbe {
         block_x: first_block.block_x,
@@ -1359,12 +1442,18 @@ fn probe_first_vardct_ac_coefficient(
         channel: 1,
         raw_strategy: first_block.raw_strategy,
         order,
+        covered_blocks,
+        block_size,
         block_context,
         nonzero_context,
         clustered_context,
         start_bits,
-        end_bits,
+        nzeros_end_bits,
         nzeros,
+        block_end_bits,
+        remaining_nzeros: Some(remaining_nzeros),
+        coefficient_events,
+        coefficient_event_checksum,
     })
 }
 
@@ -1478,6 +1567,45 @@ fn vardct_nonzero_context(
         4 + clamped / 2
     };
     bucket * num_contexts + block_context
+}
+
+fn zero_density_context(
+    nonzeros_left: usize,
+    k: usize,
+    covered_blocks: usize,
+    log2_covered_blocks: usize,
+    prev: usize,
+) -> Result<usize> {
+    if covered_blocks == 0 || (1usize << log2_covered_blocks) != covered_blocks {
+        return Err(Error::InvalidCodestream("invalid AC covered block count"));
+    }
+    let nonzeros_left = (nonzeros_left + covered_blocks - 1) >> log2_covered_blocks;
+    let k = k >> log2_covered_blocks;
+    if k == 0 || k >= 64 || nonzeros_left == 0 || nonzeros_left >= 64 {
+        return Err(Error::InvalidCodestream("invalid AC zero-density context"));
+    }
+    Ok((COEFF_NUM_NONZERO_CONTEXT[nonzeros_left] + COEFF_FREQ_CONTEXT[k]) * 2 + prev)
+}
+
+fn checksum_coefficient_events(events: &[VarDctAcCoefficientEvent]) -> u64 {
+    events.iter().fold(0xcbf29ce484222325, |hash, event| {
+        [
+            event.k as u64,
+            event.zero_density_context as u64,
+            event.context as u64,
+            event.clustered_context as u64,
+            event.start_bits as u64,
+            event.end_bits as u64,
+            u64::from(event.u_coeff),
+            event.coeff as i64 as u64,
+            event.prev_after as u64,
+            event.remaining_nzeros as u64,
+        ]
+        .into_iter()
+        .fold(hash, |hash, value| {
+            (hash ^ value).wrapping_mul(0x100000001b3)
+        })
+    })
 }
 
 fn read_vardct_dc_group_metadata(
@@ -1801,6 +1929,20 @@ struct VarDctCoeffOrderError {
 const DCT_BLOCK_SIZE: usize = 64;
 const PERMUTATION_CONTEXTS: usize = 8;
 const STRATEGY_ORDER_BUCKETS: usize = 13;
+const NONZERO_BUCKETS: usize = 37;
+const ZERO_DENSITY_CONTEXT_COUNT: usize = 458;
+const FIRST_AC_BLOCK_EVENT_LIMIT: usize = 4096;
+const COEFF_FREQ_CONTEXT: [usize; 64] = [
+    0xBAD, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 15, 16, 16, 17, 17, 18, 18, 19,
+    19, 20, 20, 21, 21, 22, 22, 23, 23, 23, 23, 24, 24, 24, 24, 25, 25, 25, 25, 26, 26, 26, 26, 27,
+    27, 27, 27, 28, 28, 28, 28, 29, 29, 29, 29, 30, 30, 30, 30,
+];
+const COEFF_NUM_NONZERO_CONTEXT: [usize; 64] = [
+    0xBAD, 0, 31, 62, 62, 93, 93, 93, 93, 123, 123, 123, 123, 152, 152, 152, 152, 152, 152, 152,
+    152, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 180, 206, 206, 206, 206, 206, 206,
+    206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206, 206,
+    206, 206, 206, 206, 206, 206,
+];
 const STRATEGY_ORDER: [usize; 27] = [
     0, 1, 1, 1, 2, 3, 4, 4, 5, 5, 6, 6, 1, 1, 1, 1, 1, 1, 7, 8, 8, 9, 10, 10, 11, 12, 12,
 ];
