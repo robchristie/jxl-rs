@@ -94,13 +94,17 @@ pub struct VarDctDcGroupPayloadMetadata {
 pub struct VarDctDcGroupMetadata {
     pub payload: VarDctDcGroupPayloadMetadata,
     pub cursor: VarDctDcGroupCursorMetadata,
+    pub extra_precision_bits: Option<u8>,
     pub var_dct_dc_header: Option<ModularGroupHeader>,
     pub parse_error: Option<Error>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VarDctDcGroupCursorMetadata {
-    pub var_dct_dc_start_bits: usize,
+    pub extra_precision_start_bits: usize,
+    pub extra_precision_end_bits: Option<usize>,
+    pub var_dct_dc_start_bits: Option<usize>,
+    pub var_dct_dc_header_end_bits: Option<usize>,
     pub var_dct_dc_end_bits: Option<usize>,
     pub modular_dc_start_bits: Option<usize>,
     pub modular_dc_end_bits: Option<usize>,
@@ -337,22 +341,33 @@ fn read_vardct_dc_group_metadata(
         .get(payload.section.payload_range.clone())
         .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
     let mut reader = BitReader::new(bytes);
-    let header_result = read_modular_group_header_metadata(&mut reader);
-    let (var_dct_dc_header, parse_error) = match header_result {
-        Ok(header) => (Some(header), None),
-        Err(error) => (None, Some(error)),
+    let extra_precision_result = reader.read_bits(2).map(|bits| bits as u8);
+    let extra_precision_end = extra_precision_result
+        .as_ref()
+        .ok()
+        .map(|_| reader.bits_consumed());
+    let (extra_precision_bits, var_dct_dc_header, parse_error) = match extra_precision_result {
+        Ok(extra_precision_bits) => match read_modular_group_header_metadata(&mut reader) {
+            Ok(header) => (Some(extra_precision_bits), Some(header), None),
+            Err(error) => (Some(extra_precision_bits), None, Some(error)),
+        },
+        Err(error) => (None, None, Some(error)),
     };
     let header_end = var_dct_dc_header.as_ref().map(|_| reader.bits_consumed());
     Ok(VarDctDcGroupMetadata {
         payload,
         cursor: VarDctDcGroupCursorMetadata {
-            var_dct_dc_start_bits: 0,
-            var_dct_dc_end_bits: header_end,
-            modular_dc_start_bits: header_end,
+            extra_precision_start_bits: 0,
+            extra_precision_end_bits: extra_precision_end,
+            var_dct_dc_start_bits: extra_precision_end,
+            var_dct_dc_header_end_bits: header_end,
+            var_dct_dc_end_bits: None,
+            modular_dc_start_bits: None,
             modular_dc_end_bits: None,
             ac_metadata_start_bits: None,
             ac_metadata_end_bits: None,
         },
+        extra_precision_bits,
         var_dct_dc_header,
         parse_error,
     })
@@ -834,7 +849,7 @@ mod tests {
         let mut codestream = vec![0; 64];
         codestream[10] = 1;
         codestream[12] = 0b0000_0011;
-        codestream[13] = 0b0000_0010;
+        codestream[13] = 0b0000_1000;
 
         let plan = read_vardct_decode_plan(&codestream, &frame_header, &frame_data)
             .unwrap()
@@ -866,9 +881,13 @@ mod tests {
         assert_eq!(plan.dc_group_metadata.len(), 1);
         let dc_metadata = &plan.dc_group_metadata[0];
         assert_eq!(dc_metadata.payload, plan.dc_group_payloads[0]);
-        assert_eq!(dc_metadata.cursor.var_dct_dc_start_bits, 0);
-        assert_eq!(dc_metadata.cursor.var_dct_dc_end_bits, Some(4));
-        assert_eq!(dc_metadata.cursor.modular_dc_start_bits, Some(4));
+        assert_eq!(dc_metadata.extra_precision_bits, Some(0));
+        assert_eq!(dc_metadata.cursor.extra_precision_start_bits, 0);
+        assert_eq!(dc_metadata.cursor.extra_precision_end_bits, Some(2));
+        assert_eq!(dc_metadata.cursor.var_dct_dc_start_bits, Some(2));
+        assert_eq!(dc_metadata.cursor.var_dct_dc_header_end_bits, Some(6));
+        assert_eq!(dc_metadata.cursor.var_dct_dc_end_bits, None);
+        assert_eq!(dc_metadata.cursor.modular_dc_start_bits, None);
         let dc_header = dc_metadata.var_dct_dc_header.as_ref().unwrap();
         assert!(!dc_header.use_global_tree);
         assert!(dc_header.weighted_predictor.all_default);
