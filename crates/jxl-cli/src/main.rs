@@ -533,6 +533,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     section.section.payload_size
                 );
             }
+            if let Some(plan) = info.first_frame_vardct_plan.as_ref() {
+                for metadata in &plan.ac_group_metadata {
+                    println!(
+                        "First frame VarDCT AC group metadata: pass={} group={} payload_bits={} selector_bits={} selector={:?} selector_end={:?} ans_bits={:?}..{:?} coeff_start={:?} modular_start={:?} error={:?}",
+                        metadata.payload.pass,
+                        metadata.payload.group.group,
+                        metadata.cursor.payload_end_bits,
+                        metadata.histogram_selector_bits,
+                        metadata.histogram_selector,
+                        metadata.cursor.histogram_selector_end_bits,
+                        metadata.cursor.ans_state_start_bits,
+                        metadata.cursor.ans_state_end_bits,
+                        metadata.cursor.coefficient_stream_start_bits,
+                        metadata.cursor.modular_ac_start_bits,
+                        metadata.parse_error
+                    );
+                }
+            }
             for group in &vardct.dc_groups {
                 println!(
                     "First frame VarDCT DC group {}: rect={}x{} at ({},{})",

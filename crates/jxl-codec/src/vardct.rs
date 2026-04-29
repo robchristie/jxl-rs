@@ -513,6 +513,7 @@ pub struct VarDctDecodePlan {
     pub ac_global_payload: Option<VarDctSectionPayloadMetadata>,
     pub ac_global_metadata: Option<VarDctAcGlobalMetadata>,
     pub ac_group_payloads: Vec<VarDctPassGroupPayloadMetadata>,
+    pub ac_group_metadata: Vec<VarDctAcGroupMetadata>,
     pub dc_group_payloads: Vec<VarDctDcGroupPayloadMetadata>,
     pub dc_group_metadata: Vec<VarDctDcGroupMetadata>,
 }
@@ -540,6 +541,8 @@ pub struct VarDctAcGlobalPassMetadata {
     pub histogram_contexts: Option<usize>,
     pub histogram_count: Option<usize>,
     pub histogram_end_bits: Option<usize>,
+    pub use_prefix_code: Option<bool>,
+    pub log_alpha_size: Option<usize>,
     pub error_stage: Option<VarDctHistogramProbeStage>,
     pub error_bits: Option<usize>,
     pub error: Option<Error>,
@@ -609,6 +612,28 @@ pub struct VarDctPassGroupPayloadMetadata {
     pub section: VarDctSectionPayloadMetadata,
     pub pass: usize,
     pub group: VarDctGroupMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcGroupMetadata {
+    pub payload: VarDctPassGroupPayloadMetadata,
+    pub cursor: VarDctAcGroupCursorMetadata,
+    pub histogram_selector_bits: usize,
+    pub histogram_selector: Option<usize>,
+    pub entropy_uses_prefix_code: Option<bool>,
+    pub parse_error: Option<Error>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VarDctAcGroupCursorMetadata {
+    pub payload_start_bits: usize,
+    pub payload_end_bits: usize,
+    pub histogram_selector_start_bits: usize,
+    pub histogram_selector_end_bits: Option<usize>,
+    pub ans_state_start_bits: Option<usize>,
+    pub ans_state_end_bits: Option<usize>,
+    pub coefficient_stream_start_bits: Option<usize>,
+    pub modular_ac_start_bits: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1013,6 +1038,13 @@ pub fn read_vardct_decode_plan(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let ac_group_metadata = ac_group_payloads
+        .iter()
+        .cloned()
+        .map(|payload| {
+            read_vardct_ac_group_metadata(codestream, payload, ac_global_metadata.as_ref())
+        })
+        .collect::<Result<Vec<_>>>()?;
     let modular_global_tree_payload_start_bits = global_payload
         .as_ref()
         .and_then(|payload| payload.payload_range.start.checked_mul(8));
@@ -1091,9 +1123,98 @@ pub fn read_vardct_decode_plan(
         ac_global_payload,
         ac_global_metadata,
         ac_group_payloads,
+        ac_group_metadata,
         dc_group_payloads,
         dc_group_metadata,
     }))
+}
+
+fn read_vardct_ac_group_metadata(
+    codestream: &[u8],
+    payload: VarDctPassGroupPayloadMetadata,
+    ac_global: Option<&VarDctAcGlobalMetadata>,
+) -> Result<VarDctAcGroupMetadata> {
+    let bytes = codestream
+        .get(payload.section.payload_range.clone())
+        .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
+    let mut reader = BitReader::new(bytes);
+    let payload_end_bits = bytes
+        .len()
+        .checked_mul(8)
+        .ok_or(Error::InvalidCodestream("AC group payload too large"))?;
+    let histogram_selector_bits = ac_global
+        .and_then(|global| global.num_histograms)
+        .map(ceil_log2_nonzero)
+        .unwrap_or(0);
+    let entropy_uses_prefix_code = ac_global
+        .and_then(|global| global.passes.iter().find(|pass| pass.pass == payload.pass))
+        .and_then(|pass| pass.use_prefix_code);
+    let mut metadata = VarDctAcGroupMetadata {
+        payload,
+        cursor: VarDctAcGroupCursorMetadata {
+            payload_start_bits: 0,
+            payload_end_bits,
+            histogram_selector_start_bits: 0,
+            histogram_selector_end_bits: None,
+            ans_state_start_bits: None,
+            ans_state_end_bits: None,
+            coefficient_stream_start_bits: None,
+            modular_ac_start_bits: None,
+        },
+        histogram_selector_bits,
+        histogram_selector: None,
+        entropy_uses_prefix_code,
+        parse_error: None,
+    };
+
+    let histogram_selector = if histogram_selector_bits == 0 {
+        0
+    } else {
+        match reader.read_bits(histogram_selector_bits) {
+            Ok(selector) => selector as usize,
+            Err(error) => {
+                metadata.cursor.histogram_selector_end_bits = Some(reader.bits_consumed());
+                metadata.parse_error = Some(error);
+                return Ok(metadata);
+            }
+        }
+    };
+    metadata.histogram_selector = Some(histogram_selector);
+    metadata.cursor.histogram_selector_end_bits = Some(reader.bits_consumed());
+    if let Some(num_histograms) = ac_global.and_then(|global| global.num_histograms)
+        && histogram_selector >= num_histograms
+    {
+        metadata.parse_error = Some(Error::InvalidCodestream("invalid histogram selector"));
+        return Ok(metadata);
+    }
+
+    match entropy_uses_prefix_code {
+        Some(false) => {
+            metadata.cursor.ans_state_start_bits = Some(reader.bits_consumed());
+            match reader.read_bits(32) {
+                Ok(_) => {
+                    metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
+                    metadata.cursor.coefficient_stream_start_bits = Some(reader.bits_consumed());
+                    metadata.parse_error =
+                        Some(Error::Unsupported("VarDCT AC coefficient stream decoding"));
+                }
+                Err(error) => {
+                    metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
+                    metadata.parse_error = Some(error);
+                }
+            }
+        }
+        Some(true) => {
+            metadata.cursor.coefficient_stream_start_bits = Some(reader.bits_consumed());
+            metadata.parse_error =
+                Some(Error::Unsupported("VarDCT AC coefficient stream decoding"));
+        }
+        None => {
+            metadata.parse_error = Some(Error::Unsupported("VarDCT AC entropy metadata"));
+        }
+    }
+
+    Ok(metadata)
 }
 
 fn read_vardct_dc_group_metadata(
@@ -1303,6 +1424,8 @@ fn read_vardct_ac_global_metadata(
                         histogram_contexts: None,
                         histogram_count: None,
                         histogram_end_bits: None,
+                        use_prefix_code: None,
+                        log_alpha_size: None,
                         error_stage: None,
                         error_bits: Some(reader.bits_consumed()),
                         error: Some(error.clone()),
@@ -1334,6 +1457,8 @@ fn read_vardct_ac_global_metadata(
                     histogram_contexts: None,
                     histogram_count: None,
                     histogram_end_bits: None,
+                    use_prefix_code: None,
+                    log_alpha_size: None,
                     error_stage: None,
                     error_bits: Some(error.error_bits),
                     error: Some(error.error.clone()),
@@ -1366,6 +1491,8 @@ fn read_vardct_ac_global_metadata(
             histogram_contexts: Some(histogram_contexts),
             histogram_count: histogram_probe.num_histograms,
             histogram_end_bits: histogram_probe.histogram_end_bits,
+            use_prefix_code: histogram_probe.use_prefix_code,
+            log_alpha_size: histogram_probe.log_alpha_size,
             error_stage: histogram_probe
                 .error_stage
                 .map(VarDctHistogramProbeStage::from),

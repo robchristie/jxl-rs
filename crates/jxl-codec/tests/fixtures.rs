@@ -473,10 +473,73 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(ac_global.passes[0].histogram_contexts, Some(7425));
     assert_eq!(ac_global.passes[0].histogram_count, Some(16));
     assert_eq!(ac_global.passes[0].histogram_end_bits, Some(8288));
+    assert_eq!(ac_global.passes[0].use_prefix_code, Some(false));
+    assert_eq!(ac_global.passes[0].log_alpha_size, Some(7));
     assert_eq!(ac_global.passes[0].error_bits, None);
     assert_eq!(ac_global.passes[0].error, None);
     assert!(!plan.dc_group_payloads.is_empty());
     assert!(!plan.ac_group_payloads.is_empty());
+    assert_eq!(plan.ac_group_payloads.len(), 2);
+    assert_eq!(plan.ac_group_payloads[0].section.payload_range, 3843..8335);
+    assert_eq!(plan.ac_group_payloads[0].pass, 0);
+    assert_eq!(plan.ac_group_payloads[0].group.group, 0);
+    assert_eq!(plan.ac_group_payloads[1].section.payload_range, 8335..9359);
+    assert_eq!(plan.ac_group_payloads[1].pass, 0);
+    assert_eq!(plan.ac_group_payloads[1].group.group, 1);
+    assert_eq!(plan.ac_group_metadata.len(), plan.ac_group_payloads.len());
+    assert_eq!(
+        plan.ac_group_metadata
+            .iter()
+            .map(|metadata| (
+                metadata.payload.pass,
+                metadata.payload.group.group,
+                metadata.cursor.payload_end_bits,
+                metadata.histogram_selector_bits,
+                metadata.histogram_selector,
+                metadata.cursor.histogram_selector_end_bits,
+                metadata.cursor.ans_state_start_bits,
+                metadata.cursor.ans_state_end_bits,
+                metadata.cursor.coefficient_stream_start_bits,
+                metadata.cursor.modular_ac_start_bits,
+                metadata.entropy_uses_prefix_code,
+                metadata.parse_error.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                0,
+                0,
+                35936,
+                0,
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(32),
+                Some(32),
+                None,
+                Some(false),
+                Some(jxl_codec::Error::Unsupported(
+                    "VarDCT AC coefficient stream decoding"
+                )),
+            ),
+            (
+                0,
+                1,
+                8192,
+                0,
+                Some(0),
+                Some(0),
+                Some(0),
+                Some(32),
+                Some(32),
+                None,
+                Some(false),
+                Some(jxl_codec::Error::Unsupported(
+                    "VarDCT AC coefficient stream decoding"
+                )),
+            ),
+        ]
+    );
     assert_eq!(plan.modular_global_tree_payload_start_bits, Some(192));
     assert_eq!(plan.modular_global_tree_payload_end_bits, Some(1232));
     assert_eq!(plan.modular_global_tree_payload_len_bits, Some(1040));
