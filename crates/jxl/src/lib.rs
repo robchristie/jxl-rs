@@ -292,11 +292,19 @@ fn decode_channels_buffered(
         .first_frame_modular
         .as_ref()
         .ok_or(Error::Unsupported("modular image metadata"))?;
-    let image = modular.image.as_ref().ok_or(if config.region.is_some() {
-        Error::Unsupported("region-of-interest raw channel decode")
-    } else {
-        Error::Unsupported("modular pixel reconstruction")
-    })?;
+    let image = match modular.image.as_ref() {
+        Some(image) => image,
+        None => {
+            return Err(modular
+                .image_error
+                .clone()
+                .unwrap_or(if config.region.is_some() {
+                    Error::Unsupported("region-of-interest raw channel decode")
+                } else {
+                    Error::Unsupported("modular pixel reconstruction")
+                }));
+        }
+    };
     let color_channels = codestream.metadata.num_color_channels() as usize;
     let bit_depth = codestream.metadata.bit_depth.bits_per_sample;
     if codestream.metadata.bit_depth.floating_point_sample {
@@ -752,6 +760,17 @@ mod tests {
             zero_threads_decoder.decode_rgba8(&bytes),
             Err(Error::Unsupported("zero decoder threads"))
         );
+
+        let out_of_bounds_roi_decoder = Decoder::new().roi(Rect {
+            x: 64,
+            y: 0,
+            width: 1,
+            height: 1,
+        });
+        assert_eq!(
+            out_of_bounds_roi_decoder.decode_channels(&bytes),
+            Err(Error::InvalidCodestream("modular region is outside image"))
+        );
     }
 
     #[test]
@@ -1011,9 +1030,27 @@ mod tests {
             "reference/libjxl/testdata/jxl/boxes/square-extended-size-container.jxl",
         ))
         .unwrap();
+        let roi_decoder = Decoder::new().roi(Rect {
+            x: 0,
+            y: 0,
+            width: 4,
+            height: 4,
+        });
 
         assert_eq!(
             decode(&bytes),
+            Err(Error::Unsupported("VarDCT image decode"))
+        );
+        assert_eq!(
+            roi_decoder.decode_channels(&bytes),
+            Err(Error::Unsupported("VarDCT image decode"))
+        );
+        assert_eq!(
+            roi_decoder.decode(&bytes),
+            Err(Error::Unsupported("VarDCT image decode"))
+        );
+        assert_eq!(
+            roi_decoder.decode_rgba8(&bytes),
             Err(Error::Unsupported("VarDCT image decode"))
         );
     }
