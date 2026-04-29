@@ -465,6 +465,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         .map(|metadata| metadata.bits_consumed)
                         .unwrap_or(0)
                 );
+                println!(
+                    "First frame VarDCT global cursor: dc_dequant={} quantizer={} block_context={} color_correlation={} modular_start={} modular_end={:?}",
+                    global.cursor.dc_dequant_end_bits,
+                    global.cursor.quantizer_end_bits,
+                    global.cursor.block_context_end_bits,
+                    global.cursor.color_correlation_end_bits,
+                    global.cursor.modular_global_start_bits,
+                    global.cursor.modular_global_end_bits
+                );
             }
             if let Some(section) = &vardct.ac_global_section {
                 println!(

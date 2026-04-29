@@ -578,6 +578,24 @@ fn parses_checked_in_fixture_vardct_metadata() {
     let global = vardct_plan.global.as_ref().unwrap();
     assert!(global.bits_consumed > 0);
     assert!(global.bits_consumed <= vardct.sections[0].payload_size as usize * 8);
+    let cursor = global.cursor;
+    let payload_bits = vardct.sections[0].payload_size as usize * 8;
+    assert!(cursor.dc_dequant_end_bits > 0);
+    assert!(cursor.quantizer_end_bits > cursor.dc_dequant_end_bits);
+    assert!(cursor.block_context_end_bits >= cursor.quantizer_end_bits);
+    assert!(cursor.color_correlation_end_bits >= cursor.block_context_end_bits);
+    assert_eq!(
+        cursor.modular_global_start_bits,
+        cursor.color_correlation_end_bits
+    );
+    assert!(cursor.modular_global_start_bits <= payload_bits);
+    if let Some(end_bits) = cursor.modular_global_end_bits {
+        assert!(end_bits >= cursor.modular_global_start_bits);
+        assert!(end_bits <= payload_bits);
+        assert_eq!(end_bits, global.bits_consumed);
+    } else {
+        assert!(global.modular_global_error.is_some());
+    }
     assert!(global.dc_dequant.all_default);
     assert_eq!(global.dc_dequant.coefficients, None);
     assert!(global.quantizer.global_scale > 0);

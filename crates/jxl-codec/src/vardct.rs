@@ -92,6 +92,7 @@ pub struct VarDctPassGroupPayloadMetadata {
 #[derive(Debug, Clone, PartialEq)]
 pub struct VarDctGlobalMetadata {
     pub section: VarDctSectionPayloadMetadata,
+    pub cursor: VarDctGlobalCursorMetadata,
     pub dc_dequant: VarDctDcDequantMetadata,
     pub quantizer: VarDctQuantizerMetadata,
     pub block_context_map: VarDctBlockContextMapMetadata,
@@ -99,6 +100,16 @@ pub struct VarDctGlobalMetadata {
     pub modular_global: Option<VarDctModularGlobalMetadata>,
     pub modular_global_error: Option<Error>,
     pub bits_consumed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VarDctGlobalCursorMetadata {
+    pub dc_dequant_end_bits: usize,
+    pub quantizer_end_bits: usize,
+    pub block_context_end_bits: usize,
+    pub color_correlation_end_bits: usize,
+    pub modular_global_start_bits: usize,
+    pub modular_global_end_bits: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -308,16 +319,33 @@ fn read_vardct_global_metadata(
         .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
     let mut reader = BitReader::new(payload);
     let dc_dequant = read_vardct_dc_dequant(&mut reader)?;
+    let dc_dequant_end_bits = reader.bits_consumed();
     let quantizer = read_vardct_quantizer(&mut reader)?;
+    let quantizer_end_bits = reader.bits_consumed();
     let block_context_map = read_vardct_block_context_map(&mut reader)?;
+    let block_context_end_bits = reader.bits_consumed();
     let color_correlation = read_vardct_color_correlation(&mut reader)?;
+    let color_correlation_end_bits = reader.bits_consumed();
+    let modular_global_start_bits = reader.bits_consumed();
     let modular_global_result = read_vardct_modular_global(&mut reader, metadata, frame_header);
     let (modular_global, modular_global_error) = match modular_global_result {
         Ok(metadata) => (Some(metadata), None),
         Err(error) => (None, Some(error)),
     };
+    let modular_global_end_bits = modular_global
+        .as_ref()
+        .map(|metadata| modular_global_start_bits + metadata.bits_consumed);
+    let cursor = VarDctGlobalCursorMetadata {
+        dc_dequant_end_bits,
+        quantizer_end_bits,
+        block_context_end_bits,
+        color_correlation_end_bits,
+        modular_global_start_bits,
+        modular_global_end_bits,
+    };
     Ok(VarDctGlobalMetadata {
         section: section.clone(),
+        cursor,
         dc_dequant,
         quantizer,
         block_context_map,
@@ -832,6 +860,12 @@ mod tests {
         assert!(!modular_global.group_header.use_global_tree);
         assert_eq!(modular_global.group_header.transforms.len(), 0);
         assert_eq!(global.modular_global_error, None);
+        assert_eq!(global.cursor.dc_dequant_end_bits, 1);
+        assert_eq!(global.cursor.quantizer_end_bits, 16);
+        assert_eq!(global.cursor.block_context_end_bits, 17);
+        assert_eq!(global.cursor.color_correlation_end_bits, 18);
+        assert_eq!(global.cursor.modular_global_start_bits, 18);
+        assert_eq!(global.cursor.modular_global_end_bits, Some(23));
         assert_eq!(global.bits_consumed, 23);
         assert_eq!(plan.global_payload.as_ref().unwrap().payload_range, 10..13);
         assert_eq!(

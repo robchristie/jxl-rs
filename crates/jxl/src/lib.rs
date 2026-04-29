@@ -16,10 +16,11 @@ pub use jxl_codec::{
     ModularTreeMetadata, OpsinInverseMatrix, Orientation, Primaries, RenderingIntent, Result,
     SqueezeParams, TocEntry, ToneMapping, TransferFunction, TransformId,
     VarDctBlockContextMapMetadata, VarDctColorCorrelationMetadata, VarDctDcDequantMetadata,
-    VarDctDecodePlan, VarDctFrameMetadata, VarDctGlobalMetadata, VarDctGroupMetadata,
-    VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata, VarDctModularGlobalMetadata,
-    VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata, VarDctQuantizerMetadata,
-    VarDctSectionMetadata, VarDctSectionPayloadMetadata, WeightedPredictorHeader, WhitePoint,
+    VarDctDecodePlan, VarDctFrameMetadata, VarDctGlobalCursorMetadata, VarDctGlobalMetadata,
+    VarDctGroupMetadata, VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata,
+    VarDctModularGlobalMetadata, VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata,
+    VarDctQuantizerMetadata, VarDctSectionMetadata, VarDctSectionPayloadMetadata,
+    WeightedPredictorHeader, WhitePoint,
 };
 
 #[derive(Debug, Clone, PartialEq)]
