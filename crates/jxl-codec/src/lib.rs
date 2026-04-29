@@ -53,7 +53,8 @@ pub use modular::{
 pub use transform::{CustomTransformData, OpsinInverseMatrix};
 pub use vardct::{
     VarDctAnsHistogramProbe, VarDctAnsHistogramProbeKind, VarDctAnsHistogramProbeStage,
-    VarDctBlockContextMapMetadata, VarDctColorCorrelationMetadata, VarDctDcDequantMetadata,
+    VarDctBlockContextMapMetadata, VarDctColorCorrelationMetadata, VarDctContextMapProbe,
+    VarDctContextMapProbeKind, VarDctContextMapProbeStage, VarDctDcDequantMetadata,
     VarDctDcGroupCursorMetadata, VarDctDcGroupMetadata, VarDctDcGroupPayloadMetadata,
     VarDctDecodePlan, VarDctFrameMetadata, VarDctGlobalCursorMetadata, VarDctGlobalMetadata,
     VarDctGroupMetadata, VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata,

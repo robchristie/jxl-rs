@@ -248,6 +248,45 @@ pub(crate) struct HistogramCodingProbe {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextMapProbeKind {
+    Simple,
+    EntropyCoded,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ContextMapProbeStage {
+    Kind,
+    SimpleBitsPerEntry,
+    SimpleEntry,
+    Mtf,
+    NestedHistogram,
+    AnsState,
+    Symbol,
+    FinalState,
+    Verify,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextMapProbe {
+    pub start_bits: usize,
+    pub end_bits: Option<usize>,
+    pub len: usize,
+    pub kind: Option<ContextMapProbeKind>,
+    pub bits_per_entry: Option<usize>,
+    pub use_mtf: Option<bool>,
+    pub nested_histogram: Option<HistogramCodingProbe>,
+    pub ans_start_bits: Option<usize>,
+    pub ans_end_bits: Option<usize>,
+    pub entries_decoded: usize,
+    pub max_symbol: Option<u32>,
+    pub num_histograms: Option<usize>,
+    pub final_state_valid: Option<bool>,
+    pub error_stage: Option<ContextMapProbeStage>,
+    pub error_bits: Option<usize>,
+    pub error: Option<Error>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AnsHistogramProbeKind {
     Simple,
     Flat,
@@ -987,6 +1026,192 @@ pub(crate) fn decode_context_map(
     let num_histograms = usize::from(*context_map.iter().max().unwrap_or(&0)) + 1;
     verify_context_map(context_map, num_histograms)?;
     Ok(num_histograms)
+}
+
+pub(crate) fn probe_decode_context_map(reader: &mut BitReader<'_>, len: usize) -> ContextMapProbe {
+    let start_bits = reader.bits_consumed();
+    let mut probe = ContextMapProbe {
+        start_bits,
+        end_bits: None,
+        len,
+        kind: None,
+        bits_per_entry: None,
+        use_mtf: None,
+        nested_histogram: None,
+        ans_start_bits: None,
+        ans_end_bits: None,
+        entries_decoded: 0,
+        max_symbol: None,
+        num_histograms: None,
+        final_state_valid: None,
+        error_stage: None,
+        error_bits: None,
+        error: None,
+    };
+    let mut context_map = vec![0; len];
+    let is_simple = match reader.read_bool() {
+        Ok(value) => value,
+        Err(error) => {
+            probe_context_map_error(&mut probe, reader, ContextMapProbeStage::Kind, error);
+            return probe;
+        }
+    };
+    if is_simple {
+        probe.kind = Some(ContextMapProbeKind::Simple);
+        let bits_per_entry = match reader.read_bits(2) {
+            Ok(bits) => bits as usize,
+            Err(error) => {
+                probe_context_map_error(
+                    &mut probe,
+                    reader,
+                    ContextMapProbeStage::SimpleBitsPerEntry,
+                    error,
+                );
+                return probe;
+            }
+        };
+        probe.bits_per_entry = Some(bits_per_entry);
+        if bits_per_entry == 0 {
+            context_map.fill(0);
+            probe.entries_decoded = len;
+        } else {
+            for entry in context_map.iter_mut() {
+                *entry = match reader.read_bits(bits_per_entry) {
+                    Ok(bits) => bits as u8,
+                    Err(error) => {
+                        probe_context_map_error(
+                            &mut probe,
+                            reader,
+                            ContextMapProbeStage::SimpleEntry,
+                            error,
+                        );
+                        return probe;
+                    }
+                };
+                probe.entries_decoded += 1;
+            }
+        }
+    } else {
+        probe.kind = Some(ContextMapProbeKind::EntropyCoded);
+        let use_mtf = match reader.read_bool() {
+            Ok(value) => value,
+            Err(error) => {
+                probe_context_map_error(&mut probe, reader, ContextMapProbeStage::Mtf, error);
+                return probe;
+            }
+        };
+        probe.use_mtf = Some(use_mtf);
+        let nested_probe_start = reader.clone();
+        let (code, nested_context_map) = match decode_histograms(reader, 1, len <= 2) {
+            Ok(result) => result,
+            Err(error) => {
+                let mut nested_probe_reader = nested_probe_start;
+                probe.nested_histogram = Some(probe_decode_histograms(
+                    &mut nested_probe_reader,
+                    1,
+                    len <= 2,
+                ));
+                probe_context_map_error(
+                    &mut probe,
+                    reader,
+                    ContextMapProbeStage::NestedHistogram,
+                    error,
+                );
+                return probe;
+            }
+        };
+        let mut nested_probe_reader = nested_probe_start;
+        probe.nested_histogram = Some(probe_decode_histograms(
+            &mut nested_probe_reader,
+            1,
+            len <= 2,
+        ));
+        let mut symbol_reader = match AnsSymbolReader::new(code, reader, 0) {
+            Ok(symbol_reader) => symbol_reader,
+            Err(error) => {
+                probe_context_map_error(&mut probe, reader, ContextMapProbeStage::AnsState, error);
+                return probe;
+            }
+        };
+        probe.ans_start_bits = Some(reader.bits_consumed());
+        let mut max_symbol = 0;
+        for entry in context_map.iter_mut() {
+            let symbol = match symbol_reader.read_hybrid_uint(0, reader, &nested_context_map) {
+                Ok(symbol) => symbol,
+                Err(error) => {
+                    probe_context_map_error(
+                        &mut probe,
+                        reader,
+                        ContextMapProbeStage::Symbol,
+                        error,
+                    );
+                    return probe;
+                }
+            };
+            if symbol >= 256 {
+                probe.max_symbol = Some(max_symbol.max(symbol));
+                probe_context_map_error(
+                    &mut probe,
+                    reader,
+                    ContextMapProbeStage::Symbol,
+                    Error::InvalidCodestream("invalid context-map cluster"),
+                );
+                return probe;
+            }
+            max_symbol = max_symbol.max(symbol);
+            *entry = symbol as u8;
+            probe.entries_decoded += 1;
+        }
+        probe.max_symbol = Some(max_symbol);
+        let final_state_valid = symbol_reader.check_final_state();
+        probe.final_state_valid = Some(final_state_valid);
+        probe.ans_end_bits = Some(reader.bits_consumed());
+        if !final_state_valid {
+            probe_context_map_error(
+                &mut probe,
+                reader,
+                ContextMapProbeStage::FinalState,
+                Error::InvalidCodestream("invalid context-map ANS state"),
+            );
+            return probe;
+        }
+        if use_mtf {
+            inverse_move_to_front(&mut context_map);
+        }
+        if max_symbol >= 256 {
+            probe_context_map_error(
+                &mut probe,
+                reader,
+                ContextMapProbeStage::Symbol,
+                Error::InvalidCodestream("invalid context-map cluster"),
+            );
+            return probe;
+        }
+    }
+
+    let num_histograms = usize::from(*context_map.iter().max().unwrap_or(&0)) + 1;
+    if let Err(error) = verify_context_map(&context_map, num_histograms) {
+        probe.num_histograms = Some(num_histograms);
+        probe_context_map_error(&mut probe, reader, ContextMapProbeStage::Verify, error);
+        return probe;
+    }
+    probe.num_histograms = Some(num_histograms);
+    if probe.max_symbol.is_none() {
+        probe.max_symbol = context_map.iter().copied().max().map(u32::from);
+    }
+    probe.end_bits = Some(reader.bits_consumed());
+    probe
+}
+
+fn probe_context_map_error(
+    probe: &mut ContextMapProbe,
+    reader: &BitReader<'_>,
+    stage: ContextMapProbeStage,
+    error: Error,
+) {
+    probe.error_stage = Some(stage);
+    probe.error_bits = Some(reader.bits_consumed());
+    probe.error = Some(error);
 }
 
 fn verify_context_map(context_map: &[u8], num_histograms: usize) -> Result<()> {

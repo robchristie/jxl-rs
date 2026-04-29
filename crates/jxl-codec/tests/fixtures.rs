@@ -500,6 +500,33 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(global.cursor.color_correlation_ytox_dc_end_bits, None);
     assert_eq!(global.cursor.color_correlation_ytob_dc_end_bits, None);
     assert_eq!(global.cursor.color_correlation_end_bits, 206);
+    let context_map_probe = global.block_context_map.context_map_probe.as_ref().unwrap();
+    assert_eq!(context_map_probe.start_bits, 39);
+    assert_eq!(context_map_probe.end_bits, Some(205));
+    assert_eq!(context_map_probe.len, 39);
+    assert_eq!(
+        context_map_probe.kind,
+        Some(jxl_codec::VarDctContextMapProbeKind::EntropyCoded)
+    );
+    assert_eq!(context_map_probe.bits_per_entry, None);
+    assert_eq!(context_map_probe.use_mtf, Some(true));
+    assert_eq!(context_map_probe.nested_lz77_end_bits, Some(42));
+    assert_eq!(context_map_probe.nested_context_map_end_bits, Some(42));
+    assert_eq!(context_map_probe.nested_entropy_mode_end_bits, Some(43));
+    assert_eq!(context_map_probe.nested_uint_config_end_bits, Some(51));
+    assert_eq!(context_map_probe.nested_histogram_end_bits, Some(89));
+    assert_eq!(context_map_probe.nested_histogram_count, Some(1));
+    assert_eq!(context_map_probe.nested_use_prefix_code, Some(true));
+    assert_eq!(context_map_probe.nested_log_alpha_size, Some(15));
+    assert_eq!(context_map_probe.ans_start_bits, Some(89));
+    assert_eq!(context_map_probe.ans_end_bits, Some(205));
+    assert_eq!(context_map_probe.entries_decoded, 39);
+    assert_eq!(context_map_probe.max_symbol, Some(14));
+    assert_eq!(context_map_probe.num_histograms, Some(15));
+    assert_eq!(context_map_probe.final_state_valid, Some(true));
+    assert_eq!(context_map_probe.error_stage, None);
+    assert_eq!(context_map_probe.error_bits, None);
+    assert_eq!(context_map_probe.error, None);
     assert_eq!(plan.modular_global_tree_direct_start_bits, Some(206));
     assert_eq!(
         plan.modular_global_tree_direct_start_absolute_bits,

@@ -1,8 +1,9 @@
 use crate::bitstream::{BitReader, bits_offset, val};
 use crate::decode::ImageRegion;
 use crate::entropy::{
-    AnsHistogramProbe, AnsHistogramProbeKind, AnsHistogramProbeStage, HistogramCodingProbeStage,
-    decode_context_map,
+    AnsHistogramProbe, AnsHistogramProbeKind, AnsHistogramProbeStage, ContextMapProbe,
+    ContextMapProbeKind, ContextMapProbeStage, HistogramCodingProbeStage, decode_context_map,
+    probe_decode_context_map,
 };
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
@@ -128,6 +129,108 @@ impl From<AnsHistogramProbeStage> for VarDctAnsHistogramProbeStage {
             AnsHistogramProbeStage::CustomOmit => Self::CustomOmit,
             AnsHistogramProbeStage::CustomPopulationBits => Self::CustomPopulationBits,
             AnsHistogramProbeStage::CustomCount => Self::CustomCount,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarDctContextMapProbeKind {
+    Simple,
+    EntropyCoded,
+}
+
+impl From<ContextMapProbeKind> for VarDctContextMapProbeKind {
+    fn from(kind: ContextMapProbeKind) -> Self {
+        match kind {
+            ContextMapProbeKind::Simple => Self::Simple,
+            ContextMapProbeKind::EntropyCoded => Self::EntropyCoded,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarDctContextMapProbeStage {
+    Kind,
+    SimpleBitsPerEntry,
+    SimpleEntry,
+    Mtf,
+    NestedHistogram,
+    AnsState,
+    Symbol,
+    FinalState,
+    Verify,
+}
+
+impl From<ContextMapProbeStage> for VarDctContextMapProbeStage {
+    fn from(stage: ContextMapProbeStage) -> Self {
+        match stage {
+            ContextMapProbeStage::Kind => Self::Kind,
+            ContextMapProbeStage::SimpleBitsPerEntry => Self::SimpleBitsPerEntry,
+            ContextMapProbeStage::SimpleEntry => Self::SimpleEntry,
+            ContextMapProbeStage::Mtf => Self::Mtf,
+            ContextMapProbeStage::NestedHistogram => Self::NestedHistogram,
+            ContextMapProbeStage::AnsState => Self::AnsState,
+            ContextMapProbeStage::Symbol => Self::Symbol,
+            ContextMapProbeStage::FinalState => Self::FinalState,
+            ContextMapProbeStage::Verify => Self::Verify,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctContextMapProbe {
+    pub start_bits: usize,
+    pub end_bits: Option<usize>,
+    pub len: usize,
+    pub kind: Option<VarDctContextMapProbeKind>,
+    pub bits_per_entry: Option<usize>,
+    pub use_mtf: Option<bool>,
+    pub nested_lz77_end_bits: Option<usize>,
+    pub nested_context_map_end_bits: Option<usize>,
+    pub nested_entropy_mode_end_bits: Option<usize>,
+    pub nested_uint_config_end_bits: Option<usize>,
+    pub nested_histogram_end_bits: Option<usize>,
+    pub nested_histogram_count: Option<usize>,
+    pub nested_use_prefix_code: Option<bool>,
+    pub nested_log_alpha_size: Option<usize>,
+    pub ans_start_bits: Option<usize>,
+    pub ans_end_bits: Option<usize>,
+    pub entries_decoded: usize,
+    pub max_symbol: Option<u32>,
+    pub num_histograms: Option<usize>,
+    pub final_state_valid: Option<bool>,
+    pub error_stage: Option<VarDctContextMapProbeStage>,
+    pub error_bits: Option<usize>,
+    pub error: Option<Error>,
+}
+
+impl From<&ContextMapProbe> for VarDctContextMapProbe {
+    fn from(probe: &ContextMapProbe) -> Self {
+        let nested = probe.nested_histogram.as_ref();
+        Self {
+            start_bits: probe.start_bits,
+            end_bits: probe.end_bits,
+            len: probe.len,
+            kind: probe.kind.map(VarDctContextMapProbeKind::from),
+            bits_per_entry: probe.bits_per_entry,
+            use_mtf: probe.use_mtf,
+            nested_lz77_end_bits: nested.and_then(|probe| probe.lz77_end_bits),
+            nested_context_map_end_bits: nested.and_then(|probe| probe.context_map_end_bits),
+            nested_entropy_mode_end_bits: nested.and_then(|probe| probe.entropy_mode_end_bits),
+            nested_uint_config_end_bits: nested.and_then(|probe| probe.uint_config_end_bits),
+            nested_histogram_end_bits: nested.and_then(|probe| probe.histogram_end_bits),
+            nested_histogram_count: nested.and_then(|probe| probe.num_histograms),
+            nested_use_prefix_code: nested.and_then(|probe| probe.use_prefix_code),
+            nested_log_alpha_size: nested.and_then(|probe| probe.log_alpha_size),
+            ans_start_bits: probe.ans_start_bits,
+            ans_end_bits: probe.ans_end_bits,
+            entries_decoded: probe.entries_decoded,
+            max_symbol: probe.max_symbol,
+            num_histograms: probe.num_histograms,
+            final_state_valid: probe.final_state_valid,
+            error_stage: probe.error_stage.map(VarDctContextMapProbeStage::from),
+            error_bits: probe.error_bits,
+            error: probe.error.clone(),
         }
     }
 }
@@ -339,6 +442,7 @@ pub struct VarDctBlockContextMapMetadata {
     pub context_map_size: usize,
     pub num_contexts: usize,
     pub num_dc_contexts: usize,
+    pub context_map_probe: Option<VarDctContextMapProbe>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -349,6 +453,7 @@ struct VarDctBlockContextMapRead {
     qf_thresholds_end_bits: usize,
     context_map_start_bits: Option<usize>,
     context_map_end_bits: Option<usize>,
+    context_map_probe: Option<VarDctContextMapProbe>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1021,12 +1126,14 @@ fn read_vardct_block_context_map(reader: &mut BitReader<'_>) -> Result<VarDctBlo
                 context_map_size: DEFAULT_CONTEXT_MAP_SIZE,
                 num_contexts: DEFAULT_NUM_CONTEXTS,
                 num_dc_contexts: 1,
+                context_map_probe: None,
             },
             default_end_bits,
             dc_thresholds_end_bits: default_end_bits,
             qf_thresholds_end_bits: default_end_bits,
             context_map_start_bits: None,
             context_map_end_bits: None,
+            context_map_probe: None,
         });
     }
 
@@ -1074,8 +1181,11 @@ fn read_vardct_block_context_map(reader: &mut BitReader<'_>) -> Result<VarDctBlo
     let context_map_size = 3 * NUM_ORDERS * num_dc_contexts * (qf_thresholds.len() + 1);
     let mut context_map = vec![0; context_map_size];
     let context_map_start_bits = reader.bits_consumed();
+    let mut context_map_probe_reader = reader.clone();
     let num_contexts = decode_context_map(reader, &mut context_map)?;
     let context_map_end_bits = reader.bits_consumed();
+    let context_map_probe =
+        probe_decode_context_map(&mut context_map_probe_reader, context_map_size);
     if num_contexts > 16 {
         return Err(Error::InvalidCodestream(
             "VarDCT block context map has too many contexts",
@@ -1089,12 +1199,14 @@ fn read_vardct_block_context_map(reader: &mut BitReader<'_>) -> Result<VarDctBlo
             context_map_size,
             num_contexts,
             num_dc_contexts,
+            context_map_probe: Some(VarDctContextMapProbe::from(&context_map_probe)),
         },
         default_end_bits,
         dc_thresholds_end_bits,
         qf_thresholds_end_bits,
         context_map_start_bits: Some(context_map_start_bits),
         context_map_end_bits: Some(context_map_end_bits),
+        context_map_probe: Some(VarDctContextMapProbe::from(&context_map_probe)),
     })
 }
 
