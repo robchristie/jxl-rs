@@ -65,6 +65,7 @@ pub struct VarDctDecodePlan {
     pub ac_global_payload: Option<VarDctSectionPayloadMetadata>,
     pub ac_group_payloads: Vec<VarDctPassGroupPayloadMetadata>,
     pub dc_group_payloads: Vec<VarDctDcGroupPayloadMetadata>,
+    pub dc_group_metadata: Vec<VarDctDcGroupMetadata>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -86,6 +87,23 @@ pub struct VarDctDcGroupPayloadMetadata {
     pub var_dct_dc_stream_id: usize,
     pub modular_dc_stream_id: usize,
     pub ac_metadata_stream_id: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctDcGroupMetadata {
+    pub payload: VarDctDcGroupPayloadMetadata,
+    pub cursor: VarDctDcGroupCursorMetadata,
+    pub parse_error: Option<Error>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VarDctDcGroupCursorMetadata {
+    pub var_dct_dc_start_bits: usize,
+    pub var_dct_dc_end_bits: Option<usize>,
+    pub modular_dc_start_bits: Option<usize>,
+    pub modular_dc_end_bits: Option<usize>,
+    pub ac_metadata_start_bits: Option<usize>,
+    pub ac_metadata_end_bits: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,6 +299,11 @@ pub fn read_vardct_decode_plan(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let dc_group_metadata = dc_group_payloads
+        .iter()
+        .cloned()
+        .map(|payload| read_vardct_dc_group_metadata(codestream, payload))
+        .collect::<Result<Vec<_>>>()?;
     let ac_group_payloads = frame
         .ac_group_sections
         .iter()
@@ -300,7 +323,29 @@ pub fn read_vardct_decode_plan(
         ac_global_payload,
         ac_group_payloads,
         dc_group_payloads,
+        dc_group_metadata,
     }))
+}
+
+fn read_vardct_dc_group_metadata(
+    codestream: &[u8],
+    payload: VarDctDcGroupPayloadMetadata,
+) -> Result<VarDctDcGroupMetadata> {
+    codestream
+        .get(payload.section.payload_range.clone())
+        .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
+    Ok(VarDctDcGroupMetadata {
+        payload,
+        cursor: VarDctDcGroupCursorMetadata {
+            var_dct_dc_start_bits: 0,
+            var_dct_dc_end_bits: None,
+            modular_dc_start_bits: None,
+            modular_dc_end_bits: None,
+            ac_metadata_start_bits: None,
+            ac_metadata_end_bits: None,
+        },
+        parse_error: Some(Error::Unsupported("VarDCT DC group payload parsing")),
+    })
 }
 
 fn read_vardct_global_metadata(
@@ -807,6 +852,14 @@ mod tests {
         assert_eq!(plan.dc_group_payloads.len(), 1);
         assert_eq!(plan.dc_group_payloads[0].section.payload_range, 13..18);
         assert_eq!(plan.dc_group_payloads[0].group.group, 0);
+        assert_eq!(plan.dc_group_metadata.len(), 1);
+        assert_eq!(plan.dc_group_metadata[0].payload, plan.dc_group_payloads[0]);
+        assert_eq!(plan.dc_group_metadata[0].cursor.var_dct_dc_start_bits, 0);
+        assert_eq!(plan.dc_group_metadata[0].cursor.var_dct_dc_end_bits, None);
+        assert_eq!(
+            plan.dc_group_metadata[0].parse_error,
+            Some(Error::Unsupported("VarDCT DC group payload parsing"))
+        );
         assert_eq!(plan.ac_group_payloads.len(), 2);
         assert_eq!(plan.ac_group_payloads[0].section.payload_range, 25..36);
         assert_eq!(plan.ac_group_payloads[0].group.group, 0);

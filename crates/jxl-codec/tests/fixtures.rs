@@ -434,7 +434,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert!(!plan.ac_group_payloads.is_empty());
 
     assert_eq!(plan.dc_group_payloads.len(), plan.frame.dc_groups.len());
-    for dc_group in &plan.dc_group_payloads {
+    assert_eq!(plan.dc_group_metadata.len(), plan.dc_group_payloads.len());
+    for (dc_group, metadata) in plan.dc_group_payloads.iter().zip(&plan.dc_group_metadata) {
         assert!(dc_group.section.payload_range.start < dc_group.section.payload_range.end);
         assert_eq!(
             dc_group.section.payload_range.len(),
@@ -448,6 +449,19 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         assert_eq!(
             dc_group.ac_metadata_stream_id,
             1 + 2 * plan.frame.dc_groups.len() + dc_group.group.group
+        );
+        assert_eq!(&metadata.payload, dc_group);
+        assert_eq!(metadata.cursor.var_dct_dc_start_bits, 0);
+        assert_eq!(metadata.cursor.var_dct_dc_end_bits, None);
+        assert_eq!(metadata.cursor.modular_dc_start_bits, None);
+        assert_eq!(metadata.cursor.modular_dc_end_bits, None);
+        assert_eq!(metadata.cursor.ac_metadata_start_bits, None);
+        assert_eq!(metadata.cursor.ac_metadata_end_bits, None);
+        assert_eq!(
+            metadata.parse_error,
+            Some(jxl_codec::Error::Unsupported(
+                "VarDCT DC group payload parsing"
+            ))
         );
     }
     let selected_dc = plan.frame.dc_sections_for_region(ImageRegion {
