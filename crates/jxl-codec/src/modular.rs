@@ -630,21 +630,26 @@ pub(crate) fn probe_modular_global_tree_coding(
             let contexts = tree.nodes.len().div_ceil(2);
             let residual_probe_reader = reader.clone();
             match decode_histograms(reader, contexts, false) {
-                Ok(_) => ModularTreeCodingProbe {
-                    has_global_tree_end_bits,
-                    tree_histogram_end_bits: Some(tree_histogram_end_bits),
-                    tree_ans_start_bits: Some(tree_ans_start_bits),
-                    tree_end_bits,
-                    tree_node_count,
-                    tree_leaf_count,
-                    tree_leaves,
-                    residual_context_count: Some(contexts),
-                    residual_histogram_count: None,
-                    residual_histogram_probe: None,
-                    residual_coding_end_bits: Some(reader.bits_consumed()),
-                    error_bits: None,
-                    error: None,
-                },
+                Ok(_) => {
+                    let mut residual_probe_reader = residual_probe_reader;
+                    let residual_histogram_probe =
+                        probe_decode_histograms(&mut residual_probe_reader, contexts, false);
+                    ModularTreeCodingProbe {
+                        has_global_tree_end_bits,
+                        tree_histogram_end_bits: Some(tree_histogram_end_bits),
+                        tree_ans_start_bits: Some(tree_ans_start_bits),
+                        tree_end_bits,
+                        tree_node_count,
+                        tree_leaf_count,
+                        tree_leaves,
+                        residual_context_count: Some(contexts),
+                        residual_histogram_count: residual_histogram_probe.num_histograms,
+                        residual_histogram_probe: Some(residual_histogram_probe),
+                        residual_coding_end_bits: Some(reader.bits_consumed()),
+                        error_bits: None,
+                        error: None,
+                    }
+                }
                 Err(error) => {
                     let mut residual_probe_reader = residual_probe_reader;
                     let residual_histogram_probe =

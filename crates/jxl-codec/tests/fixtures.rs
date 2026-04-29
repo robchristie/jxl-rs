@@ -466,9 +466,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         assert!(header.use_global_tree);
         assert!(header.weighted_predictor.all_default);
         assert!(header.transforms.is_empty());
-        assert_eq!(metadata.parse_error, None);
-        assert_eq!(metadata.cursor.var_dct_dc_end_bits, Some(6));
-        assert_eq!(metadata.cursor.modular_dc_start_bits, Some(6));
+        assert_eq!(metadata.parse_error, Some(jxl_codec::Error::Truncated));
+        assert_eq!(metadata.cursor.var_dct_dc_end_bits, None);
+        assert_eq!(metadata.cursor.modular_dc_start_bits, None);
         assert_eq!(metadata.cursor.modular_dc_end_bits, None);
         assert_eq!(metadata.cursor.ac_metadata_start_bits, None);
         assert_eq!(metadata.cursor.ac_metadata_end_bits, None);
@@ -587,15 +587,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .collect::<Vec<_>>(),
         (0..16).collect::<Vec<_>>()
     );
-    assert_eq!(plan.modular_global_tree_direct_error_bits, Some(1035));
-    assert_eq!(
-        plan.modular_global_tree_direct_error_absolute_bits,
-        Some(1227)
-    );
-    assert_eq!(
-        plan.modular_global_tree_direct_error_remaining_bits,
-        Some(5)
-    );
+    assert_eq!(plan.modular_global_tree_direct_error_bits, None);
+    assert_eq!(plan.modular_global_tree_direct_error_absolute_bits, None);
+    assert_eq!(plan.modular_global_tree_direct_error_remaining_bits, None);
     assert_eq!(
         plan.modular_global_tree_direct_residual_context_count,
         Some(16)
@@ -697,12 +691,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     );
     assert_eq!(
         plan.modular_global_tree_direct_residual_failed_histogram_index,
-        Some(3)
+        None
     );
-    assert_eq!(
-        plan.modular_global_tree_direct_residual_error_stage,
-        Some(jxl_codec::VarDctHistogramProbeStage::AnsHistogram)
-    );
+    assert_eq!(plan.modular_global_tree_direct_residual_error_stage, None);
     let histograms = &plan.modular_global_tree_direct_residual_ans_histograms;
     let global_payload_start_bits = plan.modular_global_tree_payload_start_bits.unwrap();
     let global_payload_len_bits = plan.modular_global_tree_payload_len_bits.unwrap();
@@ -902,7 +893,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(alias.table_checksum, 5755618891534445105);
     assert_eq!(histograms[2].error_stage, None);
     assert_eq!(histograms[3].start_bits, 936);
-    assert_eq!(histograms[3].end_bits, None);
+    assert_eq!(histograms[3].end_bits, Some(1039));
     assert_eq!(global_payload_start_bits + histograms[3].start_bits, 1128);
     assert_eq!(global_payload_len_bits - histograms[3].start_bits, 104);
     assert_eq!(
@@ -911,7 +902,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     );
     assert_eq!(histograms[3].length, Some(23));
     assert_eq!(histograms[3].shift, Some(2));
-    assert_eq!(histograms[3].omit_pos, None);
+    assert_eq!(histograms[3].omit_pos, Some(0));
     assert_eq!(
         histograms[3]
             .log_count_entries
@@ -919,7 +910,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .map(|entry| entry.index)
             .collect::<Vec<_>>(),
         vec![
-            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 20, 21
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 20, 21, 22
         ]
     );
     assert_eq!(
@@ -929,7 +920,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .map(|entry| entry.logcount)
             .collect::<Vec<_>>(),
         vec![
-            9, -1, 5, -1, 8, -1, -1, -1, 9, -1, -1, -1, 4, -1, 4, -1, 12, 5, -1
+            9, -1, 5, -1, 8, -1, -1, -1, 9, -1, -1, -1, 4, -1, 4, -1, 12, 5, -1, 6,
         ]
     );
     assert_eq!(
@@ -958,37 +949,72 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             (1019, 1026),
             (1027, 1030),
             (1030, 1035),
+            (1035, 1038),
         ]
     );
     assert_eq!(histograms[3].log_count_entries[16].rle_length, Some(0));
     assert_eq!(histograms[3].log_count_entries[16].rle_end_bits, Some(1027));
     assert_eq!(histograms[3].log_count_entries[16].next_index, 20);
-    assert_eq!(histograms[3].log_count_error_index, Some(22));
-    assert!(histograms[3].population_entries.is_empty());
+    assert_eq!(histograms[3].log_count_error_index, None);
+    assert_eq!(histograms[3].population_entries.len(), 23);
     assert_eq!(histograms[3].population_error_index, None);
-    assert_eq!(histograms[3].final_counts, None);
-    assert_eq!(histograms[3].alias_table, None);
     assert_eq!(
-        histograms[3].error_stage,
-        Some(jxl_codec::VarDctAnsHistogramProbeStage::CustomLogCount)
+        histograms[3]
+            .population_entries
+            .iter()
+            .filter(|entry| entry.count != 0 || entry.omitted || entry.copied)
+            .map(|entry| (
+                entry.index,
+                entry.start_bits,
+                entry.end_bits,
+                entry.bitcount,
+                entry.extra_bits,
+                entry.count,
+                entry.copied,
+                entry.omitted,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 1038, 1038, 0, None, 2912, false, true),
+            (2, 1038, 1038, 0, Some(0), 32, false, false),
+            (4, 1038, 1038, 0, Some(0), 256, false, false),
+            (8, 1038, 1039, 1, Some(1), 768, false, false),
+            (12, 1039, 1039, 0, Some(0), 16, false, false),
+            (14, 1039, 1039, 0, Some(0), 16, false, false),
+            (16, 1039, 1039, 0, None, 0, true, false),
+            (17, 1039, 1039, 0, None, 0, true, false),
+            (18, 1039, 1039, 0, None, 0, true, false),
+            (19, 1039, 1039, 0, None, 0, true, false),
+            (20, 1039, 1039, 0, Some(0), 32, false, false),
+            (22, 1039, 1039, 0, Some(0), 64, false, false),
+        ]
     );
-    assert_eq!(histograms[3].error_bits, Some(1035));
     assert_eq!(
-        global_payload_start_bits + histograms[3].error_bits.unwrap(),
-        1227
+        histograms[3].final_counts.as_deref(),
+        Some(
+            &[
+                2912, 0, 32, 0, 256, 0, 0, 0, 768, 0, 0, 0, 16, 0, 16, 0, 0, 0, 0, 0, 32, 0, 64,
+            ][..]
+        )
     );
-    assert_eq!(
-        global_payload_len_bits - histograms[3].error_bits.unwrap(),
-        5
-    );
-    assert_eq!(histograms[3].error, Some(jxl_codec::Error::Truncated));
-    assert_eq!(plan.modular_global_tree_start_bits, Some(220));
-    assert_eq!(plan.modular_global_tree_start_absolute_bits, Some(412));
-    assert_eq!(plan.modular_global_tree_start_remaining_bits, Some(820));
-    assert_eq!(
-        plan.modular_global_tree_direct_error,
-        Some(jxl_codec::Error::Truncated)
-    );
+    assert_eq!(histograms[3].total_count_before_omit, Some(1184));
+    assert_eq!(histograms[3].omit_count, Some(2912));
+    let alias = histograms[3].alias_table.as_ref().unwrap();
+    assert_eq!(alias.table_size, 64);
+    assert_eq!(alias.entry_size, 64);
+    assert_eq!(alias.distribution_len, 23);
+    assert_eq!(alias.nonzero_symbols, 8);
+    assert_eq!(alias.count_sum, 4096);
+    assert_eq!(alias.first_nonzero_symbol, Some(0));
+    assert_eq!(alias.last_nonzero_symbol, Some(22));
+    assert_eq!(alias.table_checksum, 5351005287173771891);
+    assert_eq!(histograms[3].error_stage, None);
+    assert_eq!(histograms[3].error_bits, None);
+    assert_eq!(histograms[3].error, None);
+    assert_eq!(plan.modular_global_tree_start_bits, Some(206));
+    assert_eq!(plan.modular_global_tree_start_absolute_bits, Some(398));
+    assert_eq!(plan.modular_global_tree_start_remaining_bits, Some(834));
+    assert_eq!(plan.modular_global_tree_direct_error, None);
     assert_eq!(plan.modular_global_tree_error, None);
     assert_vardct_global_cursor_in_payload(global, global.section.section.payload_size);
 }
@@ -1587,16 +1613,23 @@ fn compare_reference_vardct_trace(encoded: &Path, plan: &jxl_codec::VarDctDecode
             .collect::<Vec<_>>()
             .join(","),
     );
-    assert_trace_field(
-        &stdout,
-        "residual_histogram_error",
-        &format!(
-            "{}@{}",
-            plan.modular_global_tree_direct_residual_failed_histogram_index
-                .unwrap(),
-            plan.modular_global_tree_direct_error_bits.unwrap()
-        ),
-    );
+    if let (Some(index), Some(error_bits)) = (
+        plan.modular_global_tree_direct_residual_failed_histogram_index,
+        plan.modular_global_tree_direct_error_bits,
+    ) {
+        assert_trace_field(
+            &stdout,
+            "residual_histogram_error",
+            &format!("{index}@{error_bits}"),
+        );
+    } else {
+        assert!(
+            !stdout
+                .lines()
+                .any(|line| line.starts_with("residual_histogram_error=")),
+            "unexpected reference trace residual_histogram_error: {stdout}"
+        );
+    }
 }
 
 fn assert_trace_field(stdout: &str, key: &str, expected: &str) {

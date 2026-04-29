@@ -148,9 +148,6 @@ bool ReadHistogramForTrace(int precision_bits, jxl::BitReader* input) {
   int omit_log = -1;
   int omit_pos = -1;
   for (size_t i = 0; i < length; ++i) {
-    if (input->TotalBitsConsumed() + 7 > input->TotalBytes() * 8) {
-      return false;
-    }
     input->Refill();
     const int idx = input->PeekFixedBits<7>();
     input->Consume(huff[idx][0]);

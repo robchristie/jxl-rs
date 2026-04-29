@@ -53,6 +53,27 @@ impl<'a> BitReader<'a> {
         Ok(value)
     }
 
+    pub(crate) fn peek_bits_padded(&self, bits: usize) -> Result<u64> {
+        if bits > 56 {
+            return Err(Error::InvalidCodestream("bit reads are limited to 56 bits"));
+        }
+
+        let _ = self
+            .bit_pos
+            .checked_add(bits)
+            .ok_or(Error::InvalidCodestream("bit position overflow"))?;
+
+        let available = self.bytes.len() * 8;
+        let in_bounds_bits = available.saturating_sub(self.bit_pos).min(bits);
+        let mut value = 0u64;
+        for out_bit in 0..in_bounds_bits {
+            let pos = self.bit_pos + out_bit;
+            let bit = (self.bytes[pos / 8] >> (pos % 8)) & 1;
+            value |= u64::from(bit) << out_bit;
+        }
+        Ok(value)
+    }
+
     pub fn read_bits(&mut self, bits: usize) -> Result<u64> {
         let value = self.peek_bits(bits)?;
         self.skip_bits(bits)?;
@@ -205,6 +226,18 @@ mod tests {
         let mut reader = BitReader::new(&[0]);
 
         assert_eq!(reader.read_bits(9), Err(Error::Truncated));
+    }
+
+    #[test]
+    fn padded_peek_returns_zeroes_past_end_without_consuming() {
+        let mut reader = BitReader::new(&[0b0001_0110]);
+
+        assert_eq!(reader.read_bits(5).unwrap(), 0b10110);
+        assert_eq!(reader.peek_bits_padded(7).unwrap(), 0);
+        assert_eq!(reader.bits_consumed(), 5);
+        assert_eq!(reader.peek_bits(4), Err(Error::Truncated));
+        assert_eq!(reader.read_bits(3).unwrap(), 0);
+        assert_eq!(reader.read_bits(1), Err(Error::Truncated));
     }
 
     #[test]

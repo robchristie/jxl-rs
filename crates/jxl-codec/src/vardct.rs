@@ -1130,36 +1130,117 @@ fn read_vardct_modular_global_tree(
     let mut reader = BitReader::new(bytes);
     reader.skip_bits(global.bits_consumed)?;
     match read_modular_global_tree_coding(&mut reader, metadata, frame_header) {
-        Ok(tree) => Ok(VarDctModularGlobalTreeRead {
-            direct_start_bits: global.bits_consumed,
-            direct_tree_end_bits: None,
-            direct_tree_node_count: None,
-            direct_tree_leaf_count: None,
-            direct_tree_leaves: Vec::new(),
-            direct_error_bits: None,
-            direct_residual_context_count: None,
-            direct_residual_histogram_count: None,
-            direct_residual_context_map_entries: Vec::new(),
-            direct_residual_context_map_raw_entries: Vec::new(),
-            direct_residual_context_map_distinct_entries: Vec::new(),
-            direct_residual_context_map_histogram_usage_counts: Vec::new(),
-            direct_residual_context_map_max_entry: None,
-            direct_residual_context_map_symbol_entries: Vec::new(),
-            direct_residual_lz77_end_bits: None,
-            direct_residual_context_map_end_bits: None,
-            direct_residual_entropy_mode_end_bits: None,
-            direct_residual_log_alpha_size_end_bits: None,
-            direct_residual_uint_config_end_bits_by_histogram: Vec::new(),
-            direct_residual_uint_config_end_bits: None,
-            direct_residual_use_prefix_code: None,
-            direct_residual_log_alpha_size: None,
-            direct_residual_failed_histogram_index: None,
-            direct_residual_error_stage: None,
-            direct_residual_ans_histograms: Vec::new(),
-            tree_start_bits: global.bits_consumed,
-            direct_error: None,
-            tree,
-        }),
+        Ok(tree) => {
+            let mut direct_probe = BitReader::new(bytes);
+            direct_probe.skip_bits(global.bits_consumed)?;
+            let direct_probe =
+                probe_modular_global_tree_coding(&mut direct_probe, metadata, frame_header);
+            Ok(VarDctModularGlobalTreeRead {
+                direct_start_bits: global.bits_consumed,
+                direct_tree_end_bits: direct_probe.tree_end_bits,
+                direct_tree_node_count: direct_probe.tree_node_count,
+                direct_tree_leaf_count: direct_probe.tree_leaf_count,
+                direct_tree_leaves: direct_probe
+                    .tree_leaves
+                    .iter()
+                    .map(VarDctMaTreeLeafProbe::from)
+                    .collect(),
+                direct_error_bits: direct_probe.error_bits,
+                direct_residual_context_count: direct_probe.residual_context_count,
+                direct_residual_histogram_count: direct_probe.residual_histogram_count,
+                direct_residual_context_map_entries: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .map(|probe| probe.context_map_entries.clone())
+                    .unwrap_or_default(),
+                direct_residual_context_map_raw_entries: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .map(|probe| probe.context_map_raw_entries.clone())
+                    .unwrap_or_default(),
+                direct_residual_context_map_distinct_entries: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .map(|probe| probe.context_map_distinct_entries.clone())
+                    .unwrap_or_default(),
+                direct_residual_context_map_histogram_usage_counts: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .map(|probe| probe.context_map_histogram_usage_counts.clone())
+                    .unwrap_or_default(),
+                direct_residual_context_map_max_entry: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .and_then(|probe| probe.context_map_max_entry),
+                direct_residual_context_map_symbol_entries: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .map(|probe| {
+                        probe
+                            .context_map_symbol_entries
+                            .iter()
+                            .map(VarDctContextMapSymbolProbe::from)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                direct_residual_lz77_end_bits: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .and_then(|probe| probe.lz77_end_bits),
+                direct_residual_context_map_end_bits: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .and_then(|probe| probe.context_map_end_bits),
+                direct_residual_entropy_mode_end_bits: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .and_then(|probe| probe.entropy_mode_end_bits),
+                direct_residual_log_alpha_size_end_bits: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .and_then(|probe| probe.log_alpha_size_end_bits),
+                direct_residual_uint_config_end_bits_by_histogram: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .map(|probe| probe.uint_config_end_bits_by_histogram.clone())
+                    .unwrap_or_default(),
+                direct_residual_uint_config_end_bits: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .and_then(|probe| probe.uint_config_end_bits),
+                direct_residual_use_prefix_code: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .and_then(|probe| probe.use_prefix_code),
+                direct_residual_log_alpha_size: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .and_then(|probe| probe.log_alpha_size),
+                direct_residual_failed_histogram_index: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .and_then(|probe| probe.failed_histogram_index),
+                direct_residual_error_stage: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .and_then(|probe| probe.error_stage)
+                    .map(VarDctHistogramProbeStage::from),
+                direct_residual_ans_histograms: direct_probe
+                    .residual_histogram_probe
+                    .as_ref()
+                    .map(|probe| {
+                        probe
+                            .ans_histograms
+                            .iter()
+                            .map(VarDctAnsHistogramProbe::from)
+                            .collect()
+                    })
+                    .unwrap_or_default(),
+                tree_start_bits: global.bits_consumed,
+                direct_error: None,
+                tree,
+            })
+        }
         Err(error) => {
             let mut direct_probe = BitReader::new(bytes);
             direct_probe.skip_bits(global.bits_consumed)?;

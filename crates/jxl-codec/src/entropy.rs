@@ -1751,7 +1751,7 @@ fn probe_read_histogram(
     let mut i = 0;
     while i < length {
         let token_start_bits = reader.bits_consumed();
-        let idx = match reader.peek_bits(7) {
+        let idx = match reader.peek_bits_padded(7) {
             Ok(idx) => idx as usize,
             Err(error) => {
                 probe.log_count_error_index = Some(i);
@@ -1998,7 +1998,7 @@ fn read_histogram(precision_bits: usize, reader: &mut BitReader<'_>) -> Result<V
     let mut omit_pos = None;
     let mut i = 0;
     while i < length {
-        let idx = reader.peek_bits(7)? as usize;
+        let idx = reader.peek_bits_padded(7)? as usize;
         let (bits, value) = HISTOGRAM_LOGCOUNT_HUFFMAN[idx];
         reader.skip_bits(bits as usize)?;
         logcounts[i] = i32::from(value) - 1;
