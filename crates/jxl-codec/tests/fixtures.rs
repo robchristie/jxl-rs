@@ -437,27 +437,44 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(ac_global.quant_matrices_end_bits, Some(1));
     assert_eq!(ac_global.num_histograms, Some(1));
     assert_eq!(ac_global.num_histograms_end_bits, Some(2));
-    assert_eq!(ac_global.bits_consumed, None);
-    assert_eq!(
-        ac_global.parse_error,
-        Some(jxl_codec::Error::Unsupported(
-            "custom VarDCT AC coefficient orders"
-        ))
-    );
+    assert_eq!(ac_global.used_acs, Some(61655));
+    assert_eq!(ac_global.bits_consumed, Some(8288));
+    assert_eq!(ac_global.parse_error, None);
     assert_eq!(ac_global.passes.len(), 1);
     assert_eq!(ac_global.passes[0].pass, 0);
     assert_eq!(ac_global.passes[0].used_orders, Some(7));
     assert_eq!(ac_global.passes[0].used_orders_end_bits, Some(17));
-    assert_eq!(ac_global.passes[0].histogram_contexts, None);
-    assert_eq!(ac_global.passes[0].histogram_count, None);
-    assert_eq!(ac_global.passes[0].histogram_end_bits, None);
-    assert_eq!(ac_global.passes[0].error_bits, Some(17));
+    assert_eq!(ac_global.passes[0].coeff_order_end_bits, Some(1000));
     assert_eq!(
-        ac_global.passes[0].error,
-        Some(jxl_codec::Error::Unsupported(
-            "custom VarDCT AC coefficient orders"
-        ))
+        ac_global.passes[0]
+            .coeff_orders
+            .iter()
+            .map(|order| (
+                order.order,
+                order.channel,
+                order.skip,
+                order.size,
+                order.permutation_end,
+                order.checksum,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 1, 64, 15, 17391013145426411885),
+            (0, 1, 1, 64, 27, 328118841242175719),
+            (0, 2, 1, 64, 19, 12222102711332199783),
+            (1, 0, 1, 64, 12, 18141835571050413691),
+            (1, 1, 1, 64, 44, 3939301074858597663),
+            (1, 2, 1, 64, 24, 16382350197382754037),
+            (2, 0, 4, 256, 13, 3878749180621382175),
+            (2, 1, 4, 256, 38, 7348440053961575069),
+            (2, 2, 4, 256, 8, 6842156909530809773),
+        ]
     );
+    assert_eq!(ac_global.passes[0].histogram_contexts, Some(7425));
+    assert_eq!(ac_global.passes[0].histogram_count, Some(16));
+    assert_eq!(ac_global.passes[0].histogram_end_bits, Some(8288));
+    assert_eq!(ac_global.passes[0].error_bits, None);
+    assert_eq!(ac_global.passes[0].error, None);
     assert!(!plan.dc_group_payloads.is_empty());
     assert!(!plan.ac_group_payloads.is_empty());
     assert_eq!(plan.modular_global_tree_payload_start_bits, Some(192));

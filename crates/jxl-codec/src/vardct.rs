@@ -2,9 +2,9 @@ use crate::bitstream::{BitReader, bits_offset, val};
 use crate::decode::ImageRegion;
 use crate::entropy::{
     AnsAliasTableProbe, AnsHistogramLogCountProbe, AnsHistogramPopulationProbe, AnsHistogramProbe,
-    AnsHistogramProbeKind, AnsHistogramProbeStage, ContextMapProbe, ContextMapProbeKind,
-    ContextMapProbeStage, ContextMapSymbolProbe, HistogramCodingProbeStage, decode_context_map,
-    probe_decode_context_map, probe_decode_histograms,
+    AnsHistogramProbeKind, AnsHistogramProbeStage, AnsSymbolReader, ContextMapProbe,
+    ContextMapProbeKind, ContextMapProbeStage, ContextMapSymbolProbe, HistogramCodingProbeStage,
+    decode_context_map, decode_histograms, probe_decode_context_map, probe_decode_histograms,
 };
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
@@ -524,6 +524,7 @@ pub struct VarDctAcGlobalMetadata {
     pub quant_matrices_end_bits: Option<usize>,
     pub num_histograms: Option<usize>,
     pub num_histograms_end_bits: Option<usize>,
+    pub used_acs: Option<u32>,
     pub passes: Vec<VarDctAcGlobalPassMetadata>,
     pub bits_consumed: Option<usize>,
     pub parse_error: Option<Error>,
@@ -534,12 +535,24 @@ pub struct VarDctAcGlobalPassMetadata {
     pub pass: usize,
     pub used_orders: Option<u32>,
     pub used_orders_end_bits: Option<usize>,
+    pub coeff_orders: Vec<VarDctCoeffOrderMetadata>,
+    pub coeff_order_end_bits: Option<usize>,
     pub histogram_contexts: Option<usize>,
     pub histogram_count: Option<usize>,
     pub histogram_end_bits: Option<usize>,
     pub error_stage: Option<VarDctHistogramProbeStage>,
     pub error_bits: Option<usize>,
     pub error: Option<Error>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctCoeffOrderMetadata {
+    pub order: usize,
+    pub channel: usize,
+    pub skip: usize,
+    pub size: usize,
+    pub permutation_end: usize,
+    pub checksum: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -950,18 +963,6 @@ pub fn read_vardct_decode_plan(
             None,
         ),
     };
-    let ac_global_payload = frame
-        .ac_global_section
-        .as_ref()
-        .map(|section| section_payload_metadata(codestream, frame_data, section))
-        .transpose()?;
-    let ac_global_metadata = ac_global_payload
-        .as_ref()
-        .zip(global.as_ref())
-        .map(|(payload, global)| {
-            read_vardct_ac_global_metadata(codestream, frame_header, payload, global)
-        })
-        .transpose()?;
     let dc_group_payloads = frame
         .dc_group_sections
         .iter()
@@ -988,6 +989,19 @@ pub fn read_vardct_decode_plan(
             )
         })
         .collect::<Result<Vec<_>>>()?;
+    let ac_global_payload = frame
+        .ac_global_section
+        .as_ref()
+        .map(|section| section_payload_metadata(codestream, frame_data, section))
+        .transpose()?;
+    let used_acs = used_acs_from_dc_group_metadata(&dc_group_metadata);
+    let ac_global_metadata = ac_global_payload
+        .as_ref()
+        .zip(global.as_ref())
+        .map(|(payload, global)| {
+            read_vardct_ac_global_metadata(codestream, frame_header, payload, global, used_acs)
+        })
+        .transpose()?;
     let ac_group_payloads = frame
         .ac_group_sections
         .iter()
@@ -1219,6 +1233,7 @@ fn read_vardct_ac_global_metadata(
     frame_header: &FrameHeader,
     payload: &VarDctSectionPayloadMetadata,
     global: &VarDctGlobalMetadata,
+    used_acs: Option<u32>,
 ) -> Result<VarDctAcGlobalMetadata> {
     let bytes = codestream
         .get(payload.payload_range.clone())
@@ -1233,6 +1248,7 @@ fn read_vardct_ac_global_metadata(
                 quant_matrices_end_bits: None,
                 num_histograms: None,
                 num_histograms_end_bits: None,
+                used_acs,
                 passes: Vec::new(),
                 bits_consumed: None,
                 parse_error: Some(error),
@@ -1247,6 +1263,7 @@ fn read_vardct_ac_global_metadata(
             quant_matrices_end_bits,
             num_histograms: None,
             num_histograms_end_bits: None,
+            used_acs,
             passes: Vec::new(),
             bits_consumed: None,
             parse_error: Some(Error::Unsupported("custom VarDCT AC quant matrices")),
@@ -1263,6 +1280,7 @@ fn read_vardct_ac_global_metadata(
                 quant_matrices_end_bits,
                 num_histograms: None,
                 num_histograms_end_bits: None,
+                used_acs,
                 passes: Vec::new(),
                 bits_consumed: None,
                 parse_error: Some(error),
@@ -1280,6 +1298,8 @@ fn read_vardct_ac_global_metadata(
                         pass,
                         used_orders: None,
                         used_orders_end_bits: None,
+                        coeff_orders: Vec::new(),
+                        coeff_order_end_bits: None,
                         histogram_contexts: None,
                         histogram_count: None,
                         histogram_end_bits: None,
@@ -1293,6 +1313,7 @@ fn read_vardct_ac_global_metadata(
                         quant_matrices_end_bits,
                         num_histograms: Some(num_histograms),
                         num_histograms_end_bits,
+                        used_acs,
                         passes,
                         bits_consumed: None,
                         parse_error: Some(error),
@@ -1300,30 +1321,37 @@ fn read_vardct_ac_global_metadata(
                 }
             };
         let used_orders_end_bits = Some(reader.bits_consumed());
-        if used_orders != 0 {
-            let error = Error::Unsupported("custom VarDCT AC coefficient orders");
-            passes.push(VarDctAcGlobalPassMetadata {
-                pass,
-                used_orders: Some(used_orders),
-                used_orders_end_bits,
-                histogram_contexts: None,
-                histogram_count: None,
-                histogram_end_bits: None,
-                error_stage: None,
-                error_bits: Some(reader.bits_consumed()),
-                error: Some(error.clone()),
-            });
-            return Ok(VarDctAcGlobalMetadata {
-                section: payload.clone(),
-                all_default_quant_matrices: Some(true),
-                quant_matrices_end_bits,
-                num_histograms: Some(num_histograms),
-                num_histograms_end_bits,
-                passes,
-                bits_consumed: None,
-                parse_error: Some(error),
-            });
-        }
+        let coeff_order_probe = read_vardct_coeff_orders(&mut reader, used_orders as u16);
+        let coeff_orders = match coeff_order_probe {
+            Ok(coeff_orders) => coeff_orders,
+            Err(error) => {
+                passes.push(VarDctAcGlobalPassMetadata {
+                    pass,
+                    used_orders: Some(used_orders),
+                    used_orders_end_bits,
+                    coeff_orders: error.coeff_orders,
+                    coeff_order_end_bits: error.end_bits,
+                    histogram_contexts: None,
+                    histogram_count: None,
+                    histogram_end_bits: None,
+                    error_stage: None,
+                    error_bits: Some(error.error_bits),
+                    error: Some(error.error.clone()),
+                });
+                return Ok(VarDctAcGlobalMetadata {
+                    section: payload.clone(),
+                    all_default_quant_matrices: Some(true),
+                    quant_matrices_end_bits,
+                    num_histograms: Some(num_histograms),
+                    num_histograms_end_bits,
+                    used_acs,
+                    passes,
+                    bits_consumed: None,
+                    parse_error: Some(error.error),
+                });
+            }
+        };
+        let coeff_order_end_bits = Some(reader.bits_consumed());
 
         let histogram_contexts =
             num_histograms * global.block_context_map.num_contexts * (37 + 458);
@@ -1333,6 +1361,8 @@ fn read_vardct_ac_global_metadata(
             pass,
             used_orders: Some(used_orders),
             used_orders_end_bits,
+            coeff_orders,
+            coeff_order_end_bits,
             histogram_contexts: Some(histogram_contexts),
             histogram_count: histogram_probe.num_histograms,
             histogram_end_bits: histogram_probe.histogram_end_bits,
@@ -1349,6 +1379,7 @@ fn read_vardct_ac_global_metadata(
                 quant_matrices_end_bits,
                 num_histograms: Some(num_histograms),
                 num_histograms_end_bits,
+                used_acs,
                 passes,
                 bits_consumed: None,
                 parse_error: Some(error),
@@ -1362,10 +1393,228 @@ fn read_vardct_ac_global_metadata(
         quant_matrices_end_bits,
         num_histograms: Some(num_histograms),
         num_histograms_end_bits,
+        used_acs,
         passes,
         bits_consumed: Some(reader.bits_consumed()),
         parse_error: None,
     })
+}
+
+#[derive(Debug, Clone)]
+struct VarDctCoeffOrderError {
+    coeff_orders: Vec<VarDctCoeffOrderMetadata>,
+    end_bits: Option<usize>,
+    error_bits: usize,
+    error: Error,
+}
+
+const DCT_BLOCK_SIZE: usize = 64;
+const PERMUTATION_CONTEXTS: usize = 8;
+const STRATEGY_ORDER: [usize; 27] = [
+    0, 1, 1, 1, 2, 3, 4, 4, 5, 5, 6, 6, 1, 1, 1, 1, 1, 1, 7, 8, 8, 9, 10, 10, 11, 12, 12,
+];
+const STRATEGY_BLOCKS_X: [usize; 27] = [
+    1, 1, 1, 1, 2, 4, 1, 2, 1, 4, 2, 4, 1, 1, 1, 1, 1, 1, 8, 4, 8, 16, 8, 16, 32, 16, 32,
+];
+const STRATEGY_BLOCKS_Y: [usize; 27] = [
+    1, 1, 1, 1, 2, 4, 2, 1, 4, 1, 4, 2, 1, 1, 1, 1, 1, 1, 8, 8, 4, 16, 16, 8, 32, 32, 16,
+];
+
+fn read_vardct_coeff_orders(
+    reader: &mut BitReader<'_>,
+    used_orders: u16,
+) -> std::result::Result<Vec<VarDctCoeffOrderMetadata>, VarDctCoeffOrderError> {
+    if used_orders == 0 {
+        return Ok(Vec::new());
+    }
+
+    let (code, context_map) =
+        decode_histograms(reader, PERMUTATION_CONTEXTS, false).map_err(|error| {
+            VarDctCoeffOrderError {
+                coeff_orders: Vec::new(),
+                end_bits: None,
+                error_bits: reader.bits_consumed(),
+                error,
+            }
+        })?;
+    let mut symbol_reader =
+        AnsSymbolReader::new(code, reader, 0).map_err(|error| VarDctCoeffOrderError {
+            coeff_orders: Vec::new(),
+            end_bits: None,
+            error_bits: reader.bits_consumed(),
+            error,
+        })?;
+
+    let mut coeff_orders = Vec::new();
+    let mut computed = 0u16;
+    for raw_strategy in 0..STRATEGY_ORDER.len() {
+        let order = STRATEGY_ORDER[raw_strategy];
+        let order_bit = 1u16 << order;
+        if computed & order_bit != 0 {
+            continue;
+        }
+        computed |= order_bit;
+        if used_orders & order_bit == 0 {
+            continue;
+        }
+
+        let llf = STRATEGY_BLOCKS_X[raw_strategy] * STRATEGY_BLOCKS_Y[raw_strategy];
+        let size = llf * DCT_BLOCK_SIZE;
+        for channel in 0..3 {
+            match read_vardct_coeff_order_permutation(
+                reader,
+                &mut symbol_reader,
+                &context_map,
+                order,
+                channel,
+                llf,
+                size,
+            ) {
+                Ok(metadata) => coeff_orders.push(metadata),
+                Err(error) => {
+                    return Err(VarDctCoeffOrderError {
+                        coeff_orders,
+                        end_bits: None,
+                        error_bits: reader.bits_consumed(),
+                        error,
+                    });
+                }
+            }
+        }
+    }
+
+    if !symbol_reader.check_final_state() {
+        return Err(VarDctCoeffOrderError {
+            coeff_orders,
+            end_bits: Some(reader.bits_consumed()),
+            error_bits: reader.bits_consumed(),
+            error: Error::InvalidCodestream("invalid coefficient-order ANS state"),
+        });
+    }
+
+    Ok(coeff_orders)
+}
+
+fn read_vardct_coeff_order_permutation(
+    reader: &mut BitReader<'_>,
+    symbol_reader: &mut AnsSymbolReader,
+    context_map: &[u8],
+    order: usize,
+    channel: usize,
+    skip: usize,
+    size: usize,
+) -> Result<VarDctCoeffOrderMetadata> {
+    let end = symbol_reader.read_hybrid_uint(coeff_order_context(size), reader, context_map)?
+        as usize
+        + skip;
+    if end > size {
+        return Err(Error::InvalidCodestream("invalid coefficient-order size"));
+    }
+
+    let mut lehmer = vec![0u32; size];
+    let mut last = 0usize;
+    for (index, value) in lehmer.iter_mut().enumerate().take(end).skip(skip) {
+        let code =
+            symbol_reader.read_hybrid_uint(coeff_order_context(last), reader, context_map)?;
+        if code as usize >= size - index {
+            return Err(Error::InvalidCodestream(
+                "invalid coefficient-order Lehmer code",
+            ));
+        }
+        *value = code;
+        last = code as usize;
+    }
+    let checksum = checksum_permutation(&decode_lehmer_code(&lehmer)?);
+
+    Ok(VarDctCoeffOrderMetadata {
+        order,
+        channel,
+        skip,
+        size,
+        permutation_end: end,
+        checksum,
+    })
+}
+
+fn coeff_order_context(value: usize) -> usize {
+    if value == 0 {
+        0
+    } else {
+        (usize::BITS as usize - value.leading_zeros() as usize).min(PERMUTATION_CONTEXTS - 1)
+    }
+}
+
+fn decode_lehmer_code(code: &[u32]) -> Result<Vec<usize>> {
+    let size = code.len();
+    if size == 0 {
+        return Err(Error::InvalidCodestream("empty Lehmer code"));
+    }
+    let log2_size = usize::BITS as usize - (size - 1).leading_zeros() as usize;
+    let padded_size = 1usize << log2_size;
+    let mut tree = vec![0u32; padded_size];
+    for (index, value) in tree.iter_mut().enumerate() {
+        *value = value_of_lowest_one_bit(index + 1) as u32;
+    }
+
+    let mut permutation = vec![0; size];
+    for (index, &lehmer) in code.iter().enumerate() {
+        if lehmer as usize + index >= size {
+            return Err(Error::InvalidCodestream("invalid Lehmer code"));
+        }
+        let mut rank = lehmer + 1;
+        let mut bit = padded_size;
+        let mut next = 0usize;
+        for _ in 0..=log2_size {
+            let candidate = next + bit;
+            bit >>= 1;
+            if tree[candidate - 1] < rank {
+                next = candidate;
+                rank -= tree[candidate - 1];
+            }
+        }
+        permutation[index] = next;
+
+        next += 1;
+        while next <= padded_size {
+            tree[next - 1] -= 1;
+            next += value_of_lowest_one_bit(next);
+        }
+    }
+    Ok(permutation)
+}
+
+fn value_of_lowest_one_bit(value: usize) -> usize {
+    value & value.wrapping_neg()
+}
+
+fn checksum_permutation(permutation: &[usize]) -> u64 {
+    permutation.iter().fold(0xcbf29ce484222325, |hash, value| {
+        (hash ^ *value as u64).wrapping_mul(0x100000001b3)
+    })
+}
+
+fn used_acs_from_dc_group_metadata(dc_groups: &[VarDctDcGroupMetadata]) -> Option<u32> {
+    let mut used_acs = 0u32;
+    for dc_group in dc_groups {
+        let Some(ac_metadata) = &dc_group.ac_metadata else {
+            continue;
+        };
+        let Some(strategy_channel) = ac_metadata
+            .channels
+            .iter()
+            .find(|channel| channel.channel_index == 2)
+        else {
+            continue;
+        };
+        let width = strategy_channel.width as usize;
+        for &sample in strategy_channel.samples.iter().take(width) {
+            if !(0..STRATEGY_ORDER.len() as i32).contains(&sample) {
+                return None;
+            }
+            used_acs |= 1u32 << sample;
+        }
+    }
+    (used_acs != 0).then_some(used_acs)
 }
 
 fn read_vardct_modular_global_tree(
