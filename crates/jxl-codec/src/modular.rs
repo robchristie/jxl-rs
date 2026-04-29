@@ -868,7 +868,6 @@ fn assemble_modular_image(
     inverse_transforms(&plan.channel_plan, &plan.global.group_header, channels)
 }
 
-#[allow(dead_code)]
 fn assemble_modular_image_region(
     plan: &ModularDecodePlan,
     residuals: &ModularResiduals,
@@ -879,15 +878,10 @@ fn assemble_modular_image_region(
         .group_header
         .transforms
         .iter()
-        .any(|transform| transform.id != TransformId::Rct)
+        .any(|transform| !matches!(transform.id, TransformId::Palette | TransformId::Rct))
     {
         return Err(Error::Unsupported(
             "modular region assembly with transforms",
-        ));
-    }
-    if plan.channel_plan.nb_meta_channels != 0 {
-        return Err(Error::Unsupported(
-            "modular region assembly with meta channels",
         ));
     }
     if rect.width == 0 || rect.height == 0 {
@@ -902,12 +896,18 @@ fn assemble_modular_image_region(
     if rect_right > plan.channel_plan.width || rect_bottom > plan.channel_plan.height {
         return Err(Error::InvalidCodestream("modular region is outside image"));
     }
-    if plan.channel_plan.channels.iter().any(|channel| {
-        channel.hshift != 0
-            || channel.vshift != 0
-            || channel.width != plan.channel_plan.width
-            || channel.height != plan.channel_plan.height
-    }) {
+    if plan
+        .channel_plan
+        .channels
+        .iter()
+        .skip(plan.channel_plan.nb_meta_channels)
+        .any(|channel| {
+            channel.hshift != 0
+                || channel.vshift != 0
+                || channel.width != plan.channel_plan.width
+                || channel.height != plan.channel_plan.height
+        })
+    {
         return Err(Error::Unsupported(
             "modular region assembly with shifted channels",
         ));
@@ -917,22 +917,37 @@ fn assemble_modular_image_region(
         .channel_plan
         .channels
         .iter()
-        .map(|_| {
-            let samples =
-                channel_sample_count(rect.width, rect.height).map(|count| vec![0; count])?;
+        .enumerate()
+        .map(|(index, channel)| {
+            let (width, height) = if index < plan.channel_plan.nb_meta_channels {
+                (channel.width, channel.height)
+            } else {
+                (rect.width, rect.height)
+            };
+            let samples = channel_sample_count(width, height).map(|count| vec![0; count])?;
             Ok(ModularImageChannel {
-                width: rect.width,
-                height: rect.height,
+                width,
+                height,
                 samples,
             })
         })
         .collect::<Result<Vec<_>>>()?;
 
     if let Some(global) = &residuals.global {
-        copy_decoded_group_region(&mut channels, global, rect)?;
+        copy_decoded_group_region(
+            &mut channels,
+            global,
+            rect,
+            plan.channel_plan.nb_meta_channels,
+        )?;
     }
     for group in &residuals.groups {
-        copy_decoded_group_region(&mut channels, group, rect)?;
+        copy_decoded_group_region(
+            &mut channels,
+            group,
+            rect,
+            plan.channel_plan.nb_meta_channels,
+        )?;
     }
 
     inverse_transforms(
@@ -952,12 +967,20 @@ fn region_channel_plan(plan: &ModularDecodePlan, rect: ImageRect) -> ModularChan
             .channel_plan
             .channels
             .iter()
-            .map(|channel| ModularChannel {
-                width: rect.width,
-                height: rect.height,
-                hshift: channel.hshift,
-                vshift: channel.vshift,
-                component: channel.component,
+            .enumerate()
+            .map(|(index, channel)| {
+                let (width, height) = if index < plan.channel_plan.nb_meta_channels {
+                    (channel.width, channel.height)
+                } else {
+                    (rect.width, rect.height)
+                };
+                ModularChannel {
+                    width,
+                    height,
+                    hshift: channel.hshift,
+                    vshift: channel.vshift,
+                    component: channel.component,
+                }
             })
             .collect(),
     }
@@ -971,45 +994,57 @@ fn copy_decoded_group(
         let dst = channels
             .get_mut(decoded.channel_index)
             .ok_or(Error::InvalidCodestream("invalid modular decoded channel"))?;
-        if decoded.x0 > dst.width
-            || decoded.y0 > dst.height
-            || decoded.width > dst.width - decoded.x0
-            || decoded.height > dst.height - decoded.y0
-        {
-            return Err(Error::InvalidCodestream(
-                "modular decoded channel is outside destination",
-            ));
-        }
-        let expected = channel_sample_count(decoded.width, decoded.height)?;
-        if decoded.samples.len() != expected {
-            return Err(Error::InvalidCodestream(
-                "modular decoded channel sample count mismatch",
-            ));
-        }
-        let dst_width = dst.width as usize;
-        let decoded_width = decoded.width as usize;
-        let x0 = decoded.x0 as usize;
-        let y0 = decoded.y0 as usize;
-        for y in 0..decoded.height as usize {
-            let src_start = y * decoded_width;
-            let dst_start = (y0 + y) * dst_width + x0;
-            dst.samples[dst_start..dst_start + decoded_width]
-                .copy_from_slice(&decoded.samples[src_start..src_start + decoded_width]);
-        }
+        copy_decoded_channel(dst, decoded)?;
     }
     Ok(())
 }
 
-#[allow(dead_code)]
+fn copy_decoded_channel(
+    dst: &mut ModularImageChannel,
+    decoded: &ModularDecodedChannel,
+) -> Result<()> {
+    if decoded.x0 > dst.width
+        || decoded.y0 > dst.height
+        || decoded.width > dst.width - decoded.x0
+        || decoded.height > dst.height - decoded.y0
+    {
+        return Err(Error::InvalidCodestream(
+            "modular decoded channel is outside destination",
+        ));
+    }
+    let expected = channel_sample_count(decoded.width, decoded.height)?;
+    if decoded.samples.len() != expected {
+        return Err(Error::InvalidCodestream(
+            "modular decoded channel sample count mismatch",
+        ));
+    }
+    let dst_width = dst.width as usize;
+    let decoded_width = decoded.width as usize;
+    let x0 = decoded.x0 as usize;
+    let y0 = decoded.y0 as usize;
+    for y in 0..decoded.height as usize {
+        let src_start = y * decoded_width;
+        let dst_start = (y0 + y) * dst_width + x0;
+        dst.samples[dst_start..dst_start + decoded_width]
+            .copy_from_slice(&decoded.samples[src_start..src_start + decoded_width]);
+    }
+    Ok(())
+}
+
 fn copy_decoded_group_region(
     channels: &mut [ModularImageChannel],
     group: &ModularDecodedGroup,
     rect: ImageRect,
+    nb_meta_channels: usize,
 ) -> Result<()> {
     for decoded in &group.channels {
         let dst = channels
             .get_mut(decoded.channel_index)
             .ok_or(Error::InvalidCodestream("invalid modular decoded channel"))?;
+        if decoded.channel_index < nb_meta_channels {
+            copy_decoded_channel(dst, decoded)?;
+            continue;
+        }
         if dst.width != rect.width || dst.height != rect.height {
             return Err(Error::InvalidCodestream(
                 "modular region destination mismatch",
@@ -2933,8 +2968,25 @@ mod tests {
     }
 
     #[test]
-    fn rejects_modular_region_with_palette_transform() {
-        let mut plan = region_test_plan(8, 4, 1);
+    fn assembles_modular_region_with_palette_transform() {
+        let mut plan = region_test_plan(4, 2, 0);
+        plan.channel_plan.nb_meta_channels = 1;
+        plan.channel_plan.channels = vec![
+            ModularChannel {
+                width: 2,
+                height: 1,
+                hshift: -1,
+                vshift: 0,
+                component: None,
+            },
+            ModularChannel {
+                width: 4,
+                height: 2,
+                hshift: 0,
+                vshift: 0,
+                component: Some(0),
+            },
+        ];
         plan.global.group_header.transforms.push(ModularTransform {
             id: TransformId::Palette,
             begin_c: 0,
@@ -2943,6 +2995,50 @@ mod tests {
             nb_colors: Some(2),
             nb_deltas: Some(0),
             predictor: Some(ModularPredictor::Zero),
+            squeezes: Vec::new(),
+        });
+        let residuals = ModularResiduals {
+            global: Some(ModularDecodedGroup {
+                section_physical_index: 0,
+                stream_id: 2,
+                channels: vec![decoded_channel_exact(0, 0, 0, 2, 1, &[10, 20])],
+                bits_consumed: 0,
+            }),
+            groups: vec![ModularDecodedGroup {
+                section_physical_index: 1,
+                stream_id: 10,
+                channels: vec![decoded_channel_exact(
+                    1,
+                    0,
+                    0,
+                    4,
+                    2,
+                    &[0, 1, 0, 1, 1, 0, 1, 0],
+                )],
+                bits_consumed: 0,
+            }],
+        };
+
+        let image =
+            assemble_modular_image_region(&plan, &residuals, image_rect(1, 0, 2, 2)).unwrap();
+
+        assert_eq!(image.width, 2);
+        assert_eq!(image.height, 2);
+        assert_eq!(image.channels.len(), 1);
+        assert_eq!(image.channels[0].samples, vec![20, 10, 10, 20]);
+    }
+
+    #[test]
+    fn rejects_modular_region_with_squeeze_transform() {
+        let mut plan = region_test_plan(8, 4, 1);
+        plan.global.group_header.transforms.push(ModularTransform {
+            id: TransformId::Squeeze,
+            begin_c: 0,
+            rct_type: None,
+            num_c: None,
+            nb_colors: None,
+            nb_deltas: None,
+            predictor: None,
             squeezes: Vec::new(),
         });
         let residuals = ModularResiduals {
@@ -3104,6 +3200,25 @@ mod tests {
             width,
             height,
             samples,
+        }
+    }
+
+    fn decoded_channel_exact(
+        channel_index: usize,
+        x0: u32,
+        y0: u32,
+        width: u32,
+        height: u32,
+        samples: &[i32],
+    ) -> ModularDecodedChannel {
+        assert_eq!(samples.len(), width as usize * height as usize);
+        ModularDecodedChannel {
+            channel_index,
+            x0,
+            y0,
+            width,
+            height,
+            samples: samples.to_vec(),
         }
     }
 }

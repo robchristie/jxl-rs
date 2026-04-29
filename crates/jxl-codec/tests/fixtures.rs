@@ -169,7 +169,28 @@ fn region_config_selects_intersecting_modular_groups() {
     let residuals = modular.residuals.as_ref().unwrap();
     assert_eq!(residuals.groups.len(), 1);
     assert_eq!(residuals.groups[0].stream_id, 22);
-    assert!(modular.image.is_none());
+    let image = modular.image.as_ref().unwrap();
+    assert_eq!(image.width, 32);
+    assert_eq!(image.height, 32);
+    assert_eq!(image.channels.len(), 1);
+    assert_eq!(image.channels[0].width, 32);
+    assert_eq!(image.channels[0].height, 32);
+
+    let (_, full_codestream) = parse_file(&bytes).unwrap();
+    let full = full_codestream
+        .first_frame_modular
+        .as_ref()
+        .unwrap()
+        .image
+        .as_ref()
+        .unwrap();
+    let full_channel = &full.channels[0];
+    let mut expected = Vec::with_capacity(32 * 32);
+    for y in 0..32usize {
+        let start = y * full_channel.width as usize + 600;
+        expected.extend_from_slice(&full_channel.samples[start..start + 32]);
+    }
+    assert_eq!(image.channels[0].samples, expected);
 }
 
 #[test]

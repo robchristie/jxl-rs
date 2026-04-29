@@ -772,22 +772,21 @@ mod tests {
     }
 
     #[test]
-    fn decode_channels_roi_rejects_transformed_modular_fixture() {
+    fn decode_channels_roi_supports_palette_modular_fixture() {
         let bytes = std::fs::read(workspace_path(
             "reference/libjxl/testdata/jxl/pq_gradient.jxl",
         ))
         .unwrap();
-        let decoder = Decoder::new().roi(Rect {
+        let roi = Rect {
             x: 600,
             y: 0,
             width: 32,
             height: 32,
-        });
+        };
+        let full = decode_channels(&bytes).unwrap();
+        let roi_image = Decoder::new().roi(roi).decode_channels(&bytes).unwrap();
 
-        assert_eq!(
-            decoder.decode_channels(&bytes),
-            Err(Error::Unsupported("region-of-interest raw channel decode"))
-        );
+        assert_roi_matches_full_channels(&roi_image, &full, roi);
     }
 
     #[test]
