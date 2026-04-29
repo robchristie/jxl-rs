@@ -34,7 +34,10 @@ pub use frame::{
     FrameGroupLayout, FrameHeader, FrameOrigin, FrameSize, FrameType, LoopFilter, Passes,
     YCbCrChromaSubsampling,
 };
-pub use frame_data::{FrameData, FrameSection, FrameSectionKind, FrameToc, TocEntry};
+pub use frame_data::{
+    FrameData, FrameSection, FrameSectionKind, FrameToc, TocEntry, section_payload,
+    section_payload_range,
+};
 pub use metadata::{
     AnimationHeader, BitDepth, ColorEncoding, ColorSpace, ExtraChannelInfo, ExtraChannelType,
     ImageMetadata, Orientation, PreviewHeader, Primaries, RenderingIntent, ToneMapping,
@@ -49,6 +52,7 @@ pub use modular::{
 };
 pub use transform::{CustomTransformData, OpsinInverseMatrix};
 pub use vardct::{
-    VarDctFrameMetadata, VarDctGroupMetadata, VarDctGroupSectionMetadata,
-    VarDctPassGroupSectionMetadata, VarDctSectionMetadata,
+    VarDctDecodePlan, VarDctFrameMetadata, VarDctGroupMetadata, VarDctGroupPayloadMetadata,
+    VarDctGroupSectionMetadata, VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata,
+    VarDctSectionMetadata, VarDctSectionPayloadMetadata,
 };

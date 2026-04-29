@@ -1,6 +1,8 @@
 use crate::decode::ImageRegion;
+use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
-use crate::frame_data::{FrameData, FrameSectionKind};
+use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_payload_range};
+use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarDctFrameMetadata {
@@ -48,6 +50,34 @@ pub struct VarDctGroupSectionMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarDctPassGroupSectionMetadata {
     pub section: VarDctSectionMetadata,
+    pub pass: usize,
+    pub group: VarDctGroupMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctDecodePlan {
+    pub frame: VarDctFrameMetadata,
+    pub global_payload: Option<VarDctSectionPayloadMetadata>,
+    pub ac_global_payload: Option<VarDctSectionPayloadMetadata>,
+    pub ac_group_payloads: Vec<VarDctPassGroupPayloadMetadata>,
+    pub dc_group_payloads: Vec<VarDctGroupPayloadMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctSectionPayloadMetadata {
+    pub section: VarDctSectionMetadata,
+    pub payload_range: Range<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctGroupPayloadMetadata {
+    pub section: VarDctSectionPayloadMetadata,
+    pub group: VarDctGroupMetadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctPassGroupPayloadMetadata {
+    pub section: VarDctSectionPayloadMetadata,
     pub pass: usize,
     pub group: VarDctGroupMetadata,
 }
@@ -146,6 +176,98 @@ pub fn read_vardct_frame_metadata(
         ac_group_sections: buckets.ac_group_sections,
         dc_group_sections: buckets.dc_group_sections,
     })
+}
+
+pub fn read_vardct_decode_plan(
+    codestream: &[u8],
+    frame_header: &FrameHeader,
+    frame_data: &FrameData,
+) -> Result<Option<VarDctDecodePlan>> {
+    let Some(frame) = read_vardct_frame_metadata(frame_header, frame_data) else {
+        return Ok(None);
+    };
+
+    let global_payload = frame
+        .global_section
+        .as_ref()
+        .map(|section| section_payload_metadata(codestream, frame_data, section))
+        .transpose()?;
+    let ac_global_payload = frame
+        .ac_global_section
+        .as_ref()
+        .map(|section| section_payload_metadata(codestream, frame_data, section))
+        .transpose()?;
+    let dc_group_payloads = frame
+        .dc_group_sections
+        .iter()
+        .map(|section| {
+            Ok(VarDctGroupPayloadMetadata {
+                section: section_payload_metadata(codestream, frame_data, &section.section)?,
+                group: section.group,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let ac_group_payloads = frame
+        .ac_group_sections
+        .iter()
+        .map(|section| {
+            Ok(VarDctPassGroupPayloadMetadata {
+                section: section_payload_metadata(codestream, frame_data, &section.section)?,
+                pass: section.pass,
+                group: section.group,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    Ok(Some(VarDctDecodePlan {
+        frame,
+        global_payload,
+        ac_global_payload,
+        ac_group_payloads,
+        dc_group_payloads,
+    }))
+}
+
+fn section_payload_metadata(
+    codestream: &[u8],
+    frame_data: &FrameData,
+    section: &VarDctSectionMetadata,
+) -> Result<VarDctSectionPayloadMetadata> {
+    let frame_section = matching_frame_section(frame_data, section)?;
+    let payload_range = validated_section_payload_range(codestream, frame_section)?;
+    Ok(VarDctSectionPayloadMetadata {
+        section: section.clone(),
+        payload_range,
+    })
+}
+
+fn matching_frame_section<'a>(
+    frame_data: &'a FrameData,
+    section: &VarDctSectionMetadata,
+) -> Result<&'a FrameSection> {
+    let frame_section = frame_data
+        .sections
+        .get(section.section_physical_index)
+        .ok_or(Error::InvalidCodestream("missing VarDCT frame section"))?;
+    if frame_section.logical_id != section.section_logical_id
+        || frame_section.kind != section.section_kind
+        || frame_section.codestream_offset != section.codestream_offset
+        || frame_section.size != section.payload_size
+    {
+        return Err(Error::InvalidCodestream("mismatched VarDCT frame section"));
+    }
+    Ok(frame_section)
+}
+
+fn validated_section_payload_range(
+    codestream: &[u8],
+    section: &FrameSection,
+) -> Result<Range<usize>> {
+    let range = section_payload_range(section)?;
+    codestream
+        .get(range.clone())
+        .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
+    Ok(range)
 }
 
 fn classify_vardct_sections(
@@ -254,6 +376,11 @@ fn group_intersects_region(group: &VarDctGroupMetadata, region: ImageRegion) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::frame::{
+        AnimationFrame, BlendingInfo, ColorTransform, FrameGroupLayout, FrameOrigin, FrameSize,
+        FrameType, LoopFilter, Passes, YCbCrChromaSubsampling,
+    };
+    use crate::frame_data::{FrameSection, FrameToc};
 
     #[test]
     fn classifies_multi_section_vardct_sections() {
@@ -340,6 +467,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn builds_multi_section_vardct_decode_plan() {
+        let frame_header = vardct_header(256, 128);
+        let frame_data = frame_data(vec![
+            frame_section(0, 0, FrameSectionKind::DcGlobal, 10, 3),
+            frame_section(1, 1, FrameSectionKind::DcGroup { group: 0 }, 13, 5),
+            frame_section(2, 2, FrameSectionKind::AcGlobal, 18, 7),
+            frame_section(
+                3,
+                3,
+                FrameSectionKind::AcGroup { pass: 0, group: 0 },
+                25,
+                11,
+            ),
+            frame_section(
+                4,
+                4,
+                FrameSectionKind::AcGroup { pass: 0, group: 1 },
+                36,
+                13,
+            ),
+        ]);
+        let codestream = vec![0; 64];
+
+        let plan = read_vardct_decode_plan(&codestream, &frame_header, &frame_data)
+            .unwrap()
+            .unwrap();
+
+        assert!(!plan.frame.is_combined);
+        assert_eq!(plan.global_payload.as_ref().unwrap().payload_range, 10..13);
+        assert_eq!(
+            plan.ac_global_payload.as_ref().unwrap().payload_range,
+            18..25
+        );
+        assert_eq!(plan.dc_group_payloads.len(), 1);
+        assert_eq!(plan.dc_group_payloads[0].section.payload_range, 13..18);
+        assert_eq!(plan.dc_group_payloads[0].group.group, 0);
+        assert_eq!(plan.ac_group_payloads.len(), 2);
+        assert_eq!(plan.ac_group_payloads[0].section.payload_range, 25..36);
+        assert_eq!(plan.ac_group_payloads[0].group.group, 0);
+        assert_eq!(plan.ac_group_payloads[1].section.payload_range, 36..49);
+        assert_eq!(plan.ac_group_payloads[1].group.group, 1);
+    }
+
+    #[test]
+    fn rejects_vardct_section_payload_outside_codestream() {
+        let frame_header = vardct_header(8, 8);
+        let frame_data = frame_data(vec![frame_section(0, 0, FrameSectionKind::Combined, 8, 8)]);
+        let codestream = vec![0; 12];
+
+        let error = read_vardct_decode_plan(&codestream, &frame_header, &frame_data).unwrap_err();
+
+        assert_eq!(
+            error,
+            Error::InvalidCodestream("frame section outside codestream")
+        );
+    }
+
     fn section(
         logical_id: usize,
         physical_index: usize,
@@ -354,6 +539,35 @@ mod tests {
         }
     }
 
+    fn frame_section(
+        logical_id: usize,
+        physical_index: usize,
+        kind: FrameSectionKind,
+        codestream_offset: usize,
+        size: u32,
+    ) -> FrameSection {
+        FrameSection {
+            logical_id,
+            physical_index,
+            kind,
+            codestream_offset,
+            size,
+        }
+    }
+
+    fn frame_data(sections: Vec<FrameSection>) -> FrameData {
+        let payload_size = sections.iter().map(|section| section.size as usize).sum();
+        FrameData {
+            toc: FrameToc {
+                entries: Vec::new(),
+                has_permutation: false,
+            },
+            sections,
+            payload_start_offset: 0,
+            payload_size,
+        }
+    }
+
     fn group(group: usize, x: u32, y: u32, width: u32, height: u32) -> VarDctGroupMetadata {
         VarDctGroupMetadata {
             group,
@@ -361,6 +575,51 @@ mod tests {
             y,
             width,
             height,
+        }
+    }
+
+    fn vardct_header(width: u32, height: u32) -> FrameHeader {
+        let group_dim = 128;
+        let groups_x = width.div_ceil(group_dim);
+        let groups_y = height.div_ceil(group_dim);
+        let dc_group_dim = group_dim * 8;
+        let dc_groups_x = width.div_ceil(dc_group_dim);
+        let dc_groups_y = height.div_ceil(dc_group_dim);
+        FrameHeader {
+            encoding: FrameEncoding::VarDct,
+            frame_type: FrameType::Regular,
+            flags: 0,
+            color_transform: ColorTransform::Xyb,
+            chroma_subsampling: YCbCrChromaSubsampling::default(),
+            group_size_shift: 0,
+            x_qm_scale: 3,
+            b_qm_scale: 2,
+            passes: Passes::default(),
+            dc_level: 0,
+            custom_size_or_origin: false,
+            frame_origin: FrameOrigin { x0: 0, y0: 0 },
+            frame_size: FrameSize { width, height },
+            upsampling: 1,
+            extra_channel_upsampling: Vec::new(),
+            blending_info: BlendingInfo::default(),
+            extra_channel_blending_info: Vec::new(),
+            animation_frame: AnimationFrame::default(),
+            is_last: true,
+            save_as_reference: 0,
+            save_before_color_transform: false,
+            name: String::new(),
+            loop_filter: LoopFilter::default(),
+            extensions: 0,
+            group_layout: FrameGroupLayout {
+                group_dim,
+                groups_x,
+                groups_y,
+                num_groups: groups_x * groups_y,
+                dc_group_dim,
+                dc_groups_x,
+                dc_groups_y,
+                num_dc_groups: dc_groups_x * dc_groups_y,
+            },
         }
     }
 }

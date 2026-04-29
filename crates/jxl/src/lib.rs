@@ -14,9 +14,10 @@ pub use jxl_codec::{
     ModularGroupChannelPlan, ModularGroupHeader, ModularImage, ModularImageChannel,
     ModularPredictor, ModularResiduals, ModularSectionMetadata, ModularTransform,
     ModularTreeMetadata, OpsinInverseMatrix, Orientation, Primaries, RenderingIntent, Result,
-    SqueezeParams, TocEntry, ToneMapping, TransferFunction, TransformId, VarDctFrameMetadata,
-    VarDctGroupMetadata, VarDctGroupSectionMetadata, VarDctPassGroupSectionMetadata,
-    VarDctSectionMetadata, WeightedPredictorHeader, WhitePoint,
+    SqueezeParams, TocEntry, ToneMapping, TransferFunction, TransformId, VarDctDecodePlan,
+    VarDctFrameMetadata, VarDctGroupMetadata, VarDctGroupPayloadMetadata,
+    VarDctGroupSectionMetadata, VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata,
+    VarDctSectionMetadata, VarDctSectionPayloadMetadata, WeightedPredictorHeader, WhitePoint,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -32,6 +33,7 @@ pub struct ImageInfo {
     pub first_frame_data: Option<FrameData>,
     pub first_frame_modular: Option<ModularFrameMetadata>,
     pub first_frame_vardct: Option<VarDctFrameMetadata>,
+    pub first_frame_vardct_plan: Option<VarDctDecodePlan>,
     pub boxes: Vec<BoxRecord>,
 }
 
@@ -253,6 +255,7 @@ pub fn inspect(input: &[u8]) -> Result<ImageInfo> {
         first_frame_data: codestream.first_frame_data,
         first_frame_modular: codestream.first_frame_modular,
         first_frame_vardct: codestream.first_frame_vardct,
+        first_frame_vardct_plan: codestream.first_frame_vardct_plan,
         boxes: extracted
             .container
             .map(|container| container.boxes)

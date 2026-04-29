@@ -554,6 +554,7 @@ fn parses_checked_in_fixture_vardct_metadata() {
     let container =
         parse_fixture("reference/libjxl/testdata/jxl/boxes/square-extended-size-container.jxl");
     let vardct = container.first_frame_vardct.as_ref().unwrap();
+    let vardct_plan = container.first_frame_vardct_plan.as_ref().unwrap();
 
     assert_eq!(vardct.width, 8);
     assert_eq!(vardct.height, 8);
@@ -573,6 +574,28 @@ fn parses_checked_in_fixture_vardct_metadata() {
     assert!(vardct.ac_global_section.is_none());
     assert!(vardct.dc_group_sections.is_empty());
     assert!(vardct.ac_group_sections.is_empty());
+    assert!(vardct_plan.frame.is_combined);
+    assert_eq!(
+        vardct_plan
+            .global_payload
+            .as_ref()
+            .unwrap()
+            .section
+            .section_kind,
+        FrameSectionKind::Combined
+    );
+    assert_eq!(
+        vardct_plan
+            .global_payload
+            .as_ref()
+            .unwrap()
+            .payload_range
+            .len(),
+        45
+    );
+    assert!(vardct_plan.ac_global_payload.is_none());
+    assert!(vardct_plan.dc_group_payloads.is_empty());
+    assert!(vardct_plan.ac_group_payloads.is_empty());
     assert_eq!(vardct.ac_groups.len(), 1);
     assert_eq!(vardct.ac_groups[0].group, 0);
     assert_eq!(vardct.ac_groups[0].x, 0);
@@ -612,6 +635,7 @@ fn parses_checked_in_fixture_vardct_metadata() {
 
     let pq = parse_fixture("reference/libjxl/testdata/jxl/pq_gradient.jxl");
     assert!(pq.first_frame_vardct.is_none());
+    assert!(pq.first_frame_vardct_plan.is_none());
 }
 
 #[test]

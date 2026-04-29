@@ -7,7 +7,7 @@ use crate::icc::read_icc_profile;
 use crate::metadata::{ImageMetadata, read_image_metadata};
 use crate::modular::{ModularFrameMetadata, read_modular_frame_metadata};
 use crate::transform::{CustomTransformData, read_custom_transform_data};
-use crate::vardct::{VarDctFrameMetadata, read_vardct_frame_metadata};
+use crate::vardct::{VarDctDecodePlan, VarDctFrameMetadata, read_vardct_decode_plan};
 
 pub const CODESTREAM_SIGNATURE: [u8; 2] = [0xff, 0x0a];
 
@@ -21,6 +21,7 @@ pub struct Codestream {
     pub first_frame_data: Option<FrameData>,
     pub first_frame_modular: Option<ModularFrameMetadata>,
     pub first_frame_vardct: Option<VarDctFrameMetadata>,
+    pub first_frame_vardct_plan: Option<VarDctDecodePlan>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -94,10 +95,13 @@ pub fn parse_codestream_with_config(input: &[u8], config: DecodeConfig) -> Resul
         }
         _ => None,
     };
-    let first_frame_vardct = match (&first_frame, &first_frame_data) {
-        (Some(frame), Some(frame_data)) => read_vardct_frame_metadata(frame, frame_data),
+    let first_frame_vardct_plan = match (&first_frame, &first_frame_data) {
+        (Some(frame), Some(frame_data)) => read_vardct_decode_plan(input, frame, frame_data)?,
         _ => None,
     };
+    let first_frame_vardct = first_frame_vardct_plan
+        .as_ref()
+        .map(|plan| plan.frame.clone());
 
     Ok(Codestream {
         basic_info: BasicInfo {
@@ -135,6 +139,7 @@ pub fn parse_codestream_with_config(input: &[u8], config: DecodeConfig) -> Resul
         first_frame_data,
         first_frame_modular,
         first_frame_vardct,
+        first_frame_vardct_plan,
     })
 }
 

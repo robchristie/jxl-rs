@@ -2,6 +2,7 @@ use crate::bitstream::{BitReader, bits_offset};
 use crate::entropy::{AnsSymbolReader, decode_histograms};
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameGroupLayout, FrameHeader, FrameSize};
+use std::ops::Range;
 
 const BLOCK_DIM: u32 = 8;
 const PERMUTATION_CONTEXTS: usize = 8;
@@ -45,6 +46,20 @@ pub enum FrameSectionKind {
     DcGroup { group: usize },
     AcGlobal,
     AcGroup { pass: usize, group: usize },
+}
+
+pub fn section_payload<'a>(codestream: &'a [u8], section: &FrameSection) -> Result<&'a [u8]> {
+    codestream
+        .get(section_payload_range(section)?)
+        .ok_or(Error::InvalidCodestream("frame section outside codestream"))
+}
+
+pub fn section_payload_range(section: &FrameSection) -> Result<Range<usize>> {
+    let start = section.codestream_offset;
+    let end = start
+        .checked_add(section.size as usize)
+        .ok_or(Error::InvalidCodestream("frame section range overflow"))?;
+    Ok(start..end)
 }
 
 pub fn read_frame_data(
@@ -347,4 +362,49 @@ fn decode_lehmer_code(code: &[u32]) -> Result<Vec<usize>> {
 
 fn value_of_lowest_one_bit(value: usize) -> usize {
     value & value.wrapping_neg()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn returns_bounded_section_payload() {
+        let codestream = [0, 1, 2, 3, 4, 5];
+        let section = frame_section(2, 3);
+
+        assert_eq!(section_payload_range(&section).unwrap(), 2..5);
+        assert_eq!(section_payload(&codestream, &section).unwrap(), &[2, 3, 4]);
+    }
+
+    #[test]
+    fn rejects_section_range_overflow() {
+        let section = frame_section(usize::MAX - 1, 4);
+
+        assert_eq!(
+            section_payload_range(&section).unwrap_err(),
+            Error::InvalidCodestream("frame section range overflow")
+        );
+    }
+
+    #[test]
+    fn rejects_section_payload_outside_codestream() {
+        let codestream = [0, 1, 2, 3];
+        let section = frame_section(2, 3);
+
+        assert_eq!(
+            section_payload(&codestream, &section).unwrap_err(),
+            Error::InvalidCodestream("frame section outside codestream")
+        );
+    }
+
+    fn frame_section(codestream_offset: usize, size: u32) -> FrameSection {
+        FrameSection {
+            logical_id: 0,
+            physical_index: 0,
+            kind: FrameSectionKind::Combined,
+            codestream_offset,
+            size,
+        }
+    }
 }

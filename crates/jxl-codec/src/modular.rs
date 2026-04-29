@@ -3,7 +3,7 @@ use crate::decode::{DecodeConfig, ImageRegion, ModularGroupExecution};
 use crate::entropy::{AnsCode, AnsSymbolReader, decode_histograms};
 use crate::error::{Error, Result};
 use crate::frame::{ColorTransform, FrameEncoding, FrameHeader};
-use crate::frame_data::{FrameData, FrameSection, FrameSectionKind};
+use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_payload};
 use crate::metadata::{ImageMetadata, unpack_signed};
 use rayon::prelude::*;
 
@@ -445,16 +445,6 @@ fn read_modular_decode_plan(
         channel_plan,
         groups,
     })
-}
-
-fn section_payload<'a>(codestream: &'a [u8], section: &FrameSection) -> Result<&'a [u8]> {
-    let start = section.codestream_offset;
-    let end = start
-        .checked_add(section.size as usize)
-        .ok_or(Error::InvalidCodestream("modular section range overflow"))?;
-    codestream.get(start..end).ok_or(Error::InvalidCodestream(
-        "modular section outside codestream",
-    ))
 }
 
 fn read_global_section(
