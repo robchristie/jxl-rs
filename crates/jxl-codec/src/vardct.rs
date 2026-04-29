@@ -12,8 +12,8 @@ use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_paylo
 use crate::metadata::ImageMetadata;
 use crate::metadata::unpack_signed;
 use crate::modular::{
-    ModularGroupChannelPlan, ModularGroupHeader, ModularTreeCoding,
-    decode_modular_stream_from_reader, probe_modular_global_tree_coding,
+    MaTreeLeafProbe, ModularGroupChannelPlan, ModularGroupHeader, ModularPredictor,
+    ModularTreeCoding, decode_modular_stream_from_reader, probe_modular_global_tree_coding,
     read_modular_global_tree_coding, read_modular_group_header_metadata,
 };
 use std::ops::Range;
@@ -206,6 +206,29 @@ pub struct VarDctContextMapProbe {
     pub error_stage: Option<VarDctContextMapProbeStage>,
     pub error_bits: Option<usize>,
     pub error: Option<Error>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctMaTreeLeafProbe {
+    pub leaf_index: usize,
+    pub node_index: usize,
+    pub residual_context: usize,
+    pub predictor: ModularPredictor,
+    pub predictor_offset: i64,
+    pub multiplier: u32,
+}
+
+impl From<&MaTreeLeafProbe> for VarDctMaTreeLeafProbe {
+    fn from(probe: &MaTreeLeafProbe) -> Self {
+        Self {
+            leaf_index: probe.leaf_index,
+            node_index: probe.node_index,
+            residual_context: probe.residual_context,
+            predictor: probe.predictor,
+            predictor_offset: probe.predictor_offset,
+            multiplier: probe.multiplier,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -456,6 +479,7 @@ pub struct VarDctDecodePlan {
     pub modular_global_tree_direct_tree_end_remaining_bits: Option<usize>,
     pub modular_global_tree_direct_tree_node_count: Option<usize>,
     pub modular_global_tree_direct_tree_leaf_count: Option<usize>,
+    pub modular_global_tree_direct_tree_leaves: Vec<VarDctMaTreeLeafProbe>,
     pub modular_global_tree_direct_error_bits: Option<usize>,
     pub modular_global_tree_direct_error_absolute_bits: Option<usize>,
     pub modular_global_tree_direct_error_remaining_bits: Option<usize>,
@@ -766,6 +790,7 @@ pub fn read_vardct_decode_plan(
         modular_global_tree_direct_tree_end_bits,
         modular_global_tree_direct_tree_node_count,
         modular_global_tree_direct_tree_leaf_count,
+        modular_global_tree_direct_tree_leaves,
         modular_global_tree_direct_error_bits,
         modular_global_tree_direct_residual_context_count,
         modular_global_tree_direct_residual_histogram_count,
@@ -803,6 +828,7 @@ pub fn read_vardct_decode_plan(
                 result.direct_tree_end_bits,
                 result.direct_tree_node_count,
                 result.direct_tree_leaf_count,
+                result.direct_tree_leaves,
                 result.direct_error_bits,
                 result.direct_residual_context_count,
                 result.direct_residual_histogram_count,
@@ -833,6 +859,7 @@ pub fn read_vardct_decode_plan(
                 None,
                 None,
                 None,
+                Vec::new(),
                 None,
                 None,
                 None,
@@ -864,6 +891,7 @@ pub fn read_vardct_decode_plan(
             None,
             None,
             None,
+            Vec::new(),
             None,
             None,
             None,
@@ -973,6 +1001,7 @@ pub fn read_vardct_decode_plan(
         ),
         modular_global_tree_direct_tree_node_count,
         modular_global_tree_direct_tree_leaf_count,
+        modular_global_tree_direct_tree_leaves,
         modular_global_tree_direct_error_bits,
         modular_global_tree_direct_error_absolute_bits: absolute_bits(
             modular_global_tree_direct_error_bits,
@@ -1106,6 +1135,7 @@ fn read_vardct_modular_global_tree(
             direct_tree_end_bits: None,
             direct_tree_node_count: None,
             direct_tree_leaf_count: None,
+            direct_tree_leaves: Vec::new(),
             direct_error_bits: None,
             direct_residual_context_count: None,
             direct_residual_histogram_count: None,
@@ -1148,6 +1178,11 @@ fn read_vardct_modular_global_tree(
                         direct_tree_end_bits: direct_probe.tree_end_bits,
                         direct_tree_node_count: direct_probe.tree_node_count,
                         direct_tree_leaf_count: direct_probe.tree_leaf_count,
+                        direct_tree_leaves: direct_probe
+                            .tree_leaves
+                            .iter()
+                            .map(VarDctMaTreeLeafProbe::from)
+                            .collect(),
                         direct_error_bits: direct_probe.error_bits,
                         direct_residual_context_count: direct_probe.residual_context_count,
                         direct_residual_histogram_count: direct_probe.residual_histogram_count,
@@ -1255,6 +1290,7 @@ struct VarDctModularGlobalTreeRead {
     direct_tree_end_bits: Option<usize>,
     direct_tree_node_count: Option<usize>,
     direct_tree_leaf_count: Option<usize>,
+    direct_tree_leaves: Vec<VarDctMaTreeLeafProbe>,
     direct_error_bits: Option<usize>,
     direct_residual_context_count: Option<usize>,
     direct_residual_histogram_count: Option<usize>,

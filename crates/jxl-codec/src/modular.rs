@@ -212,12 +212,23 @@ pub(crate) struct ModularTreeCodingProbe {
     pub tree_end_bits: Option<usize>,
     pub tree_node_count: Option<usize>,
     pub tree_leaf_count: Option<usize>,
+    pub tree_leaves: Vec<MaTreeLeafProbe>,
     pub residual_context_count: Option<usize>,
     pub residual_histogram_count: Option<usize>,
     pub residual_histogram_probe: Option<HistogramCodingProbe>,
     pub residual_coding_end_bits: Option<usize>,
     pub error_bits: Option<usize>,
     pub error: Option<Error>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MaTreeLeafProbe {
+    pub leaf_index: usize,
+    pub node_index: usize,
+    pub residual_context: usize,
+    pub predictor: ModularPredictor,
+    pub predictor_offset: i64,
+    pub multiplier: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -560,6 +571,7 @@ pub(crate) fn probe_modular_global_tree_coding(
                 tree_end_bits: None,
                 tree_node_count: None,
                 tree_leaf_count: None,
+                tree_leaves: Vec::new(),
                 residual_context_count: None,
                 residual_histogram_count: None,
                 residual_histogram_probe: None,
@@ -578,6 +590,7 @@ pub(crate) fn probe_modular_global_tree_coding(
             tree_end_bits: None,
             tree_node_count: None,
             tree_leaf_count: None,
+            tree_leaves: Vec::new(),
             residual_context_count: None,
             residual_histogram_count: None,
             residual_histogram_probe: None,
@@ -597,6 +610,7 @@ pub(crate) fn probe_modular_global_tree_coding(
                 tree_end_bits: None,
                 tree_node_count: None,
                 tree_leaf_count: None,
+                tree_leaves: Vec::new(),
                 residual_context_count: None,
                 residual_histogram_count: None,
                 residual_histogram_probe: None,
@@ -612,6 +626,7 @@ pub(crate) fn probe_modular_global_tree_coding(
             let tree_node_count = Some(tree.nodes.len());
             let tree_leaf_count =
                 Some(tree.nodes.iter().filter(|node| node.property == -1).count());
+            let tree_leaves = probe_tree_leaves(&tree);
             let contexts = tree.nodes.len().div_ceil(2);
             let residual_probe_reader = reader.clone();
             match decode_histograms(reader, contexts, false) {
@@ -622,6 +637,7 @@ pub(crate) fn probe_modular_global_tree_coding(
                     tree_end_bits,
                     tree_node_count,
                     tree_leaf_count,
+                    tree_leaves,
                     residual_context_count: Some(contexts),
                     residual_histogram_count: None,
                     residual_histogram_probe: None,
@@ -640,6 +656,7 @@ pub(crate) fn probe_modular_global_tree_coding(
                         tree_end_bits,
                         tree_node_count,
                         tree_leaf_count,
+                        tree_leaves,
                         residual_context_count: Some(contexts),
                         residual_histogram_count: residual_histogram_probe.num_histograms,
                         residual_histogram_probe: Some(residual_histogram_probe),
@@ -657,6 +674,7 @@ pub(crate) fn probe_modular_global_tree_coding(
             tree_end_bits: None,
             tree_node_count: None,
             tree_leaf_count: None,
+            tree_leaves: Vec::new(),
             residual_context_count: None,
             residual_histogram_count: None,
             residual_histogram_probe: None,
@@ -3134,6 +3152,22 @@ fn decode_tree_nodes(
     }
     validate_tree(&nodes)?;
     Ok(MaTree { nodes })
+}
+
+fn probe_tree_leaves(tree: &MaTree) -> Vec<MaTreeLeafProbe> {
+    tree.nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| node.property == -1)
+        .map(|(node_index, node)| MaTreeLeafProbe {
+            leaf_index: node.lchild as usize,
+            node_index,
+            residual_context: node.lchild as usize,
+            predictor: node.predictor,
+            predictor_offset: node.predictor_offset,
+            multiplier: node.multiplier,
+        })
+        .collect()
 }
 
 fn validate_tree(tree: &[MaTreeNode]) -> Result<()> {

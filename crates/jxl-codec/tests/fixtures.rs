@@ -547,6 +547,45 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     );
     assert_eq!(plan.modular_global_tree_direct_tree_node_count, Some(31));
     assert_eq!(plan.modular_global_tree_direct_tree_leaf_count, Some(16));
+    assert_eq!(plan.modular_global_tree_direct_tree_leaves.len(), 16);
+    assert_eq!(
+        plan.modular_global_tree_direct_tree_leaves
+            .iter()
+            .map(|leaf| (
+                leaf.leaf_index,
+                leaf.node_index,
+                leaf.residual_context,
+                leaf.predictor as u32,
+                leaf.predictor_offset,
+                leaf.multiplier,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 5, 0, 6, 0, 1),
+            (1, 6, 1, 6, 0, 1),
+            (2, 9, 2, 5, 0, 1),
+            (3, 10, 3, 5, 0, 1),
+            (4, 15, 4, 0, 0, 1),
+            (5, 16, 5, 0, 0, 1),
+            (6, 17, 6, 0, 0, 1),
+            (7, 18, 7, 0, 0, 1),
+            (8, 23, 8, 1, 0, 1),
+            (9, 24, 9, 1, 0, 1),
+            (10, 25, 10, 1, 0, 1),
+            (11, 26, 11, 1, 0, 1),
+            (12, 27, 12, 0, 0, 1),
+            (13, 28, 13, 0, 0, 1),
+            (14, 29, 14, 0, 0, 1),
+            (15, 30, 15, 0, 0, 1),
+        ]
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_tree_leaves
+            .iter()
+            .map(|leaf| leaf.residual_context)
+            .collect::<Vec<_>>(),
+        (0..16).collect::<Vec<_>>()
+    );
     assert_eq!(plan.modular_global_tree_direct_error_bits, Some(1035));
     assert_eq!(
         plan.modular_global_tree_direct_error_absolute_bits,
