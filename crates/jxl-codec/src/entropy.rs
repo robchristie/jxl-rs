@@ -240,8 +240,48 @@ pub(crate) struct HistogramCodingProbe {
     pub num_histograms: Option<usize>,
     pub use_prefix_code: Option<bool>,
     pub log_alpha_size: Option<usize>,
+    pub ans_histograms: Vec<AnsHistogramProbe>,
     pub failed_histogram_index: Option<usize>,
     pub error_stage: Option<HistogramCodingProbeStage>,
+    pub error_bits: Option<usize>,
+    pub error: Option<Error>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AnsHistogramProbeKind {
+    Simple,
+    Flat,
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AnsHistogramProbeStage {
+    Form,
+    SimpleSymbolCount,
+    SimpleSymbol,
+    SimpleCount,
+    FlatAlphabetSize,
+    CustomShift,
+    CustomLength,
+    CustomLogCount,
+    CustomRleLength,
+    CustomOmit,
+    CustomPopulationBits,
+    CustomCount,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AnsHistogramProbe {
+    pub start_bits: usize,
+    pub end_bits: Option<usize>,
+    pub kind: Option<AnsHistogramProbeKind>,
+    pub precision_bits: usize,
+    pub simple_symbol_count: Option<usize>,
+    pub alphabet_size: Option<usize>,
+    pub length: Option<usize>,
+    pub shift: Option<u32>,
+    pub omit_pos: Option<usize>,
+    pub error_stage: Option<AnsHistogramProbeStage>,
     pub error_bits: Option<usize>,
     pub error: Option<Error>,
 }
@@ -756,10 +796,17 @@ pub(crate) fn probe_decode_histograms(
     } else {
         let table_size = 1 << log_alpha_size;
         let mut table = vec![AliasEntry::default(); table_size];
+        let mut ans_histograms = Vec::with_capacity(num_histograms);
         for index in 0..num_histograms {
-            let mut counts = match read_histogram(ANS_LOG_TAB_SIZE, reader) {
-                Ok(counts) => counts,
-                Err(error) => {
+            let (histogram_probe, counts) = probe_read_histogram(ANS_LOG_TAB_SIZE, reader);
+            let mut counts = match counts {
+                Some(counts) => counts,
+                None => {
+                    let error = histogram_probe
+                        .error
+                        .clone()
+                        .unwrap_or(Error::InvalidCodestream("invalid ANS histogram"));
+                    ans_histograms.push(histogram_probe);
                     return HistogramCodingProbe {
                         lz77_end_bits,
                         context_map_end_bits,
@@ -769,6 +816,7 @@ pub(crate) fn probe_decode_histograms(
                         num_histograms: Some(num_histograms),
                         use_prefix_code: Some(use_prefix_code),
                         log_alpha_size: Some(log_alpha_size),
+                        ans_histograms,
                         failed_histogram_index: Some(index),
                         ..histogram_probe_error(
                             reader,
@@ -779,6 +827,7 @@ pub(crate) fn probe_decode_histograms(
                 }
             };
             if counts.len() > max_alphabet_size {
+                ans_histograms.push(histogram_probe);
                 return HistogramCodingProbe {
                     lz77_end_bits,
                     context_map_end_bits,
@@ -788,6 +837,7 @@ pub(crate) fn probe_decode_histograms(
                     num_histograms: Some(num_histograms),
                     use_prefix_code: Some(use_prefix_code),
                     log_alpha_size: Some(log_alpha_size),
+                    ans_histograms,
                     failed_histogram_index: Some(index),
                     error_stage: Some(HistogramCodingProbeStage::AnsHistogram),
                     error_bits: Some(reader.bits_consumed()),
@@ -801,6 +851,7 @@ pub(crate) fn probe_decode_histograms(
             if let Err(error) =
                 init_alias_table(counts, ANS_LOG_TAB_SIZE, log_alpha_size, &mut table)
             {
+                ans_histograms.push(histogram_probe);
                 return HistogramCodingProbe {
                     lz77_end_bits,
                     context_map_end_bits,
@@ -810,11 +861,29 @@ pub(crate) fn probe_decode_histograms(
                     num_histograms: Some(num_histograms),
                     use_prefix_code: Some(use_prefix_code),
                     log_alpha_size: Some(log_alpha_size),
+                    ans_histograms,
                     failed_histogram_index: Some(index),
                     ..histogram_probe_error(reader, HistogramCodingProbeStage::AnsAliasTable, error)
                 };
             }
+            ans_histograms.push(histogram_probe);
         }
+        return HistogramCodingProbe {
+            lz77_end_bits,
+            context_map_end_bits,
+            entropy_mode_end_bits,
+            uint_config_end_bits,
+            histogram_end_bits: Some(reader.bits_consumed()),
+            context_count: Some(context_count),
+            num_histograms: Some(num_histograms),
+            use_prefix_code: Some(use_prefix_code),
+            log_alpha_size: Some(log_alpha_size),
+            ans_histograms,
+            failed_histogram_index: None,
+            error_stage: None,
+            error_bits: None,
+            error: None,
+        };
     }
 
     HistogramCodingProbe {
@@ -827,6 +896,7 @@ pub(crate) fn probe_decode_histograms(
         num_histograms: Some(num_histograms),
         use_prefix_code: Some(use_prefix_code),
         log_alpha_size: Some(log_alpha_size),
+        ans_histograms: Vec::new(),
         failed_histogram_index: None,
         error_stage: None,
         error_bits: None,
@@ -849,6 +919,7 @@ fn histogram_probe_error(
         num_histograms: None,
         use_prefix_code: None,
         log_alpha_size: None,
+        ans_histograms: Vec::new(),
         failed_histogram_index: None,
         error_stage: Some(stage),
         error_bits: Some(reader.bits_consumed()),
@@ -977,6 +1048,324 @@ fn decode_uint_config(
         msb_in_token,
         lsb_in_token,
     ))
+}
+
+fn probe_read_histogram(
+    precision_bits: usize,
+    reader: &mut BitReader<'_>,
+) -> (AnsHistogramProbe, Option<Vec<i32>>) {
+    let start_bits = reader.bits_consumed();
+    let mut probe = AnsHistogramProbe {
+        start_bits,
+        end_bits: None,
+        kind: None,
+        precision_bits,
+        simple_symbol_count: None,
+        alphabet_size: None,
+        length: None,
+        shift: None,
+        omit_pos: None,
+        error_stage: None,
+        error_bits: None,
+        error: None,
+    };
+    let range = 1i32 << precision_bits;
+
+    let is_simple = match reader.read_bool() {
+        Ok(value) => value,
+        Err(error) => {
+            probe_histogram_error(&mut probe, reader, AnsHistogramProbeStage::Form, error);
+            return (probe, None);
+        }
+    };
+    if is_simple {
+        probe.kind = Some(AnsHistogramProbeKind::Simple);
+        let num_symbols = match reader.read_bits(1) {
+            Ok(value) => value as usize + 1,
+            Err(error) => {
+                probe_histogram_error(
+                    &mut probe,
+                    reader,
+                    AnsHistogramProbeStage::SimpleSymbolCount,
+                    error,
+                );
+                return (probe, None);
+            }
+        };
+        probe.simple_symbol_count = Some(num_symbols);
+        let mut symbols = Vec::with_capacity(num_symbols);
+        let mut max_symbol = 0;
+        for _ in 0..num_symbols {
+            let symbol = match decode_var_len_uint8(reader) {
+                Ok(symbol) => symbol,
+                Err(error) => {
+                    probe_histogram_error(
+                        &mut probe,
+                        reader,
+                        AnsHistogramProbeStage::SimpleSymbol,
+                        error,
+                    );
+                    return (probe, None);
+                }
+            };
+            max_symbol = max_symbol.max(symbol);
+            symbols.push(symbol);
+        }
+        let mut counts = vec![0; max_symbol + 1];
+        if num_symbols == 1 {
+            counts[symbols[0]] = range;
+        } else {
+            if symbols[0] == symbols[1] {
+                probe_histogram_error(
+                    &mut probe,
+                    reader,
+                    AnsHistogramProbeStage::SimpleSymbol,
+                    Error::InvalidCodestream("duplicate simple histogram symbol"),
+                );
+                return (probe, None);
+            }
+            counts[symbols[0]] = match reader.read_bits(precision_bits) {
+                Ok(value) => value as i32,
+                Err(error) => {
+                    probe_histogram_error(
+                        &mut probe,
+                        reader,
+                        AnsHistogramProbeStage::SimpleCount,
+                        error,
+                    );
+                    return (probe, None);
+                }
+            };
+            counts[symbols[1]] = range - counts[symbols[0]];
+        }
+        probe.end_bits = Some(reader.bits_consumed());
+        return (probe, Some(counts));
+    }
+
+    let is_flat = match reader.read_bool() {
+        Ok(value) => value,
+        Err(error) => {
+            probe_histogram_error(&mut probe, reader, AnsHistogramProbeStage::Form, error);
+            return (probe, None);
+        }
+    };
+    if is_flat {
+        probe.kind = Some(AnsHistogramProbeKind::Flat);
+        let alphabet_size = match decode_var_len_uint8(reader) {
+            Ok(value) => value + 1,
+            Err(error) => {
+                probe_histogram_error(
+                    &mut probe,
+                    reader,
+                    AnsHistogramProbeStage::FlatAlphabetSize,
+                    error,
+                );
+                return (probe, None);
+            }
+        };
+        probe.alphabet_size = Some(alphabet_size);
+        if alphabet_size > range as usize {
+            probe_histogram_error(
+                &mut probe,
+                reader,
+                AnsHistogramProbeStage::FlatAlphabetSize,
+                Error::InvalidCodestream("flat histogram alphabet is too large"),
+            );
+            return (probe, None);
+        }
+        probe.end_bits = Some(reader.bits_consumed());
+        return (probe, Some(create_flat_histogram(alphabet_size, range)));
+    }
+
+    probe.kind = Some(AnsHistogramProbeKind::Custom);
+    let upper_bound_log = floor_log2_nonzero(ANS_LOG_TAB_SIZE + 1);
+    let mut log = 0;
+    while log < upper_bound_log {
+        match reader.read_bool() {
+            Ok(false) => break,
+            Ok(true) => log += 1,
+            Err(error) => {
+                probe_histogram_error(
+                    &mut probe,
+                    reader,
+                    AnsHistogramProbeStage::CustomShift,
+                    error,
+                );
+                return (probe, None);
+            }
+        }
+    }
+    let shift = match reader.read_bits(log) {
+        Ok(bits) => (bits as u32 | (1 << log)) - 1,
+        Err(error) => {
+            probe_histogram_error(
+                &mut probe,
+                reader,
+                AnsHistogramProbeStage::CustomShift,
+                error,
+            );
+            return (probe, None);
+        }
+    };
+    probe.shift = Some(shift);
+    if shift > ANS_LOG_TAB_SIZE as u32 + 1 {
+        probe_histogram_error(
+            &mut probe,
+            reader,
+            AnsHistogramProbeStage::CustomShift,
+            Error::InvalidCodestream("invalid histogram shift"),
+        );
+        return (probe, None);
+    }
+
+    let length = match decode_var_len_uint8(reader) {
+        Ok(value) => value + 3,
+        Err(error) => {
+            probe_histogram_error(
+                &mut probe,
+                reader,
+                AnsHistogramProbeStage::CustomLength,
+                error,
+            );
+            return (probe, None);
+        }
+    };
+    probe.length = Some(length);
+    let mut counts = vec![0; length];
+    let mut logcounts = vec![0i32; length];
+    let mut same = vec![0; length];
+    let mut omit_log = -1;
+    let mut omit_pos = None;
+    let mut i = 0;
+    while i < length {
+        let idx = match reader.peek_bits(7) {
+            Ok(idx) => idx as usize,
+            Err(error) => {
+                probe_histogram_error(
+                    &mut probe,
+                    reader,
+                    AnsHistogramProbeStage::CustomLogCount,
+                    error,
+                );
+                return (probe, None);
+            }
+        };
+        let (bits, value) = HISTOGRAM_LOGCOUNT_HUFFMAN[idx];
+        if let Err(error) = reader.skip_bits(bits as usize) {
+            probe_histogram_error(
+                &mut probe,
+                reader,
+                AnsHistogramProbeStage::CustomLogCount,
+                error,
+            );
+            return (probe, None);
+        }
+        logcounts[i] = i32::from(value) - 1;
+        if logcounts[i] == ANS_LOG_TAB_SIZE as i32 {
+            let rle_length = match decode_var_len_uint8(reader) {
+                Ok(value) => value,
+                Err(error) => {
+                    probe_histogram_error(
+                        &mut probe,
+                        reader,
+                        AnsHistogramProbeStage::CustomRleLength,
+                        error,
+                    );
+                    return (probe, None);
+                }
+            };
+            same[i] = rle_length + 5;
+            i += rle_length + 4;
+            continue;
+        }
+        if logcounts[i] > omit_log {
+            omit_log = logcounts[i];
+            omit_pos = Some(i);
+        }
+        i += 1;
+    }
+
+    let omit_pos = match omit_pos {
+        Some(omit_pos) => omit_pos,
+        None => {
+            probe_histogram_error(
+                &mut probe,
+                reader,
+                AnsHistogramProbeStage::CustomOmit,
+                Error::InvalidCodestream("invalid histogram"),
+            );
+            return (probe, None);
+        }
+    };
+    probe.omit_pos = Some(omit_pos);
+    if omit_pos + 1 < length && logcounts[omit_pos + 1] == ANS_LOG_TAB_SIZE as i32 {
+        probe_histogram_error(
+            &mut probe,
+            reader,
+            AnsHistogramProbeStage::CustomOmit,
+            Error::InvalidCodestream("invalid histogram RLE"),
+        );
+        return (probe, None);
+    }
+
+    let mut total_count = 0;
+    let mut prev = 0;
+    let mut numsame = 0;
+    for i in 0..length {
+        if same[i] != 0 {
+            numsame = same[i] - 1;
+            prev = if i > 0 { counts[i - 1] } else { 0 };
+        }
+        if numsame > 0 {
+            counts[i] = prev;
+            numsame -= 1;
+        } else {
+            let code = logcounts[i];
+            if i == omit_pos || code < 0 {
+                continue;
+            } else if shift == 0 || code == 0 {
+                counts[i] = 1 << code;
+            } else {
+                let bitcount = get_population_count_precision(code as u32, shift);
+                counts[i] = match reader.read_bits(bitcount as usize) {
+                    Ok(bits) => (1 << code) + ((bits as i32) << (code as u32 - bitcount)),
+                    Err(error) => {
+                        probe_histogram_error(
+                            &mut probe,
+                            reader,
+                            AnsHistogramProbeStage::CustomPopulationBits,
+                            error,
+                        );
+                        return (probe, None);
+                    }
+                };
+            }
+        }
+        total_count += counts[i];
+    }
+    counts[omit_pos] = range - total_count;
+    if counts[omit_pos] <= 0 {
+        probe_histogram_error(
+            &mut probe,
+            reader,
+            AnsHistogramProbeStage::CustomCount,
+            Error::InvalidCodestream("invalid histogram count"),
+        );
+        return (probe, None);
+    }
+    probe.end_bits = Some(reader.bits_consumed());
+    (probe, Some(counts))
+}
+
+fn probe_histogram_error(
+    probe: &mut AnsHistogramProbe,
+    reader: &BitReader<'_>,
+    stage: AnsHistogramProbeStage,
+    error: Error,
+) {
+    probe.error_stage = Some(stage);
+    probe.error_bits = Some(reader.bits_consumed());
+    probe.error = Some(error);
 }
 
 fn read_histogram(precision_bits: usize, reader: &mut BitReader<'_>) -> Result<Vec<i32>> {

@@ -1,6 +1,9 @@
 use crate::bitstream::{BitReader, bits_offset, val};
 use crate::decode::ImageRegion;
-use crate::entropy::{HistogramCodingProbeStage, decode_context_map};
+use crate::entropy::{
+    AnsHistogramProbe, AnsHistogramProbeKind, AnsHistogramProbeStage, HistogramCodingProbeStage,
+    decode_context_map,
+};
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
 use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_payload_range};
@@ -77,6 +80,93 @@ pub enum VarDctHistogramProbeStage {
     AnsAliasTable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarDctAnsHistogramProbeKind {
+    Simple,
+    Flat,
+    Custom,
+}
+
+impl From<AnsHistogramProbeKind> for VarDctAnsHistogramProbeKind {
+    fn from(kind: AnsHistogramProbeKind) -> Self {
+        match kind {
+            AnsHistogramProbeKind::Simple => Self::Simple,
+            AnsHistogramProbeKind::Flat => Self::Flat,
+            AnsHistogramProbeKind::Custom => Self::Custom,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarDctAnsHistogramProbeStage {
+    Form,
+    SimpleSymbolCount,
+    SimpleSymbol,
+    SimpleCount,
+    FlatAlphabetSize,
+    CustomShift,
+    CustomLength,
+    CustomLogCount,
+    CustomRleLength,
+    CustomOmit,
+    CustomPopulationBits,
+    CustomCount,
+}
+
+impl From<AnsHistogramProbeStage> for VarDctAnsHistogramProbeStage {
+    fn from(stage: AnsHistogramProbeStage) -> Self {
+        match stage {
+            AnsHistogramProbeStage::Form => Self::Form,
+            AnsHistogramProbeStage::SimpleSymbolCount => Self::SimpleSymbolCount,
+            AnsHistogramProbeStage::SimpleSymbol => Self::SimpleSymbol,
+            AnsHistogramProbeStage::SimpleCount => Self::SimpleCount,
+            AnsHistogramProbeStage::FlatAlphabetSize => Self::FlatAlphabetSize,
+            AnsHistogramProbeStage::CustomShift => Self::CustomShift,
+            AnsHistogramProbeStage::CustomLength => Self::CustomLength,
+            AnsHistogramProbeStage::CustomLogCount => Self::CustomLogCount,
+            AnsHistogramProbeStage::CustomRleLength => Self::CustomRleLength,
+            AnsHistogramProbeStage::CustomOmit => Self::CustomOmit,
+            AnsHistogramProbeStage::CustomPopulationBits => Self::CustomPopulationBits,
+            AnsHistogramProbeStage::CustomCount => Self::CustomCount,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAnsHistogramProbe {
+    pub start_bits: usize,
+    pub end_bits: Option<usize>,
+    pub kind: Option<VarDctAnsHistogramProbeKind>,
+    pub precision_bits: usize,
+    pub simple_symbol_count: Option<usize>,
+    pub alphabet_size: Option<usize>,
+    pub length: Option<usize>,
+    pub shift: Option<u32>,
+    pub omit_pos: Option<usize>,
+    pub error_stage: Option<VarDctAnsHistogramProbeStage>,
+    pub error_bits: Option<usize>,
+    pub error: Option<Error>,
+}
+
+impl From<&AnsHistogramProbe> for VarDctAnsHistogramProbe {
+    fn from(probe: &AnsHistogramProbe) -> Self {
+        Self {
+            start_bits: probe.start_bits,
+            end_bits: probe.end_bits,
+            kind: probe.kind.map(VarDctAnsHistogramProbeKind::from),
+            precision_bits: probe.precision_bits,
+            simple_symbol_count: probe.simple_symbol_count,
+            alphabet_size: probe.alphabet_size,
+            length: probe.length,
+            shift: probe.shift,
+            omit_pos: probe.omit_pos,
+            error_stage: probe.error_stage.map(VarDctAnsHistogramProbeStage::from),
+            error_bits: probe.error_bits,
+            error: probe.error.clone(),
+        }
+    }
+}
+
 impl From<HistogramCodingProbeStage> for VarDctHistogramProbeStage {
     fn from(stage: HistogramCodingProbeStage) -> Self {
         match stage {
@@ -108,6 +198,7 @@ pub struct VarDctDecodePlan {
     pub modular_global_tree_direct_residual_log_alpha_size: Option<usize>,
     pub modular_global_tree_direct_residual_failed_histogram_index: Option<usize>,
     pub modular_global_tree_direct_residual_error_stage: Option<VarDctHistogramProbeStage>,
+    pub modular_global_tree_direct_residual_ans_histograms: Vec<VarDctAnsHistogramProbe>,
     pub modular_global_tree_start_bits: Option<usize>,
     pub modular_global_tree_direct_error: Option<Error>,
     pub modular_global_tree_error: Option<Error>,
@@ -349,6 +440,7 @@ pub fn read_vardct_decode_plan(
         modular_global_tree_direct_residual_log_alpha_size,
         modular_global_tree_direct_residual_failed_histogram_index,
         modular_global_tree_direct_residual_error_stage,
+        modular_global_tree_direct_residual_ans_histograms,
         modular_global_tree_start_bits,
         modular_global_tree_direct_error,
         modular_global_tree_error,
@@ -372,6 +464,7 @@ pub fn read_vardct_decode_plan(
                 result.direct_residual_log_alpha_size,
                 result.direct_residual_failed_histogram_index,
                 result.direct_residual_error_stage,
+                result.direct_residual_ans_histograms,
                 Some(result.tree_start_bits),
                 result.direct_error,
                 None,
@@ -388,13 +481,28 @@ pub fn read_vardct_decode_plan(
                 None,
                 None,
                 None,
+                Vec::new(),
                 None,
                 None,
                 Some(error),
             ),
         },
         _ => (
-            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
         ),
     };
     let ac_global_payload = frame
@@ -453,6 +561,7 @@ pub fn read_vardct_decode_plan(
         modular_global_tree_direct_residual_log_alpha_size,
         modular_global_tree_direct_residual_failed_histogram_index,
         modular_global_tree_direct_residual_error_stage,
+        modular_global_tree_direct_residual_ans_histograms,
         modular_global_tree_start_bits,
         modular_global_tree_direct_error,
         modular_global_tree_error,
@@ -564,6 +673,7 @@ fn read_vardct_modular_global_tree(
             direct_residual_log_alpha_size: None,
             direct_residual_failed_histogram_index: None,
             direct_residual_error_stage: None,
+            direct_residual_ans_histograms: Vec::new(),
             tree_start_bits: global.bits_consumed,
             direct_error: None,
             tree,
@@ -605,6 +715,17 @@ fn read_vardct_modular_global_tree(
                             .as_ref()
                             .and_then(|probe| probe.error_stage)
                             .map(VarDctHistogramProbeStage::from),
+                        direct_residual_ans_histograms: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .map(|probe| {
+                                probe
+                                    .ans_histograms
+                                    .iter()
+                                    .map(VarDctAnsHistogramProbe::from)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                         tree_start_bits: offset,
                         direct_error: Some(error.clone()),
                         tree,
@@ -627,6 +748,7 @@ struct VarDctModularGlobalTreeRead {
     direct_residual_log_alpha_size: Option<usize>,
     direct_residual_failed_histogram_index: Option<usize>,
     direct_residual_error_stage: Option<VarDctHistogramProbeStage>,
+    direct_residual_ans_histograms: Vec<VarDctAnsHistogramProbe>,
     tree_start_bits: usize,
     direct_error: Option<Error>,
     tree: ModularTreeCoding,

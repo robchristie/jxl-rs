@@ -507,6 +507,51 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         plan.modular_global_tree_direct_residual_error_stage,
         Some(jxl_codec::VarDctHistogramProbeStage::AnsHistogram)
     );
+    let histograms = &plan.modular_global_tree_direct_residual_ans_histograms;
+    assert_eq!(histograms.len(), 4);
+    assert_eq!(histograms[0].start_bits, 591);
+    assert_eq!(histograms[0].end_bits, Some(874));
+    assert_eq!(
+        histograms[0].kind,
+        Some(jxl_codec::VarDctAnsHistogramProbeKind::Custom)
+    );
+    assert_eq!(histograms[0].length, Some(57));
+    assert_eq!(histograms[0].shift, Some(4));
+    assert_eq!(histograms[0].omit_pos, Some(27));
+    assert_eq!(histograms[0].error_stage, None);
+    assert_eq!(histograms[1].start_bits, 874);
+    assert_eq!(histograms[1].end_bits, Some(914));
+    assert_eq!(
+        histograms[1].kind,
+        Some(jxl_codec::VarDctAnsHistogramProbeKind::Custom)
+    );
+    assert_eq!(histograms[1].length, Some(7));
+    assert_eq!(histograms[1].shift, Some(0));
+    assert_eq!(histograms[1].omit_pos, Some(0));
+    assert_eq!(histograms[1].error_stage, None);
+    assert_eq!(histograms[2].start_bits, 914);
+    assert_eq!(histograms[2].end_bits, Some(936));
+    assert_eq!(
+        histograms[2].kind,
+        Some(jxl_codec::VarDctAnsHistogramProbeKind::Simple)
+    );
+    assert_eq!(histograms[2].simple_symbol_count, Some(2));
+    assert_eq!(histograms[2].error_stage, None);
+    assert_eq!(histograms[3].start_bits, 936);
+    assert_eq!(histograms[3].end_bits, None);
+    assert_eq!(
+        histograms[3].kind,
+        Some(jxl_codec::VarDctAnsHistogramProbeKind::Custom)
+    );
+    assert_eq!(histograms[3].length, Some(23));
+    assert_eq!(histograms[3].shift, Some(2));
+    assert_eq!(histograms[3].omit_pos, None);
+    assert_eq!(
+        histograms[3].error_stage,
+        Some(jxl_codec::VarDctAnsHistogramProbeStage::CustomLogCount)
+    );
+    assert_eq!(histograms[3].error_bits, Some(1035));
+    assert_eq!(histograms[3].error, Some(jxl_codec::Error::Truncated));
     assert_eq!(plan.modular_global_tree_start_bits, Some(220));
     assert_eq!(
         plan.modular_global_tree_direct_error,
