@@ -8,8 +8,8 @@ use crate::metadata::ImageMetadata;
 use crate::metadata::unpack_signed;
 use crate::modular::{
     ModularGroupChannelPlan, ModularGroupHeader, ModularTreeCoding,
-    decode_modular_stream_from_reader, read_modular_global_tree_coding,
-    read_modular_group_header_metadata,
+    decode_modular_stream_from_reader, probe_modular_global_tree_coding,
+    read_modular_global_tree_coding, read_modular_group_header_metadata,
 };
 use std::ops::Range;
 
@@ -68,6 +68,9 @@ pub struct VarDctDecodePlan {
     pub frame: VarDctFrameMetadata,
     pub global: Option<VarDctGlobalMetadata>,
     pub modular_global_tree_direct_start_bits: Option<usize>,
+    pub modular_global_tree_direct_tree_end_bits: Option<usize>,
+    pub modular_global_tree_direct_tree_node_count: Option<usize>,
+    pub modular_global_tree_direct_error_bits: Option<usize>,
     pub modular_global_tree_start_bits: Option<usize>,
     pub modular_global_tree_direct_error: Option<Error>,
     pub modular_global_tree_error: Option<Error>,
@@ -300,6 +303,9 @@ pub fn read_vardct_decode_plan(
     let (
         global_tree,
         modular_global_tree_direct_start_bits,
+        modular_global_tree_direct_tree_end_bits,
+        modular_global_tree_direct_tree_node_count,
+        modular_global_tree_direct_error_bits,
         modular_global_tree_start_bits,
         modular_global_tree_direct_error,
         modular_global_tree_error,
@@ -314,13 +320,25 @@ pub fn read_vardct_decode_plan(
             Ok(result) => (
                 Some(result.tree),
                 Some(result.direct_start_bits),
+                result.direct_tree_end_bits,
+                result.direct_tree_node_count,
+                result.direct_error_bits,
                 Some(result.tree_start_bits),
                 result.direct_error,
                 None,
             ),
-            Err(error) => (None, Some(global.bits_consumed), None, None, Some(error)),
+            Err(error) => (
+                None,
+                Some(global.bits_consumed),
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(error),
+            ),
         },
-        _ => (None, None, None, None, None),
+        _ => (None, None, None, None, None, None, None, None),
     };
     let ac_global_payload = frame
         .ac_global_section
@@ -369,6 +387,9 @@ pub fn read_vardct_decode_plan(
         frame,
         global,
         modular_global_tree_direct_start_bits,
+        modular_global_tree_direct_tree_end_bits,
+        modular_global_tree_direct_tree_node_count,
+        modular_global_tree_direct_error_bits,
         modular_global_tree_start_bits,
         modular_global_tree_direct_error,
         modular_global_tree_error,
@@ -471,11 +492,18 @@ fn read_vardct_modular_global_tree(
     match read_modular_global_tree_coding(&mut reader, metadata, frame_header) {
         Ok(tree) => Ok(VarDctModularGlobalTreeRead {
             direct_start_bits: global.bits_consumed,
+            direct_tree_end_bits: None,
+            direct_tree_node_count: None,
+            direct_error_bits: None,
             tree_start_bits: global.bits_consumed,
             direct_error: None,
             tree,
         }),
         Err(error) => {
+            let mut direct_probe = BitReader::new(bytes);
+            direct_probe.skip_bits(global.bits_consumed)?;
+            let direct_probe =
+                probe_modular_global_tree_coding(&mut direct_probe, metadata, frame_header);
             let start = global.bits_consumed;
             let end = (global.bits_consumed + 64).min(bytes.len() * 8);
             for offset in start..end {
@@ -486,8 +514,11 @@ fn read_vardct_modular_global_tree(
                 {
                     return Ok(VarDctModularGlobalTreeRead {
                         direct_start_bits: global.bits_consumed,
+                        direct_tree_end_bits: direct_probe.tree_end_bits,
+                        direct_tree_node_count: direct_probe.tree_node_count,
+                        direct_error_bits: direct_probe.error_bits,
                         tree_start_bits: offset,
-                        direct_error: Some(error),
+                        direct_error: Some(error.clone()),
                         tree,
                     });
                 }
@@ -499,6 +530,9 @@ fn read_vardct_modular_global_tree(
 
 struct VarDctModularGlobalTreeRead {
     direct_start_bits: usize,
+    direct_tree_end_bits: Option<usize>,
+    direct_tree_node_count: Option<usize>,
+    direct_error_bits: Option<usize>,
     tree_start_bits: usize,
     direct_error: Option<Error>,
     tree: ModularTreeCoding,

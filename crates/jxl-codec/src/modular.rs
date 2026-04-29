@@ -203,6 +203,18 @@ pub(crate) struct ModularTreeCoding {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModularTreeCodingProbe {
+    pub has_global_tree_end_bits: Option<usize>,
+    pub tree_histogram_end_bits: Option<usize>,
+    pub tree_ans_start_bits: Option<usize>,
+    pub tree_end_bits: Option<usize>,
+    pub tree_node_count: Option<usize>,
+    pub residual_coding_end_bits: Option<usize>,
+    pub error_bits: Option<usize>,
+    pub error: Option<Error>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModularGroupHeader {
     pub use_global_tree: bool,
     pub weighted_predictor: WeightedPredictorHeader,
@@ -525,6 +537,96 @@ pub(crate) fn read_modular_global_tree_coding(
         return Err(Error::InvalidCodestream("modular frame has no global tree"));
     }
     read_tree_coding(reader, global_tree_size_limit(metadata, frame_header)?)
+}
+
+pub(crate) fn probe_modular_global_tree_coding(
+    reader: &mut BitReader<'_>,
+    metadata: &ImageMetadata,
+    frame_header: &FrameHeader,
+) -> ModularTreeCodingProbe {
+    let has_global_tree = match reader.read_bool() {
+        Ok(has_global_tree) => has_global_tree,
+        Err(error) => {
+            return ModularTreeCodingProbe {
+                has_global_tree_end_bits: None,
+                tree_histogram_end_bits: None,
+                tree_ans_start_bits: None,
+                tree_end_bits: None,
+                tree_node_count: None,
+                residual_coding_end_bits: None,
+                error_bits: Some(reader.bits_consumed()),
+                error: Some(error),
+            };
+        }
+    };
+    let has_global_tree_end_bits = Some(reader.bits_consumed());
+    if !has_global_tree {
+        return ModularTreeCodingProbe {
+            has_global_tree_end_bits,
+            tree_histogram_end_bits: None,
+            tree_ans_start_bits: None,
+            tree_end_bits: None,
+            tree_node_count: None,
+            residual_coding_end_bits: None,
+            error_bits: Some(reader.bits_consumed()),
+            error: Some(Error::InvalidCodestream("modular frame has no global tree")),
+        };
+    }
+
+    let tree_size_limit = match global_tree_size_limit(metadata, frame_header) {
+        Ok(limit) => limit,
+        Err(error) => {
+            return ModularTreeCodingProbe {
+                has_global_tree_end_bits,
+                tree_histogram_end_bits: None,
+                tree_ans_start_bits: None,
+                tree_end_bits: None,
+                tree_node_count: None,
+                residual_coding_end_bits: None,
+                error_bits: Some(reader.bits_consumed()),
+                error: Some(error),
+            };
+        }
+    };
+    match decode_tree_probe(reader, tree_size_limit) {
+        Ok((tree, tree_histogram_end_bits, tree_ans_start_bits)) => {
+            let tree_end_bits = Some(reader.bits_consumed());
+            let tree_node_count = Some(tree.nodes.len());
+            let contexts = tree.nodes.len().div_ceil(2);
+            match decode_histograms(reader, contexts, false) {
+                Ok(_) => ModularTreeCodingProbe {
+                    has_global_tree_end_bits,
+                    tree_histogram_end_bits: Some(tree_histogram_end_bits),
+                    tree_ans_start_bits: Some(tree_ans_start_bits),
+                    tree_end_bits,
+                    tree_node_count,
+                    residual_coding_end_bits: Some(reader.bits_consumed()),
+                    error_bits: None,
+                    error: None,
+                },
+                Err(error) => ModularTreeCodingProbe {
+                    has_global_tree_end_bits,
+                    tree_histogram_end_bits: Some(tree_histogram_end_bits),
+                    tree_ans_start_bits: Some(tree_ans_start_bits),
+                    tree_end_bits,
+                    tree_node_count,
+                    residual_coding_end_bits: None,
+                    error_bits: Some(reader.bits_consumed()),
+                    error: Some(error),
+                },
+            }
+        }
+        Err((error, tree_histogram_end_bits, tree_ans_start_bits)) => ModularTreeCodingProbe {
+            has_global_tree_end_bits,
+            tree_histogram_end_bits,
+            tree_ans_start_bits,
+            tree_end_bits: None,
+            tree_node_count: None,
+            residual_coding_end_bits: None,
+            error_bits: Some(reader.bits_consumed()),
+            error: Some(error),
+        },
+    }
 }
 
 fn read_modular_group_sections(
@@ -2870,6 +2972,36 @@ fn read_squeeze_params(reader: &mut BitReader<'_>) -> Result<SqueezeParams> {
 fn decode_tree(reader: &mut BitReader<'_>, tree_size_limit: usize) -> Result<MaTree> {
     let (code, context_map) = decode_histograms(reader, TREE_CONTEXTS, false)?;
     let mut symbol_reader = AnsSymbolReader::new(code, reader, 0)?;
+    decode_tree_nodes(reader, &mut symbol_reader, &context_map, tree_size_limit)
+}
+
+type DecodeTreeProbeResult =
+    std::result::Result<(MaTree, usize, usize), (Error, Option<usize>, Option<usize>)>;
+
+fn decode_tree_probe(reader: &mut BitReader<'_>, tree_size_limit: usize) -> DecodeTreeProbeResult {
+    let (code, context_map) =
+        decode_histograms(reader, TREE_CONTEXTS, false).map_err(|error| (error, None, None))?;
+    let tree_histogram_end_bits = reader.bits_consumed();
+    let mut symbol_reader = AnsSymbolReader::new(code, reader, 0)
+        .map_err(|error| (error, Some(tree_histogram_end_bits), None))?;
+    let tree_ans_start_bits = reader.bits_consumed();
+    decode_tree_nodes(reader, &mut symbol_reader, &context_map, tree_size_limit)
+        .map(|tree| (tree, tree_histogram_end_bits, tree_ans_start_bits))
+        .map_err(|error| {
+            (
+                error,
+                Some(tree_histogram_end_bits),
+                Some(tree_ans_start_bits),
+            )
+        })
+}
+
+fn decode_tree_nodes(
+    reader: &mut BitReader<'_>,
+    symbol_reader: &mut AnsSymbolReader,
+    context_map: &[u8],
+    tree_size_limit: usize,
+) -> Result<MaTree> {
     let mut nodes = Vec::new();
     let mut leaf_id = 0u32;
     let mut to_decode = 1usize;
@@ -2880,29 +3012,29 @@ fn decode_tree(reader: &mut BitReader<'_>, tree_size_limit: usize) -> Result<MaT
             return Err(Error::InvalidCodestream("modular MA tree is too large"));
         }
         to_decode -= 1;
-        let prop1 = symbol_reader.read_hybrid_uint(PROPERTY_CONTEXT, reader, &context_map)?;
+        let prop1 = symbol_reader.read_hybrid_uint(PROPERTY_CONTEXT, reader, context_map)?;
         if prop1 > 256 {
             return Err(Error::InvalidCodestream("invalid modular MA tree property"));
         }
         let property = prop1 as i32 - 1;
         if property == -1 {
             let predictor =
-                symbol_reader.read_hybrid_uint(PREDICTOR_CONTEXT, reader, &context_map)?;
+                symbol_reader.read_hybrid_uint(PREDICTOR_CONTEXT, reader, context_map)?;
             let predictor = ModularPredictor::try_from(predictor)?;
             let predictor_offset = i64::from(unpack_signed(symbol_reader.read_hybrid_uint(
                 OFFSET_CONTEXT,
                 reader,
-                &context_map,
+                context_map,
             )?));
             let mul_log =
-                symbol_reader.read_hybrid_uint(MULTIPLIER_LOG_CONTEXT, reader, &context_map)?;
+                symbol_reader.read_hybrid_uint(MULTIPLIER_LOG_CONTEXT, reader, context_map)?;
             if mul_log >= 31 {
                 return Err(Error::InvalidCodestream(
                     "invalid modular MA tree multiplier logarithm",
                 ));
             }
             let mul_bits =
-                symbol_reader.read_hybrid_uint(MULTIPLIER_BITS_CONTEXT, reader, &context_map)?;
+                symbol_reader.read_hybrid_uint(MULTIPLIER_BITS_CONTEXT, reader, context_map)?;
             let max_mul_bits = (1u64 << (31 - mul_log)) - 1;
             if u64::from(mul_bits) >= max_mul_bits {
                 return Err(Error::InvalidCodestream(
@@ -2933,7 +3065,7 @@ fn decode_tree(reader: &mut BitReader<'_>, tree_size_limit: usize) -> Result<MaT
         let splitval = unpack_signed(symbol_reader.read_hybrid_uint(
             SPLIT_VAL_CONTEXT,
             reader,
-            &context_map,
+            context_map,
         )?);
         let lchild = nodes
             .len()

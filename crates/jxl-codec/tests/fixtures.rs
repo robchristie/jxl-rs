@@ -480,6 +480,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
 
     let global = plan.global.as_ref().unwrap();
     assert_eq!(plan.modular_global_tree_direct_start_bits, Some(206));
+    assert_eq!(plan.modular_global_tree_direct_tree_end_bits, Some(520));
+    assert_eq!(plan.modular_global_tree_direct_tree_node_count, Some(31));
+    assert_eq!(plan.modular_global_tree_direct_error_bits, Some(1035));
     assert_eq!(plan.modular_global_tree_start_bits, Some(220));
     assert_eq!(
         plan.modular_global_tree_direct_error,
