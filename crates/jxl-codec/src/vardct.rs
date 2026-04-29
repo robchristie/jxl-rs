@@ -1,10 +1,11 @@
 use crate::bitstream::{BitReader, bits_offset, val};
 use crate::decode::ImageRegion;
 use crate::entropy::{
-    AnsAliasTableProbe, AnsHistogramLogCountProbe, AnsHistogramPopulationProbe, AnsHistogramProbe,
-    AnsHistogramProbeKind, AnsHistogramProbeStage, AnsSymbolReader, ContextMapProbe,
-    ContextMapProbeKind, ContextMapProbeStage, ContextMapSymbolProbe, HistogramCodingProbeStage,
-    decode_context_map, decode_histograms, probe_decode_context_map, probe_decode_histograms,
+    AnsAliasTableProbe, AnsCode, AnsHistogramLogCountProbe, AnsHistogramPopulationProbe,
+    AnsHistogramProbe, AnsHistogramProbeKind, AnsHistogramProbeStage, AnsSymbolReader,
+    ContextMapProbe, ContextMapProbeKind, ContextMapProbeStage, ContextMapSymbolProbe,
+    HistogramCodingProbeStage, decode_context_map, decode_histograms, probe_decode_context_map,
+    probe_decode_histograms,
 };
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
@@ -621,6 +622,7 @@ pub struct VarDctAcGroupMetadata {
     pub histogram_selector_bits: usize,
     pub histogram_selector: Option<usize>,
     pub entropy_uses_prefix_code: Option<bool>,
+    pub coefficient_probe: Option<VarDctAcCoefficientProbe>,
     pub parse_error: Option<Error>,
 }
 
@@ -634,6 +636,21 @@ pub struct VarDctAcGroupCursorMetadata {
     pub ans_state_end_bits: Option<usize>,
     pub coefficient_stream_start_bits: Option<usize>,
     pub modular_ac_start_bits: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcCoefficientProbe {
+    pub block_x: usize,
+    pub block_y: usize,
+    pub channel: usize,
+    pub raw_strategy: usize,
+    pub order: usize,
+    pub block_context: usize,
+    pub nonzero_context: usize,
+    pub clustered_context: usize,
+    pub start_bits: usize,
+    pub end_bits: usize,
+    pub nzeros: u32,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1027,6 +1044,18 @@ pub fn read_vardct_decode_plan(
             read_vardct_ac_global_metadata(codestream, frame_header, payload, global, used_acs)
         })
         .transpose()?;
+    let ac_global_entropy = ac_global_payload
+        .as_ref()
+        .zip(global.as_ref())
+        .and_then(|(payload, global)| {
+            ac_global_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.parse_error.is_none().then_some((payload, global)))
+        })
+        .map(|(payload, global)| {
+            read_vardct_ac_global_entropy_tables(codestream, frame_header, payload, global)
+        })
+        .transpose()?;
     let ac_group_payloads = frame
         .ac_group_sections
         .iter()
@@ -1042,7 +1071,14 @@ pub fn read_vardct_decode_plan(
         .iter()
         .cloned()
         .map(|payload| {
-            read_vardct_ac_group_metadata(codestream, payload, ac_global_metadata.as_ref())
+            read_vardct_ac_group_metadata(
+                codestream,
+                payload,
+                global.as_ref(),
+                ac_global_metadata.as_ref(),
+                ac_global_entropy.as_deref(),
+                &dc_group_metadata,
+            )
         })
         .collect::<Result<Vec<_>>>()?;
     let modular_global_tree_payload_start_bits = global_payload
@@ -1132,7 +1168,10 @@ pub fn read_vardct_decode_plan(
 fn read_vardct_ac_group_metadata(
     codestream: &[u8],
     payload: VarDctPassGroupPayloadMetadata,
+    global: Option<&VarDctGlobalMetadata>,
     ac_global: Option<&VarDctAcGlobalMetadata>,
+    ac_global_entropy: Option<&[Option<VarDctAcPassEntropy>]>,
+    dc_groups: &[VarDctDcGroupMetadata],
 ) -> Result<VarDctAcGroupMetadata> {
     let bytes = codestream
         .get(payload.section.payload_range.clone())
@@ -1164,6 +1203,7 @@ fn read_vardct_ac_group_metadata(
         histogram_selector_bits,
         histogram_selector: None,
         entropy_uses_prefix_code,
+        coefficient_probe: None,
         parse_error: None,
     };
 
@@ -1191,18 +1231,53 @@ fn read_vardct_ac_group_metadata(
     match entropy_uses_prefix_code {
         Some(false) => {
             metadata.cursor.ans_state_start_bits = Some(reader.bits_consumed());
-            match reader.read_bits(32) {
-                Ok(_) => {
-                    metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
-                    metadata.cursor.coefficient_stream_start_bits = Some(reader.bits_consumed());
-                    metadata.parse_error =
-                        Some(Error::Unsupported("VarDCT AC coefficient stream decoding"));
-                }
-                Err(error) => {
-                    metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
-                    metadata.parse_error = Some(error);
-                }
-            }
+            match ac_global_entropy
+                .and_then(|passes| passes.get(metadata.payload.pass))
+                .and_then(Option::as_ref)
+            {
+                Some(entropy) => match AnsSymbolReader::new(entropy.code.clone(), &mut reader, 0) {
+                    Ok(mut symbol_reader) => {
+                        metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
+                        metadata.cursor.coefficient_stream_start_bits =
+                            Some(reader.bits_consumed());
+                        match probe_first_vardct_ac_coefficient(
+                            &mut reader,
+                            &mut symbol_reader,
+                            &entropy.context_map,
+                            &metadata,
+                            global,
+                            dc_groups,
+                        ) {
+                            Ok(probe) => {
+                                metadata.coefficient_probe = Some(probe);
+                                metadata.parse_error = Some(Error::Unsupported(
+                                    "VarDCT AC coefficient stream decoding",
+                                ));
+                            }
+                            Err(error) => {
+                                metadata.parse_error = Some(error);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
+                        metadata.parse_error = Some(error);
+                    }
+                },
+                None => match reader.read_bits(32) {
+                    Ok(_) => {
+                        metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
+                        metadata.cursor.coefficient_stream_start_bits =
+                            Some(reader.bits_consumed());
+                        metadata.parse_error =
+                            Some(Error::Unsupported("VarDCT AC entropy metadata"));
+                    }
+                    Err(error) => {
+                        metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
+                        metadata.parse_error = Some(error);
+                    }
+                },
+            };
         }
         Some(true) => {
             metadata.cursor.coefficient_stream_start_bits = Some(reader.bits_consumed());
@@ -1215,6 +1290,194 @@ fn read_vardct_ac_group_metadata(
     }
 
     Ok(metadata)
+}
+
+#[derive(Debug, Clone)]
+struct VarDctAcPassEntropy {
+    code: AnsCode,
+    context_map: Vec<u8>,
+}
+
+fn read_vardct_ac_global_entropy_tables(
+    codestream: &[u8],
+    frame_header: &FrameHeader,
+    payload: &VarDctSectionPayloadMetadata,
+    global: &VarDctGlobalMetadata,
+) -> Result<Vec<Option<VarDctAcPassEntropy>>> {
+    let bytes = codestream
+        .get(payload.payload_range.clone())
+        .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
+    let mut reader = BitReader::new(bytes);
+    let all_default_quant_matrices = reader.read_bool()?;
+    if !all_default_quant_matrices {
+        return Err(Error::Unsupported("custom VarDCT AC quant matrices"));
+    }
+    let num_histo_bits = ceil_log2_nonzero(frame_header.group_layout.num_groups as usize);
+    let num_histograms = reader.read_bits(num_histo_bits)? as usize + 1;
+    let mut passes = Vec::with_capacity(frame_header.passes.num_passes as usize);
+    for _pass in 0..frame_header.passes.num_passes as usize {
+        let used_orders =
+            reader.read_u32_selector(val(0x5f), val(0x13), val(0), bits_offset(13, 0))?;
+        read_vardct_coeff_orders(&mut reader, used_orders as u16).map_err(|error| error.error)?;
+        let histogram_contexts =
+            num_histograms * global.block_context_map.num_contexts * (37 + 458);
+        let (code, context_map) = decode_histograms(&mut reader, histogram_contexts, false)?;
+        passes.push(Some(VarDctAcPassEntropy { code, context_map }));
+    }
+    Ok(passes)
+}
+
+fn probe_first_vardct_ac_coefficient(
+    reader: &mut BitReader<'_>,
+    symbol_reader: &mut AnsSymbolReader,
+    context_map: &[u8],
+    metadata: &VarDctAcGroupMetadata,
+    global: Option<&VarDctGlobalMetadata>,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<VarDctAcCoefficientProbe> {
+    let global = global.ok_or(Error::Unsupported("VarDCT AC global metadata"))?;
+    let first_block = first_vardct_ac_block(metadata, dc_groups)
+        .ok_or(Error::Unsupported("VarDCT AC metadata grid"))?;
+    let order = *STRATEGY_ORDER
+        .get(first_block.raw_strategy)
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+    let block_context = vardct_block_context(&global.block_context_map, order, 1)?;
+    let nonzero_context =
+        vardct_nonzero_context(32, block_context, global.block_context_map.num_contexts);
+    let clustered_context = usize::from(
+        *context_map
+            .get(nonzero_context)
+            .ok_or(Error::InvalidCodestream("invalid AC entropy context"))?,
+    );
+    let start_bits = reader.bits_consumed();
+    let nzeros = symbol_reader.read_hybrid_uint_clustered(clustered_context, reader)?;
+    let end_bits = reader.bits_consumed();
+
+    Ok(VarDctAcCoefficientProbe {
+        block_x: first_block.block_x,
+        block_y: first_block.block_y,
+        channel: 1,
+        raw_strategy: first_block.raw_strategy,
+        order,
+        block_context,
+        nonzero_context,
+        clustered_context,
+        start_bits,
+        end_bits,
+        nzeros,
+    })
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VarDctFirstAcBlock {
+    block_x: usize,
+    block_y: usize,
+    raw_strategy: usize,
+}
+
+fn first_vardct_ac_block(
+    metadata: &VarDctAcGroupMetadata,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Option<VarDctFirstAcBlock> {
+    let dc_group = dc_groups.iter().find(|dc_group| {
+        let group = &dc_group.payload.group;
+        metadata.payload.group.x >= group.x
+            && metadata.payload.group.y >= group.y
+            && metadata.payload.group.x < group.x + group.width
+            && metadata.payload.group.y < group.y + group.height
+    })?;
+    let ac_metadata = dc_group.ac_metadata.as_ref()?;
+    let strategy_channel = ac_metadata
+        .channels
+        .iter()
+        .find(|channel| channel.channel_index == 2)?;
+    let count = strategy_channel.width as usize;
+    if strategy_channel.height != 2 || strategy_channel.samples.len() < count * 2 {
+        return None;
+    }
+
+    let grid_width = dc_group.payload.group.width.div_ceil(8) as usize;
+    let grid_height = dc_group.payload.group.height.div_ceil(8) as usize;
+    let group_min_x = ((metadata.payload.group.x - dc_group.payload.group.x) / 8) as usize;
+    let group_min_y = ((metadata.payload.group.y - dc_group.payload.group.y) / 8) as usize;
+    let group_max_x = group_min_x + metadata.payload.group.width.div_ceil(8).min(256 / 8) as usize;
+    let group_max_y = group_min_y + metadata.payload.group.height.div_ceil(8).min(256 / 8) as usize;
+    let mut valid = vec![false; grid_width * grid_height];
+    let mut cursor = 0usize;
+    for y in 0..grid_height {
+        for x in 0..grid_width {
+            let index = y * grid_width + x;
+            if valid[index] {
+                continue;
+            }
+            let raw_strategy = *strategy_channel.samples.get(cursor)? as usize;
+            let block_x = *STRATEGY_BLOCKS_X.get(raw_strategy)?;
+            let block_y = *STRATEGY_BLOCKS_Y.get(raw_strategy)?;
+            if x >= group_min_x && x < group_max_x && y >= group_min_y && y < group_max_y {
+                return Some(VarDctFirstAcBlock {
+                    block_x: x,
+                    block_y: y,
+                    raw_strategy,
+                });
+            }
+            for dy in 0..block_y {
+                for dx in 0..block_x {
+                    let covered_x = x + dx;
+                    let covered_y = y + dy;
+                    if covered_x < grid_width && covered_y < grid_height {
+                        valid[covered_y * grid_width + covered_x] = true;
+                    }
+                }
+            }
+            cursor += 1;
+            if cursor > count {
+                return None;
+            }
+        }
+    }
+    None
+}
+
+fn vardct_block_context(
+    block_context_map: &VarDctBlockContextMapMetadata,
+    order: usize,
+    channel: usize,
+) -> Result<usize> {
+    const DEFAULT_CONTEXT_MAP: [u8; 39] = [
+        0, 1, 2, 2, 3, 3, 4, 5, 6, 6, 6, 6, 6, 7, 8, 9, 9, 10, 11, 12, 13, 14, 14, 14, 14, 14, 7,
+        8, 9, 9, 10, 11, 12, 13, 14, 14, 14, 14, 14,
+    ];
+    if !block_context_map.dc_thresholds.iter().all(Vec::is_empty)
+        || !block_context_map.qf_thresholds.is_empty()
+    {
+        return Err(Error::Unsupported("non-default VarDCT AC block contexts"));
+    }
+    let mapped_channel = if channel < 2 { channel ^ 1 } else { 2 };
+    let index = mapped_channel * STRATEGY_ORDER_BUCKETS + order;
+    let context_map = block_context_map
+        .context_map_probe
+        .as_ref()
+        .map(|probe| probe.entries.as_slice())
+        .unwrap_or(&DEFAULT_CONTEXT_MAP);
+    context_map
+        .get(index)
+        .copied()
+        .map(usize::from)
+        .ok_or(Error::InvalidCodestream("invalid AC block context"))
+}
+
+fn vardct_nonzero_context(
+    predicted_nzeros: usize,
+    block_context: usize,
+    num_contexts: usize,
+) -> usize {
+    let clamped = predicted_nzeros.min(64);
+    let bucket = if clamped < 8 {
+        clamped
+    } else {
+        4 + clamped / 2
+    };
+    bucket * num_contexts + block_context
 }
 
 fn read_vardct_dc_group_metadata(
@@ -1537,6 +1800,7 @@ struct VarDctCoeffOrderError {
 
 const DCT_BLOCK_SIZE: usize = 64;
 const PERMUTATION_CONTEXTS: usize = 8;
+const STRATEGY_ORDER_BUCKETS: usize = 13;
 const STRATEGY_ORDER: [usize; 27] = [
     0, 1, 1, 1, 2, 3, 4, 4, 5, 5, 6, 6, 1, 1, 1, 1, 1, 1, 7, 8, 8, 9, 10, 10, 11, 12, 12,
 ];

@@ -549,6 +549,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         metadata.cursor.modular_ac_start_bits,
                         metadata.parse_error
                     );
+                    if let Some(probe) = &metadata.coefficient_probe {
+                        println!(
+                            "First frame VarDCT AC coeff probe: pass={} group={} block=({}, {}) channel={} strategy={} order={} block_ctx={} nzero_ctx={} clustered_ctx={} bits={}..{} nzeros={}",
+                            metadata.payload.pass,
+                            metadata.payload.group.group,
+                            probe.block_x,
+                            probe.block_y,
+                            probe.channel,
+                            probe.raw_strategy,
+                            probe.order,
+                            probe.block_context,
+                            probe.nonzero_context,
+                            probe.clustered_context,
+                            probe.start_bits,
+                            probe.end_bits,
+                            probe.nzeros
+                        );
+                    }
                 }
             }
             for group in &vardct.dc_groups {
