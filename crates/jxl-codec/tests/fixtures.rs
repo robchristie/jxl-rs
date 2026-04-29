@@ -573,6 +573,45 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         vec![0, 0, 0, 1, 2, 2, 2, 2, 0, 1, 3, 0, 3, 3, 3, 3]
     );
     assert_eq!(
+        plan.modular_global_tree_direct_residual_context_map_raw_entries,
+        vec![0, 0, 0, 1, 2, 2, 2, 2, 0, 1, 3, 0, 3, 3, 3, 3]
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_residual_context_map_symbol_entries
+            .iter()
+            .map(|entry| (
+                entry.index,
+                entry.start_bits,
+                entry.token_end_bits,
+                entry.end_bits,
+                entry.clustered_context,
+                entry.token,
+                entry.value,
+                entry.ans_state_before,
+                entry.ans_state_after_symbol,
+                entry.ans_state_after,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 524, 526, 526, 0, 0, 0, 0, 0, 0),
+            (1, 526, 528, 528, 0, 0, 0, 0, 0, 0),
+            (2, 528, 530, 530, 0, 0, 0, 0, 0, 0),
+            (3, 530, 532, 532, 0, 1, 1, 0, 0, 0),
+            (4, 532, 534, 534, 0, 2, 2, 0, 0, 0),
+            (5, 534, 536, 536, 0, 2, 2, 0, 0, 0),
+            (6, 536, 538, 538, 0, 2, 2, 0, 0, 0),
+            (7, 538, 540, 540, 0, 2, 2, 0, 0, 0),
+            (8, 540, 542, 542, 0, 0, 0, 0, 0, 0),
+            (9, 542, 544, 544, 0, 1, 1, 0, 0, 0),
+            (10, 544, 546, 546, 0, 3, 3, 0, 0, 0),
+            (11, 546, 548, 548, 0, 0, 0, 0, 0, 0),
+            (12, 548, 550, 550, 0, 3, 3, 0, 0, 0),
+            (13, 550, 552, 552, 0, 3, 3, 0, 0, 0),
+            (14, 552, 554, 554, 0, 3, 3, 0, 0, 0),
+            (15, 554, 556, 556, 0, 3, 3, 0, 0, 0),
+        ]
+    );
+    assert_eq!(
         plan.modular_global_tree_direct_residual_context_map_distinct_entries,
         vec![0, 1, 2, 3]
     );

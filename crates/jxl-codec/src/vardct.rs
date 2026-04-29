@@ -3,7 +3,8 @@ use crate::decode::ImageRegion;
 use crate::entropy::{
     AnsAliasTableProbe, AnsHistogramLogCountProbe, AnsHistogramPopulationProbe, AnsHistogramProbe,
     AnsHistogramProbeKind, AnsHistogramProbeStage, ContextMapProbe, ContextMapProbeKind,
-    ContextMapProbeStage, HistogramCodingProbeStage, decode_context_map, probe_decode_context_map,
+    ContextMapProbeStage, ContextMapSymbolProbe, HistogramCodingProbeStage, decode_context_map,
+    probe_decode_context_map,
 };
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
@@ -196,12 +197,46 @@ pub struct VarDctContextMapProbe {
     pub ans_start_bits: Option<usize>,
     pub ans_end_bits: Option<usize>,
     pub entries_decoded: usize,
+    pub entries: Vec<u8>,
+    pub raw_entries: Vec<u8>,
+    pub symbol_entries: Vec<VarDctContextMapSymbolProbe>,
     pub max_symbol: Option<u32>,
     pub num_histograms: Option<usize>,
     pub final_state_valid: Option<bool>,
     pub error_stage: Option<VarDctContextMapProbeStage>,
     pub error_bits: Option<usize>,
     pub error: Option<Error>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctContextMapSymbolProbe {
+    pub index: usize,
+    pub start_bits: usize,
+    pub token_end_bits: usize,
+    pub end_bits: usize,
+    pub clustered_context: usize,
+    pub token: usize,
+    pub value: u32,
+    pub ans_state_before: u32,
+    pub ans_state_after_symbol: u32,
+    pub ans_state_after: u32,
+}
+
+impl From<&ContextMapSymbolProbe> for VarDctContextMapSymbolProbe {
+    fn from(probe: &ContextMapSymbolProbe) -> Self {
+        Self {
+            index: probe.index,
+            start_bits: probe.start_bits,
+            token_end_bits: probe.token_end_bits,
+            end_bits: probe.end_bits,
+            clustered_context: probe.clustered_context,
+            token: probe.token,
+            value: probe.value,
+            ans_state_before: probe.ans_state_before,
+            ans_state_after_symbol: probe.ans_state_after_symbol,
+            ans_state_after: probe.ans_state_after,
+        }
+    }
 }
 
 impl From<&ContextMapProbe> for VarDctContextMapProbe {
@@ -225,6 +260,13 @@ impl From<&ContextMapProbe> for VarDctContextMapProbe {
             ans_start_bits: probe.ans_start_bits,
             ans_end_bits: probe.ans_end_bits,
             entries_decoded: probe.entries_decoded,
+            entries: probe.entries.clone(),
+            raw_entries: probe.raw_entries.clone(),
+            symbol_entries: probe
+                .symbol_entries
+                .iter()
+                .map(VarDctContextMapSymbolProbe::from)
+                .collect(),
             max_symbol: probe.max_symbol,
             num_histograms: probe.num_histograms,
             final_state_valid: probe.final_state_valid,
@@ -420,9 +462,12 @@ pub struct VarDctDecodePlan {
     pub modular_global_tree_direct_residual_context_count: Option<usize>,
     pub modular_global_tree_direct_residual_histogram_count: Option<usize>,
     pub modular_global_tree_direct_residual_context_map_entries: Vec<u8>,
+    pub modular_global_tree_direct_residual_context_map_raw_entries: Vec<u8>,
     pub modular_global_tree_direct_residual_context_map_distinct_entries: Vec<u8>,
     pub modular_global_tree_direct_residual_context_map_histogram_usage_counts: Vec<usize>,
     pub modular_global_tree_direct_residual_context_map_max_entry: Option<u8>,
+    pub modular_global_tree_direct_residual_context_map_symbol_entries:
+        Vec<VarDctContextMapSymbolProbe>,
     pub modular_global_tree_direct_residual_lz77_end_bits: Option<usize>,
     pub modular_global_tree_direct_residual_context_map_end_bits: Option<usize>,
     pub modular_global_tree_direct_residual_entropy_mode_end_bits: Option<usize>,
@@ -725,9 +770,11 @@ pub fn read_vardct_decode_plan(
         modular_global_tree_direct_residual_context_count,
         modular_global_tree_direct_residual_histogram_count,
         modular_global_tree_direct_residual_context_map_entries,
+        modular_global_tree_direct_residual_context_map_raw_entries,
         modular_global_tree_direct_residual_context_map_distinct_entries,
         modular_global_tree_direct_residual_context_map_histogram_usage_counts,
         modular_global_tree_direct_residual_context_map_max_entry,
+        modular_global_tree_direct_residual_context_map_symbol_entries,
         modular_global_tree_direct_residual_lz77_end_bits,
         modular_global_tree_direct_residual_context_map_end_bits,
         modular_global_tree_direct_residual_entropy_mode_end_bits,
@@ -760,9 +807,11 @@ pub fn read_vardct_decode_plan(
                 result.direct_residual_context_count,
                 result.direct_residual_histogram_count,
                 result.direct_residual_context_map_entries,
+                result.direct_residual_context_map_raw_entries,
                 result.direct_residual_context_map_distinct_entries,
                 result.direct_residual_context_map_histogram_usage_counts,
                 result.direct_residual_context_map_max_entry,
+                result.direct_residual_context_map_symbol_entries,
                 result.direct_residual_lz77_end_bits,
                 result.direct_residual_context_map_end_bits,
                 result.direct_residual_entropy_mode_end_bits,
@@ -790,7 +839,9 @@ pub fn read_vardct_decode_plan(
                 Vec::new(),
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
                 None,
+                Vec::new(),
                 None,
                 None,
                 None,
@@ -819,7 +870,9 @@ pub fn read_vardct_decode_plan(
             Vec::new(),
             Vec::new(),
             Vec::new(),
+            Vec::new(),
             None,
+            Vec::new(),
             None,
             None,
             None,
@@ -930,9 +983,11 @@ pub fn read_vardct_decode_plan(
         modular_global_tree_direct_residual_context_count,
         modular_global_tree_direct_residual_histogram_count,
         modular_global_tree_direct_residual_context_map_entries,
+        modular_global_tree_direct_residual_context_map_raw_entries,
         modular_global_tree_direct_residual_context_map_distinct_entries,
         modular_global_tree_direct_residual_context_map_histogram_usage_counts,
         modular_global_tree_direct_residual_context_map_max_entry,
+        modular_global_tree_direct_residual_context_map_symbol_entries,
         modular_global_tree_direct_residual_lz77_end_bits,
         modular_global_tree_direct_residual_context_map_end_bits,
         modular_global_tree_direct_residual_entropy_mode_end_bits,
@@ -1055,9 +1110,11 @@ fn read_vardct_modular_global_tree(
             direct_residual_context_count: None,
             direct_residual_histogram_count: None,
             direct_residual_context_map_entries: Vec::new(),
+            direct_residual_context_map_raw_entries: Vec::new(),
             direct_residual_context_map_distinct_entries: Vec::new(),
             direct_residual_context_map_histogram_usage_counts: Vec::new(),
             direct_residual_context_map_max_entry: None,
+            direct_residual_context_map_symbol_entries: Vec::new(),
             direct_residual_lz77_end_bits: None,
             direct_residual_context_map_end_bits: None,
             direct_residual_entropy_mode_end_bits: None,
@@ -1099,6 +1156,11 @@ fn read_vardct_modular_global_tree(
                             .as_ref()
                             .map(|probe| probe.context_map_entries.clone())
                             .unwrap_or_default(),
+                        direct_residual_context_map_raw_entries: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .map(|probe| probe.context_map_raw_entries.clone())
+                            .unwrap_or_default(),
                         direct_residual_context_map_distinct_entries: direct_probe
                             .residual_histogram_probe
                             .as_ref()
@@ -1113,6 +1175,17 @@ fn read_vardct_modular_global_tree(
                             .residual_histogram_probe
                             .as_ref()
                             .and_then(|probe| probe.context_map_max_entry),
+                        direct_residual_context_map_symbol_entries: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .map(|probe| {
+                                probe
+                                    .context_map_symbol_entries
+                                    .iter()
+                                    .map(VarDctContextMapSymbolProbe::from)
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
                         direct_residual_lz77_end_bits: direct_probe
                             .residual_histogram_probe
                             .as_ref()
@@ -1186,9 +1259,11 @@ struct VarDctModularGlobalTreeRead {
     direct_residual_context_count: Option<usize>,
     direct_residual_histogram_count: Option<usize>,
     direct_residual_context_map_entries: Vec<u8>,
+    direct_residual_context_map_raw_entries: Vec<u8>,
     direct_residual_context_map_distinct_entries: Vec<u8>,
     direct_residual_context_map_histogram_usage_counts: Vec<usize>,
     direct_residual_context_map_max_entry: Option<u8>,
+    direct_residual_context_map_symbol_entries: Vec<VarDctContextMapSymbolProbe>,
     direct_residual_lz77_end_bits: Option<usize>,
     direct_residual_context_map_end_bits: Option<usize>,
     direct_residual_entropy_mode_end_bits: Option<usize>,

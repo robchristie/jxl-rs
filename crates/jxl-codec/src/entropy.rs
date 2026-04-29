@@ -241,9 +241,11 @@ pub(crate) struct HistogramCodingProbe {
     pub context_count: Option<usize>,
     pub num_histograms: Option<usize>,
     pub context_map_entries: Vec<u8>,
+    pub context_map_raw_entries: Vec<u8>,
     pub context_map_distinct_entries: Vec<u8>,
     pub context_map_histogram_usage_counts: Vec<usize>,
     pub context_map_max_entry: Option<u8>,
+    pub context_map_symbol_entries: Vec<ContextMapSymbolProbe>,
     pub use_prefix_code: Option<bool>,
     pub log_alpha_size: Option<usize>,
     pub ans_histograms: Vec<AnsHistogramProbe>,
@@ -284,12 +286,29 @@ pub(crate) struct ContextMapProbe {
     pub ans_start_bits: Option<usize>,
     pub ans_end_bits: Option<usize>,
     pub entries_decoded: usize,
+    pub entries: Vec<u8>,
+    pub raw_entries: Vec<u8>,
+    pub symbol_entries: Vec<ContextMapSymbolProbe>,
     pub max_symbol: Option<u32>,
     pub num_histograms: Option<usize>,
     pub final_state_valid: Option<bool>,
     pub error_stage: Option<ContextMapProbeStage>,
     pub error_bits: Option<usize>,
     pub error: Option<Error>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ContextMapSymbolProbe {
+    pub index: usize,
+    pub start_bits: usize,
+    pub token_end_bits: usize,
+    pub end_bits: usize,
+    pub clustered_context: usize,
+    pub token: usize,
+    pub value: u32,
+    pub ans_state_before: u32,
+    pub ans_state_after_symbol: u32,
+    pub ans_state_after: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -535,6 +554,47 @@ impl AnsSymbolReader {
         Ok(value)
     }
 
+    fn probe_read_hybrid_uint_clustered(
+        &mut self,
+        context: usize,
+        reader: &mut BitReader<'_>,
+    ) -> Result<ContextMapSymbolProbe> {
+        if self.code.lz77.enabled && self.num_to_copy > 0 {
+            return Err(Error::InvalidCodestream(
+                "context-map symbol trace does not support LZ77 copies",
+            ));
+        }
+
+        let start_bits = reader.bits_consumed();
+        let ans_state_before = self.state;
+        let token = self.read_symbol(context, reader)?;
+        let token_end_bits = reader.bits_consumed();
+        let ans_state_after_symbol = self.state;
+        if self.code.lz77.enabled && token >= self.lz77_threshold {
+            return Err(Error::InvalidCodestream(
+                "context-map symbol trace does not support LZ77 runs",
+            ));
+        }
+        let value = self.code.uint_config[context].decode_token(token, reader)?;
+        let end_bits = reader.bits_consumed();
+        if let Some(window) = self.lz77_window.as_mut() {
+            window[self.num_decoded & WINDOW_MASK] = value;
+            self.num_decoded += 1;
+        }
+        Ok(ContextMapSymbolProbe {
+            index: 0,
+            start_bits,
+            token_end_bits,
+            end_bits,
+            clustered_context: context,
+            token,
+            value,
+            ans_state_before,
+            ans_state_after_symbol,
+            ans_state_after: self.state,
+        })
+    }
+
     fn copy_from_lz77_window(&mut self) -> u32 {
         let window = self
             .lz77_window
@@ -723,6 +783,7 @@ pub(crate) fn probe_decode_histograms(
     }
 
     let mut context_map = vec![0; context_count];
+    let context_map_probe_start = reader.clone();
     let num_histograms = if context_count > 1 {
         match decode_context_map(reader, &mut context_map) {
             Ok(num_histograms) => num_histograms,
@@ -738,7 +799,24 @@ pub(crate) fn probe_decode_histograms(
         1
     };
     let context_map_end_bits = Some(reader.bits_consumed());
+    let context_map_probe = if context_count > 1 {
+        let mut context_map_probe_reader = context_map_probe_start;
+        Some(probe_decode_context_map(
+            &mut context_map_probe_reader,
+            context_count,
+        ))
+    } else {
+        None
+    };
     let context_map_entries = context_map.clone();
+    let context_map_raw_entries = context_map_probe
+        .as_ref()
+        .map(|probe| probe.raw_entries.clone())
+        .unwrap_or_else(|| context_map_entries.clone());
+    let context_map_symbol_entries = context_map_probe
+        .as_ref()
+        .map(|probe| probe.symbol_entries.clone())
+        .unwrap_or_default();
     let context_map_distinct_entries = distinct_context_map_entries(&context_map_entries);
     let context_map_histogram_usage_counts =
         context_map_histogram_usage_counts(&context_map_entries, num_histograms);
@@ -930,10 +1008,12 @@ pub(crate) fn probe_decode_histograms(
                         context_count: Some(context_count),
                         num_histograms: Some(num_histograms),
                         context_map_entries: context_map_entries.clone(),
+                        context_map_raw_entries: context_map_raw_entries.clone(),
                         context_map_distinct_entries: context_map_distinct_entries.clone(),
                         context_map_histogram_usage_counts: context_map_histogram_usage_counts
                             .clone(),
                         context_map_max_entry,
+                        context_map_symbol_entries: context_map_symbol_entries.clone(),
                         use_prefix_code: Some(use_prefix_code),
                         log_alpha_size: Some(log_alpha_size),
                         ans_histograms,
@@ -958,9 +1038,11 @@ pub(crate) fn probe_decode_histograms(
                     context_count: Some(context_count),
                     num_histograms: Some(num_histograms),
                     context_map_entries: context_map_entries.clone(),
+                    context_map_raw_entries: context_map_raw_entries.clone(),
                     context_map_distinct_entries: context_map_distinct_entries.clone(),
                     context_map_histogram_usage_counts: context_map_histogram_usage_counts.clone(),
                     context_map_max_entry,
+                    context_map_symbol_entries: context_map_symbol_entries.clone(),
                     use_prefix_code: Some(use_prefix_code),
                     log_alpha_size: Some(log_alpha_size),
                     ans_histograms,
@@ -989,9 +1071,11 @@ pub(crate) fn probe_decode_histograms(
                     context_count: Some(context_count),
                     num_histograms: Some(num_histograms),
                     context_map_entries: context_map_entries.clone(),
+                    context_map_raw_entries: context_map_raw_entries.clone(),
                     context_map_distinct_entries: context_map_distinct_entries.clone(),
                     context_map_histogram_usage_counts: context_map_histogram_usage_counts.clone(),
                     context_map_max_entry,
+                    context_map_symbol_entries: context_map_symbol_entries.clone(),
                     use_prefix_code: Some(use_prefix_code),
                     log_alpha_size: Some(log_alpha_size),
                     ans_histograms,
@@ -1018,9 +1102,11 @@ pub(crate) fn probe_decode_histograms(
             context_count: Some(context_count),
             num_histograms: Some(num_histograms),
             context_map_entries: context_map_entries.clone(),
+            context_map_raw_entries: context_map_raw_entries.clone(),
             context_map_distinct_entries: context_map_distinct_entries.clone(),
             context_map_histogram_usage_counts: context_map_histogram_usage_counts.clone(),
             context_map_max_entry,
+            context_map_symbol_entries: context_map_symbol_entries.clone(),
             use_prefix_code: Some(use_prefix_code),
             log_alpha_size: Some(log_alpha_size),
             ans_histograms,
@@ -1042,9 +1128,11 @@ pub(crate) fn probe_decode_histograms(
         context_count: Some(context_count),
         num_histograms: Some(num_histograms),
         context_map_entries,
+        context_map_raw_entries,
         context_map_distinct_entries,
         context_map_histogram_usage_counts,
         context_map_max_entry,
+        context_map_symbol_entries,
         use_prefix_code: Some(use_prefix_code),
         log_alpha_size: Some(log_alpha_size),
         ans_histograms: Vec::new(),
@@ -1071,9 +1159,11 @@ fn histogram_probe_error(
         context_count: None,
         num_histograms: None,
         context_map_entries: Vec::new(),
+        context_map_raw_entries: Vec::new(),
         context_map_distinct_entries: Vec::new(),
         context_map_histogram_usage_counts: Vec::new(),
         context_map_max_entry: None,
+        context_map_symbol_entries: Vec::new(),
         use_prefix_code: None,
         log_alpha_size: None,
         ans_histograms: Vec::new(),
@@ -1159,6 +1249,9 @@ pub(crate) fn probe_decode_context_map(reader: &mut BitReader<'_>, len: usize) -
         ans_start_bits: None,
         ans_end_bits: None,
         entries_decoded: 0,
+        entries: Vec::new(),
+        raw_entries: Vec::new(),
+        symbol_entries: Vec::new(),
         max_symbol: None,
         num_histograms: None,
         final_state_valid: None,
@@ -1192,9 +1285,24 @@ pub(crate) fn probe_decode_context_map(reader: &mut BitReader<'_>, len: usize) -
         if bits_per_entry == 0 {
             context_map.fill(0);
             probe.entries_decoded = len;
+            for index in 0..len {
+                probe.symbol_entries.push(ContextMapSymbolProbe {
+                    index,
+                    start_bits: reader.bits_consumed(),
+                    token_end_bits: reader.bits_consumed(),
+                    end_bits: reader.bits_consumed(),
+                    clustered_context: 0,
+                    token: 0,
+                    value: 0,
+                    ans_state_before: 0,
+                    ans_state_after_symbol: 0,
+                    ans_state_after: 0,
+                });
+            }
         } else {
-            for entry in context_map.iter_mut() {
-                *entry = match reader.read_bits(bits_per_entry) {
+            for (index, entry) in context_map.iter_mut().enumerate() {
+                let entry_start_bits = reader.bits_consumed();
+                let value = match reader.read_bits(bits_per_entry) {
                     Ok(bits) => bits as u8,
                     Err(error) => {
                         probe_context_map_error(
@@ -1206,9 +1314,23 @@ pub(crate) fn probe_decode_context_map(reader: &mut BitReader<'_>, len: usize) -
                         return probe;
                     }
                 };
+                *entry = value;
+                probe.symbol_entries.push(ContextMapSymbolProbe {
+                    index,
+                    start_bits: entry_start_bits,
+                    token_end_bits: reader.bits_consumed(),
+                    end_bits: reader.bits_consumed(),
+                    clustered_context: 0,
+                    token: usize::from(value),
+                    value: u32::from(value),
+                    ans_state_before: 0,
+                    ans_state_after_symbol: 0,
+                    ans_state_after: 0,
+                });
                 probe.entries_decoded += 1;
             }
         }
+        probe.raw_entries = context_map.clone();
     } else {
         probe.kind = Some(ContextMapProbeKind::EntropyCoded);
         let use_mtf = match reader.read_bool() {
@@ -1253,19 +1375,35 @@ pub(crate) fn probe_decode_context_map(reader: &mut BitReader<'_>, len: usize) -
         };
         probe.ans_start_bits = Some(reader.bits_consumed());
         let mut max_symbol = 0;
-        for entry in context_map.iter_mut() {
-            let symbol = match symbol_reader.read_hybrid_uint(0, reader, &nested_context_map) {
-                Ok(symbol) => symbol,
-                Err(error) => {
+        for (index, entry) in context_map.iter_mut().enumerate() {
+            let clustered_context = match nested_context_map.first() {
+                Some(context) => usize::from(*context),
+                None => {
                     probe_context_map_error(
                         &mut probe,
                         reader,
                         ContextMapProbeStage::Symbol,
-                        error,
+                        Error::InvalidCodestream("invalid entropy context"),
                     );
                     return probe;
                 }
             };
+            let mut symbol_probe =
+                match symbol_reader.probe_read_hybrid_uint_clustered(clustered_context, reader) {
+                    Ok(symbol_probe) => symbol_probe,
+                    Err(error) => {
+                        probe_context_map_error(
+                            &mut probe,
+                            reader,
+                            ContextMapProbeStage::Symbol,
+                            error,
+                        );
+                        return probe;
+                    }
+                };
+            symbol_probe.index = index;
+            let symbol = symbol_probe.value;
+            probe.symbol_entries.push(symbol_probe);
             if symbol >= 256 {
                 probe.max_symbol = Some(max_symbol.max(symbol));
                 probe_context_map_error(
@@ -1280,6 +1418,7 @@ pub(crate) fn probe_decode_context_map(reader: &mut BitReader<'_>, len: usize) -
             *entry = symbol as u8;
             probe.entries_decoded += 1;
         }
+        probe.raw_entries = context_map.clone();
         probe.max_symbol = Some(max_symbol);
         let final_state_valid = symbol_reader.check_final_state();
         probe.final_state_valid = Some(final_state_valid);
@@ -1306,6 +1445,8 @@ pub(crate) fn probe_decode_context_map(reader: &mut BitReader<'_>, len: usize) -
             return probe;
         }
     }
+
+    probe.entries = context_map.clone();
 
     let num_histograms = usize::from(*context_map.iter().max().unwrap_or(&0)) + 1;
     if let Err(error) = verify_context_map(&context_map, num_histograms) {
