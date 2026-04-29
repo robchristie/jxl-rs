@@ -420,9 +420,10 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     let _ = std::fs::remove_file(&reference_output);
 
     let encoded_bytes = std::fs::read(&encoded).unwrap();
-    let _ = std::fs::remove_file(&encoded);
     let (_, codestream) = parse_file(&encoded_bytes).unwrap();
     let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+    compare_reference_vardct_trace(&encoded, plan);
+    let _ = std::fs::remove_file(&encoded);
 
     assert!(
         !plan.frame.is_combined,
@@ -1516,6 +1517,103 @@ fn reference_cjxl() -> Option<PathBuf> {
 
     let default = workspace_path("reference/libjxl/build-rs-oracle/tools/cjxl");
     default.is_file().then_some(default)
+}
+
+fn reference_vardct_trace() -> Option<PathBuf> {
+    let path = std::env::var("JXL_RS_REFERENCE_TRACE").ok()?;
+    let path = PathBuf::from(path);
+    path.is_file().then_some(path)
+}
+
+fn compare_reference_vardct_trace(encoded: &Path, plan: &jxl_codec::VarDctDecodePlan) {
+    let Some(trace) = reference_vardct_trace() else {
+        eprintln!(
+            "skipping split VarDCT internal trace comparison; set JXL_RS_REFERENCE_TRACE to a trace tool"
+        );
+        return;
+    };
+
+    let output = Command::new(&trace).arg(encoded).output().unwrap();
+    assert!(
+        output.status.success(),
+        "reference trace failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8(output.stdout).expect("reference trace output was not UTF-8");
+
+    assert_trace_field(
+        &stdout,
+        "global_tree_bits",
+        &format!(
+            "{}..{}",
+            plan.modular_global_tree_direct_start_bits.unwrap(),
+            plan.modular_global_tree_direct_tree_end_bits.unwrap()
+        ),
+    );
+    assert_trace_field(
+        &stdout,
+        "residual_contexts",
+        &plan
+            .modular_global_tree_direct_residual_context_count
+            .unwrap()
+            .to_string(),
+    );
+    assert_trace_field(
+        &stdout,
+        "residual_context_map",
+        &join_u8(&plan.modular_global_tree_direct_residual_context_map_entries),
+    );
+    assert_trace_field(
+        &stdout,
+        "residual_histograms",
+        &plan
+            .modular_global_tree_direct_residual_histogram_count
+            .unwrap()
+            .to_string(),
+    );
+    assert_trace_field(
+        &stdout,
+        "residual_histogram_bits",
+        &plan
+            .modular_global_tree_direct_residual_ans_histograms
+            .iter()
+            .map(|histogram| {
+                let end = histogram
+                    .end_bits
+                    .or(histogram.error_bits)
+                    .unwrap_or(histogram.start_bits);
+                format!("{}..{}", histogram.start_bits, end)
+            })
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    assert_trace_field(
+        &stdout,
+        "residual_histogram_error",
+        &format!(
+            "{}@{}",
+            plan.modular_global_tree_direct_residual_failed_histogram_index
+                .unwrap(),
+            plan.modular_global_tree_direct_error_bits.unwrap()
+        ),
+    );
+}
+
+fn assert_trace_field(stdout: &str, key: &str, expected: &str) {
+    let prefix = format!("{key}=");
+    let actual = stdout
+        .lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("reference trace did not emit {key}=...; output:\n{stdout}"));
+    assert_eq!(actual.trim(), expected, "reference trace field {key}");
+}
+
+fn join_u8(values: &[u8]) -> String {
+    values
+        .iter()
+        .map(u8::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn unique_temp_path(prefix: &str, extension: &str) -> PathBuf {
