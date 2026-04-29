@@ -1076,6 +1076,19 @@ mod tests {
         assert_eq!(decoded.alpha, None);
         assert_eq!(decoded.bit_depth, 8);
         assert_eq!(decoded_samples_u16(&decoded), reference.samples);
+
+        let roi = Rect {
+            x: 19,
+            y: 23,
+            width: 37,
+            height: 29,
+        };
+        let full_channels = decode_channels(&encoded_bytes).unwrap();
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_channels(&roi_channels, &full_channels, roi);
     }
 
     #[test]

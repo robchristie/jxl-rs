@@ -346,17 +346,20 @@ pub fn read_modular_frame_metadata(
 
     let plan = read_modular_decode_plan(codestream, metadata, frame_header, frame_data)?;
     let region = config.region.map(ImageRect::from);
+    let decode_region = region.map(|region| modular_region_dependency_rect(&plan, region));
     let residuals = decode_modular_residuals(
         codestream,
         frame_header,
         frame_data,
         &plan,
         ModularGroupExecutor::from(config.modular_group_execution),
-        region,
+        decode_region,
     )
     .ok();
     let image = residuals.as_ref().and_then(|residuals| match region {
-        Some(region) => assemble_modular_image_region(&plan, residuals, region).ok(),
+        Some(region) => {
+            assemble_modular_image_region(&plan, residuals, region, decode_region?).ok()
+        }
         None => assemble_modular_image(&plan, residuals).ok(),
     });
     let ModularDecodePlan {
@@ -872,13 +875,20 @@ fn assemble_modular_image_region(
     plan: &ModularDecodePlan,
     residuals: &ModularResiduals,
     rect: ImageRect,
+    decode_rect: ImageRect,
 ) -> Result<ModularImage> {
+    let has_squeeze = plan
+        .global
+        .group_header
+        .transforms
+        .iter()
+        .any(|transform| transform.id == TransformId::Squeeze);
     if plan
         .global
         .group_header
         .transforms
         .iter()
-        .any(|transform| !matches!(transform.id, TransformId::Palette | TransformId::Rct))
+        .any(|transform| !modular_region_transform_supported(transform))
     {
         return Err(Error::Unsupported(
             "modular region assembly with transforms",
@@ -896,16 +906,37 @@ fn assemble_modular_image_region(
     if rect_right > plan.channel_plan.width || rect_bottom > plan.channel_plan.height {
         return Err(Error::InvalidCodestream("modular region is outside image"));
     }
+    let Some(decode_rect_right) = decode_rect.x.checked_add(decode_rect.width) else {
+        return Err(Error::InvalidCodestream("modular region overflow"));
+    };
+    let Some(decode_rect_bottom) = decode_rect.y.checked_add(decode_rect.height) else {
+        return Err(Error::InvalidCodestream("modular region overflow"));
+    };
+    if decode_rect.x > rect.x
+        || decode_rect.y > rect.y
+        || decode_rect_right < rect_right
+        || decode_rect_bottom < rect_bottom
+    {
+        return Err(Error::InvalidCodestream(
+            "modular dependency region misses requested region",
+        ));
+    }
+
+    let channel_regions = modular_region_channel_rects(&plan.channel_plan, decode_rect)?;
     if plan
         .channel_plan
         .channels
         .iter()
+        .zip(&channel_regions)
         .skip(plan.channel_plan.nb_meta_channels)
-        .any(|channel| {
-            channel.hshift != 0
-                || channel.vshift != 0
-                || channel.width != plan.channel_plan.width
-                || channel.height != plan.channel_plan.height
+        .any(|(channel, region)| {
+            (!has_squeeze
+                && (channel.hshift != 0
+                    || channel.vshift != 0
+                    || channel.width != plan.channel_plan.width
+                    || channel.height != plan.channel_plan.height))
+                || region.width == 0
+                || region.height == 0
         })
     {
         return Err(Error::Unsupported(
@@ -918,11 +949,12 @@ fn assemble_modular_image_region(
         .channels
         .iter()
         .enumerate()
-        .map(|(index, channel)| {
+        .zip(&channel_regions)
+        .map(|((index, channel), region)| {
             let (width, height) = if index < plan.channel_plan.nb_meta_channels {
                 (channel.width, channel.height)
             } else {
-                (rect.width, rect.height)
+                (region.width, region.height)
             };
             let samples = channel_sample_count(width, height).map(|count| vec![0; count])?;
             Ok(ModularImageChannel {
@@ -937,7 +969,7 @@ fn assemble_modular_image_region(
         copy_decoded_group_region(
             &mut channels,
             global,
-            rect,
+            &channel_regions,
             plan.channel_plan.nb_meta_channels,
         )?;
     }
@@ -945,19 +977,102 @@ fn assemble_modular_image_region(
         copy_decoded_group_region(
             &mut channels,
             group,
-            rect,
+            &channel_regions,
             plan.channel_plan.nb_meta_channels,
         )?;
     }
 
-    inverse_transforms(
-        &region_channel_plan(plan, rect),
+    let image = inverse_transforms(
+        &region_channel_plan(plan, decode_rect, &channel_regions),
         &plan.global.group_header,
         channels,
-    )
+    )?;
+    crop_modular_image(image, decode_rect, rect)
 }
 
-fn region_channel_plan(plan: &ModularDecodePlan, rect: ImageRect) -> ModularChannelPlan {
+fn modular_region_transform_supported(transform: &ModularTransform) -> bool {
+    match transform.id {
+        TransformId::Palette | TransformId::Rct => true,
+        TransformId::Squeeze => !transform.squeezes.is_empty(),
+    }
+}
+
+fn modular_region_dependency_rect(plan: &ModularDecodePlan, rect: ImageRect) -> ImageRect {
+    if plan
+        .global
+        .group_header
+        .transforms
+        .iter()
+        .any(|transform| transform.id == TransformId::Squeeze)
+    {
+        return ImageRect {
+            x: 0,
+            y: 0,
+            width: plan.channel_plan.width,
+            height: plan.channel_plan.height,
+        };
+    }
+    rect
+}
+
+fn modular_region_channel_rects(
+    channel_plan: &ModularChannelPlan,
+    rect: ImageRect,
+) -> Result<Vec<ImageRect>> {
+    channel_plan
+        .channels
+        .iter()
+        .enumerate()
+        .map(|(index, channel)| {
+            if index < channel_plan.nb_meta_channels {
+                Ok(ImageRect {
+                    x: 0,
+                    y: 0,
+                    width: channel.width,
+                    height: channel.height,
+                })
+            } else {
+                shifted_channel_region(channel, rect)
+            }
+        })
+        .collect()
+}
+
+fn shifted_channel_region(channel: &ModularChannel, rect: ImageRect) -> Result<ImageRect> {
+    if channel.hshift < 0 || channel.vshift < 0 {
+        return Err(Error::Unsupported(
+            "modular region assembly with shifted channels",
+        ));
+    }
+    let Some(right) = rect.x.checked_add(rect.width) else {
+        return Err(Error::InvalidCodestream("modular region overflow"));
+    };
+    let Some(bottom) = rect.y.checked_add(rect.height) else {
+        return Err(Error::InvalidCodestream("modular region overflow"));
+    };
+    let hscale = 1u32
+        .checked_shl(channel.hshift as u32)
+        .ok_or(Error::InvalidCodestream("invalid modular channel shift"))?;
+    let vscale = 1u32
+        .checked_shl(channel.vshift as u32)
+        .ok_or(Error::InvalidCodestream("invalid modular channel shift"))?;
+    let x = rect.x / hscale;
+    let y = rect.y / vscale;
+    let channel_right = right.div_ceil(hscale).min(channel.width);
+    let channel_bottom = bottom.div_ceil(vscale).min(channel.height);
+    Ok(ImageRect {
+        x,
+        y,
+        width: channel_right.saturating_sub(x),
+        height: channel_bottom.saturating_sub(y),
+    })
+}
+
+fn region_channel_plan(
+    plan: &ModularDecodePlan,
+    rect: ImageRect,
+    channel_regions: &[ImageRect],
+) -> ModularChannelPlan {
     ModularChannelPlan {
         width: rect.width,
         height: rect.height,
@@ -968,11 +1083,12 @@ fn region_channel_plan(plan: &ModularDecodePlan, rect: ImageRect) -> ModularChan
             .channels
             .iter()
             .enumerate()
-            .map(|(index, channel)| {
+            .zip(channel_regions)
+            .map(|((index, channel), region)| {
                 let (width, height) = if index < plan.channel_plan.nb_meta_channels {
                     (channel.width, channel.height)
                 } else {
-                    (rect.width, rect.height)
+                    (region.width, region.height)
                 };
                 ModularChannel {
                     width,
@@ -984,6 +1100,50 @@ fn region_channel_plan(plan: &ModularDecodePlan, rect: ImageRect) -> ModularChan
             })
             .collect(),
     }
+}
+
+fn crop_modular_image(
+    image: ModularImage,
+    source_rect: ImageRect,
+    target_rect: ImageRect,
+) -> Result<ModularImage> {
+    if source_rect == target_rect {
+        return Ok(image);
+    }
+    let x = target_rect
+        .x
+        .checked_sub(source_rect.x)
+        .ok_or(Error::InvalidCodestream("invalid modular crop region"))? as usize;
+    let y = target_rect
+        .y
+        .checked_sub(source_rect.y)
+        .ok_or(Error::InvalidCodestream("invalid modular crop region"))? as usize;
+    let width = target_rect.width as usize;
+    let height = target_rect.height as usize;
+    let mut channels = Vec::with_capacity(image.channels.len());
+    for channel in image.channels {
+        if channel.width != source_rect.width || channel.height != source_rect.height {
+            return Err(Error::Unsupported(
+                "modular region assembly with shifted channels",
+            ));
+        }
+        let source_width = channel.width as usize;
+        let mut samples = Vec::with_capacity(width * height);
+        for row in y..y + height {
+            let start = row * source_width + x;
+            samples.extend_from_slice(&channel.samples[start..start + width]);
+        }
+        channels.push(ModularImageChannel {
+            width: target_rect.width,
+            height: target_rect.height,
+            samples,
+        });
+    }
+    Ok(ModularImage {
+        width: target_rect.width,
+        height: target_rect.height,
+        channels,
+    })
 }
 
 fn copy_decoded_group(
@@ -1034,12 +1194,15 @@ fn copy_decoded_channel(
 fn copy_decoded_group_region(
     channels: &mut [ModularImageChannel],
     group: &ModularDecodedGroup,
-    rect: ImageRect,
+    channel_regions: &[ImageRect],
     nb_meta_channels: usize,
 ) -> Result<()> {
     for decoded in &group.channels {
         let dst = channels
             .get_mut(decoded.channel_index)
+            .ok_or(Error::InvalidCodestream("invalid modular decoded channel"))?;
+        let rect = *channel_regions
+            .get(decoded.channel_index)
             .ok_or(Error::InvalidCodestream("invalid modular decoded channel"))?;
         if decoded.channel_index < nb_meta_channels {
             copy_decoded_channel(dst, decoded)?;
@@ -2860,8 +3023,8 @@ mod tests {
             groups: vec![decoded_group(10, 0, 0, 8, 4, &[0, 1, 2, 3, 4, 5, 6, 7])],
         };
 
-        let image =
-            assemble_modular_image_region(&plan, &residuals, image_rect(2, 1, 3, 2)).unwrap();
+        let region = image_rect(2, 1, 3, 2);
+        let image = assemble_modular_image_region(&plan, &residuals, region, region).unwrap();
 
         assert_eq!(image.width, 3);
         assert_eq!(image.height, 2);
@@ -2880,8 +3043,8 @@ mod tests {
             ],
         };
 
-        let image =
-            assemble_modular_image_region(&plan, &residuals, image_rect(2, 0, 4, 2)).unwrap();
+        let region = image_rect(2, 0, 4, 2);
+        let image = assemble_modular_image_region(&plan, &residuals, region, region).unwrap();
 
         assert_eq!(image.width, 4);
         assert_eq!(image.height, 2);
@@ -2907,8 +3070,8 @@ mod tests {
             }],
         };
 
-        let image =
-            assemble_modular_image_region(&plan, &residuals, image_rect(1, 0, 2, 2)).unwrap();
+        let region = image_rect(1, 0, 2, 2);
+        let image = assemble_modular_image_region(&plan, &residuals, region, region).unwrap();
 
         assert_eq!(image.channels[0].samples, vec![1, 2, 5, 6]);
         assert_eq!(image.channels[1].samples, vec![11, 12, 15, 16]);
@@ -2924,7 +3087,12 @@ mod tests {
         };
 
         assert_eq!(
-            assemble_modular_image_region(&plan, &residuals, image_rect(0, 0, 4, 4)),
+            assemble_modular_image_region(
+                &plan,
+                &residuals,
+                image_rect(0, 0, 4, 4),
+                image_rect(0, 0, 4, 4)
+            ),
             Err(Error::Unsupported(
                 "modular region assembly with shifted channels"
             ))
@@ -2958,8 +3126,8 @@ mod tests {
             }],
         };
 
-        let image =
-            assemble_modular_image_region(&plan, &residuals, image_rect(1, 0, 2, 1)).unwrap();
+        let region = image_rect(1, 0, 2, 1);
+        let image = assemble_modular_image_region(&plan, &residuals, region, region).unwrap();
 
         assert_eq!(image.channels.len(), 3);
         assert_eq!(image.channels[0].samples, vec![26, 37]);
@@ -3019,8 +3187,8 @@ mod tests {
             }],
         };
 
-        let image =
-            assemble_modular_image_region(&plan, &residuals, image_rect(1, 0, 2, 2)).unwrap();
+        let region = image_rect(1, 0, 2, 2);
+        let image = assemble_modular_image_region(&plan, &residuals, region, region).unwrap();
 
         assert_eq!(image.width, 2);
         assert_eq!(image.height, 2);
@@ -3047,7 +3215,12 @@ mod tests {
         };
 
         assert_eq!(
-            assemble_modular_image_region(&plan, &residuals, image_rect(0, 0, 4, 4)),
+            assemble_modular_image_region(
+                &plan,
+                &residuals,
+                image_rect(0, 0, 4, 4),
+                image_rect(0, 0, 4, 4)
+            ),
             Err(Error::Unsupported(
                 "modular region assembly with transforms"
             ))
