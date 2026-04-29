@@ -791,6 +791,46 @@ mod tests {
     }
 
     #[test]
+    fn decode_channels_roi_supports_rct_modular_fixture() {
+        let bytes = std::fs::read(workspace_path(
+            "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
+        ))
+        .unwrap();
+        let roi = Rect {
+            x: 5,
+            y: 7,
+            width: 11,
+            height: 9,
+        };
+        let full = decode_channels(&bytes).unwrap();
+        let roi_image = Decoder::new().roi(roi).decode_channels(&bytes).unwrap();
+
+        assert_roi_matches_full_channels(&roi_image, &full, roi);
+    }
+
+    #[test]
+    fn decode_channels_roi_supports_rct_modular_fixture_with_threads() {
+        let bytes = std::fs::read(workspace_path(
+            "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
+        ))
+        .unwrap();
+        let roi = Rect {
+            x: 17,
+            y: 3,
+            width: 13,
+            height: 15,
+        };
+        let full = decode_channels(&bytes).unwrap();
+        let roi_image = Decoder::new()
+            .roi(roi)
+            .threads(ThreadingMode::Threads(2))
+            .decode_channels(&bytes)
+            .unwrap();
+
+        assert_roi_matches_full_channels(&roi_image, &full, roi);
+    }
+
+    #[test]
     fn decode_channels_roi_crops_transform_free_modular_image_when_available() {
         let Some(cjxl) = reference_cjxl() else {
             eprintln!("skipping rgba channel ROI comparison; reference tools are not built");
@@ -1367,6 +1407,64 @@ mod tests {
             PixelData::U8(samples) => samples.iter().copied().map(u16::from).collect(),
             PixelData::U16(samples) => samples.clone(),
         }
+    }
+
+    fn assert_roi_matches_full_channels(
+        roi_image: &DecodedChannels,
+        full: &DecodedChannels,
+        roi: Rect,
+    ) {
+        assert_eq!(roi_image.width, roi.width);
+        assert_eq!(roi_image.height, roi.height);
+        assert_eq!(roi_image.color_channels, full.color_channels);
+        assert_eq!(roi_image.alpha, full.alpha);
+        assert_eq!(roi_image.bit_depth, full.bit_depth);
+        assert_eq!(roi_image.channels.len(), full.channels.len());
+        for (roi_channel, full_channel) in roi_image.channels.iter().zip(&full.channels) {
+            assert_eq!(roi_channel.width, roi.width);
+            assert_eq!(roi_channel.height, roi.height);
+            assert_eq!(roi_channel.hshift, 0);
+            assert_eq!(roi_channel.vshift, 0);
+            match (&roi_channel.samples, &full_channel.samples) {
+                (ChannelData::U8(roi_samples), ChannelData::U8(full_samples)) => {
+                    assert_eq!(
+                        roi_samples,
+                        &window_u8(full_samples, full_channel.width, roi)
+                    );
+                }
+                (ChannelData::U16(roi_samples), ChannelData::U16(full_samples)) => {
+                    assert_eq!(
+                        roi_samples,
+                        &window_u16(full_samples, full_channel.width, roi)
+                    );
+                }
+                _ => panic!("ROI and full channel bit depths differed"),
+            }
+        }
+    }
+
+    fn window_u8(samples: &[u8], width: u32, roi: Rect) -> Vec<u8> {
+        let mut output = Vec::with_capacity(roi.width as usize * roi.height as usize);
+        let width = width as usize;
+        let x = roi.x as usize;
+        let copy_width = roi.width as usize;
+        for y in roi.y as usize..(roi.y + roi.height) as usize {
+            let start = y * width + x;
+            output.extend_from_slice(&samples[start..start + copy_width]);
+        }
+        output
+    }
+
+    fn window_u16(samples: &[u16], width: u32, roi: Rect) -> Vec<u16> {
+        let mut output = Vec::with_capacity(roi.width as usize * roi.height as usize);
+        let width = width as usize;
+        let x = roi.x as usize;
+        let copy_width = roi.width as usize;
+        for y in roi.y as usize..(roi.y + roi.height) as usize {
+            let start = y * width + x;
+            output.extend_from_slice(&samples[start..start + copy_width]);
+        }
+        output
     }
 
     fn write_progressive_squeeze_source_ppm(path: &Path) {

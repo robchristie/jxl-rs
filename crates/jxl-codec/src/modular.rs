@@ -874,7 +874,13 @@ fn assemble_modular_image_region(
     residuals: &ModularResiduals,
     rect: ImageRect,
 ) -> Result<ModularImage> {
-    if !plan.global.group_header.transforms.is_empty() {
+    if plan
+        .global
+        .group_header
+        .transforms
+        .iter()
+        .any(|transform| transform.id != TransformId::Rct)
+    {
         return Err(Error::Unsupported(
             "modular region assembly with transforms",
         ));
@@ -929,11 +935,32 @@ fn assemble_modular_image_region(
         copy_decoded_group_region(&mut channels, group, rect)?;
     }
 
-    Ok(ModularImage {
+    inverse_transforms(
+        &region_channel_plan(plan, rect),
+        &plan.global.group_header,
+        channels,
+    )
+}
+
+fn region_channel_plan(plan: &ModularDecodePlan, rect: ImageRect) -> ModularChannelPlan {
+    ModularChannelPlan {
         width: rect.width,
         height: rect.height,
-        channels,
-    })
+        bit_depth: plan.channel_plan.bit_depth,
+        nb_meta_channels: plan.channel_plan.nb_meta_channels,
+        channels: plan
+            .channel_plan
+            .channels
+            .iter()
+            .map(|channel| ModularChannel {
+                width: rect.width,
+                height: rect.height,
+                hshift: channel.hshift,
+                vshift: channel.vshift,
+                component: channel.component,
+            })
+            .collect(),
+    }
 }
 
 fn copy_decoded_group(
@@ -2865,6 +2892,68 @@ mod tests {
             assemble_modular_image_region(&plan, &residuals, image_rect(0, 0, 4, 4)),
             Err(Error::Unsupported(
                 "modular region assembly with shifted channels"
+            ))
+        );
+    }
+
+    #[test]
+    fn assembles_modular_region_with_rct_transform() {
+        let mut plan = region_test_plan(4, 2, 3);
+        plan.global.group_header.transforms.push(ModularTransform {
+            id: TransformId::Rct,
+            begin_c: 0,
+            rct_type: Some(10),
+            num_c: None,
+            nb_colors: None,
+            nb_deltas: None,
+            predictor: None,
+            squeezes: Vec::new(),
+        });
+        let residuals = ModularResiduals {
+            global: None,
+            groups: vec![ModularDecodedGroup {
+                section_physical_index: 0,
+                stream_id: 10,
+                channels: vec![
+                    decoded_channel(0, 0, 0, 4, 2, &[10, 20, 30, 40]),
+                    decoded_channel(1, 0, 0, 4, 2, &[1, 2, 3, 4]),
+                    decoded_channel(2, 0, 0, 4, 2, &[5, 6, 7, 8]),
+                ],
+                bits_consumed: 0,
+            }],
+        };
+
+        let image =
+            assemble_modular_image_region(&plan, &residuals, image_rect(1, 0, 2, 1)).unwrap();
+
+        assert_eq!(image.channels.len(), 3);
+        assert_eq!(image.channels[0].samples, vec![26, 37]);
+        assert_eq!(image.channels[1].samples, vec![20, 30]);
+        assert_eq!(image.channels[2].samples, vec![22, 33]);
+    }
+
+    #[test]
+    fn rejects_modular_region_with_palette_transform() {
+        let mut plan = region_test_plan(8, 4, 1);
+        plan.global.group_header.transforms.push(ModularTransform {
+            id: TransformId::Palette,
+            begin_c: 0,
+            rct_type: None,
+            num_c: Some(1),
+            nb_colors: Some(2),
+            nb_deltas: Some(0),
+            predictor: Some(ModularPredictor::Zero),
+            squeezes: Vec::new(),
+        });
+        let residuals = ModularResiduals {
+            global: None,
+            groups: Vec::new(),
+        };
+
+        assert_eq!(
+            assemble_modular_image_region(&plan, &residuals, image_rect(0, 0, 4, 4)),
+            Err(Error::Unsupported(
+                "modular region assembly with transforms"
             ))
         );
     }
