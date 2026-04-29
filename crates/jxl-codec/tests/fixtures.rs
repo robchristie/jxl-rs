@@ -462,9 +462,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         assert!(header.use_global_tree);
         assert!(header.weighted_predictor.all_default);
         assert!(header.transforms.is_empty());
-        assert_eq!(metadata.parse_error, Some(jxl_codec::Error::Truncated));
-        assert_eq!(metadata.cursor.var_dct_dc_end_bits, None);
-        assert_eq!(metadata.cursor.modular_dc_start_bits, None);
+        assert_eq!(metadata.parse_error, None);
+        assert_eq!(metadata.cursor.var_dct_dc_end_bits, Some(6));
+        assert_eq!(metadata.cursor.modular_dc_start_bits, Some(6));
         assert_eq!(metadata.cursor.modular_dc_end_bits, None);
         assert_eq!(metadata.cursor.ac_metadata_start_bits, None);
         assert_eq!(metadata.cursor.ac_metadata_end_bits, None);
@@ -479,10 +479,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(selected_dc[0].group.group, 0);
 
     let global = plan.global.as_ref().unwrap();
-    assert_eq!(
-        plan.modular_global_tree_error,
-        Some(jxl_codec::Error::Truncated)
-    );
+    assert_eq!(plan.modular_global_tree_start_bits, Some(220));
+    assert_eq!(plan.modular_global_tree_error, None);
     assert_vardct_global_cursor_in_payload(global, global.section.section.payload_size);
 }
 
