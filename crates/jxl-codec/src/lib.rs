@@ -52,8 +52,9 @@ pub use modular::{
 };
 pub use transform::{CustomTransformData, OpsinInverseMatrix};
 pub use vardct::{
-    VarDctDcDequantMetadata, VarDctDecodePlan, VarDctFrameMetadata, VarDctGlobalMetadata,
-    VarDctGroupMetadata, VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata,
-    VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata, VarDctQuantizerMetadata,
-    VarDctSectionMetadata, VarDctSectionPayloadMetadata,
+    VarDctBlockContextMapMetadata, VarDctColorCorrelationMetadata, VarDctDcDequantMetadata,
+    VarDctDecodePlan, VarDctFrameMetadata, VarDctGlobalMetadata, VarDctGroupMetadata,
+    VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata, VarDctPassGroupPayloadMetadata,
+    VarDctPassGroupSectionMetadata, VarDctQuantizerMetadata, VarDctSectionMetadata,
+    VarDctSectionPayloadMetadata,
 };

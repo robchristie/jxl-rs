@@ -538,7 +538,10 @@ fn read_lz77_params(reader: &mut BitReader<'_>) -> Result<Lz77Params> {
     })
 }
 
-fn decode_context_map(reader: &mut BitReader<'_>, context_map: &mut [u8]) -> Result<usize> {
+pub(crate) fn decode_context_map(
+    reader: &mut BitReader<'_>,
+    context_map: &mut [u8],
+) -> Result<usize> {
     let is_simple = reader.read_bool()?;
     if is_simple {
         let bits_per_entry = reader.read_bits(2)? as usize;

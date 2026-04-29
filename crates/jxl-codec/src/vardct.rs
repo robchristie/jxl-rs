@@ -1,8 +1,10 @@
 use crate::bitstream::{BitReader, bits_offset, val};
 use crate::decode::ImageRegion;
+use crate::entropy::decode_context_map;
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
 use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_payload_range};
+use crate::metadata::unpack_signed;
 use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +91,8 @@ pub struct VarDctGlobalMetadata {
     pub section: VarDctSectionPayloadMetadata,
     pub dc_dequant: VarDctDcDequantMetadata,
     pub quantizer: VarDctQuantizerMetadata,
+    pub block_context_map: VarDctBlockContextMapMetadata,
+    pub color_correlation: VarDctColorCorrelationMetadata,
     pub bits_consumed: usize,
 }
 
@@ -105,6 +109,26 @@ pub struct VarDctQuantizerMetadata {
     pub scale: f32,
     pub inv_global_scale: f32,
     pub inv_quant_dc: f32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctBlockContextMapMetadata {
+    pub all_default: bool,
+    pub dc_thresholds: [Vec<i32>; 3],
+    pub qf_thresholds: Vec<u32>,
+    pub context_map_size: usize,
+    pub num_contexts: usize,
+    pub num_dc_contexts: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VarDctColorCorrelationMetadata {
+    pub all_default: bool,
+    pub color_factor: u32,
+    pub base_correlation_x: f32,
+    pub base_correlation_b: f32,
+    pub ytox_dc: i32,
+    pub ytob_dc: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -268,10 +292,14 @@ fn read_vardct_global_metadata(
     let mut reader = BitReader::new(payload);
     let dc_dequant = read_vardct_dc_dequant(&mut reader)?;
     let quantizer = read_vardct_quantizer(&mut reader)?;
+    let block_context_map = read_vardct_block_context_map(&mut reader)?;
+    let color_correlation = read_vardct_color_correlation(&mut reader)?;
     Ok(VarDctGlobalMetadata {
         section: section.clone(),
         dc_dequant,
         quantizer,
+        block_context_map,
+        color_correlation,
         bits_consumed: reader.bits_consumed(),
     })
 }
@@ -322,6 +350,136 @@ fn read_vardct_quantizer(reader: &mut BitReader<'_>) -> Result<VarDctQuantizerMe
         scale: global_scale as f32 / GLOBAL_SCALE_DENOM,
         inv_global_scale,
         inv_quant_dc: inv_global_scale / quant_dc as f32,
+    })
+}
+
+fn read_vardct_block_context_map(
+    reader: &mut BitReader<'_>,
+) -> Result<VarDctBlockContextMapMetadata> {
+    const NUM_ORDERS: usize = 13;
+    const DEFAULT_CONTEXT_MAP_SIZE: usize = 3 * NUM_ORDERS;
+    const DEFAULT_NUM_CONTEXTS: usize = 15;
+
+    let all_default = reader.read_bool()?;
+    if all_default {
+        return Ok(VarDctBlockContextMapMetadata {
+            all_default,
+            dc_thresholds: [Vec::new(), Vec::new(), Vec::new()],
+            qf_thresholds: Vec::new(),
+            context_map_size: DEFAULT_CONTEXT_MAP_SIZE,
+            num_contexts: DEFAULT_NUM_CONTEXTS,
+            num_dc_contexts: 1,
+        });
+    }
+
+    let mut dc_thresholds = [Vec::new(), Vec::new(), Vec::new()];
+    let mut num_dc_contexts = 1usize;
+    for thresholds in &mut dc_thresholds {
+        let len = reader.read_bits(4)? as usize;
+        num_dc_contexts = num_dc_contexts
+            .checked_mul(len + 1)
+            .ok_or(Error::InvalidCodestream(
+                "VarDCT block context map is too large",
+            ))?;
+        thresholds.reserve(len);
+        for _ in 0..len {
+            let threshold = reader.read_u32_selector(
+                bits_offset(4, 0),
+                bits_offset(8, 16),
+                bits_offset(16, 272),
+                bits_offset(32, 65_808),
+            )?;
+            thresholds.push(unpack_signed(threshold));
+        }
+    }
+
+    let qf_len = reader.read_bits(4)? as usize;
+    let mut qf_thresholds = Vec::with_capacity(qf_len);
+    for _ in 0..qf_len {
+        let threshold = reader.read_u32_selector(
+            bits_offset(2, 0),
+            bits_offset(3, 4),
+            bits_offset(5, 12),
+            bits_offset(8, 44),
+        )?;
+        qf_thresholds.push(threshold + 1);
+    }
+
+    if num_dc_contexts * (qf_thresholds.len() + 1) > 64 {
+        return Err(Error::InvalidCodestream(
+            "VarDCT block context map is too large",
+        ));
+    }
+
+    let context_map_size = 3 * NUM_ORDERS * num_dc_contexts * (qf_thresholds.len() + 1);
+    let mut context_map = vec![0; context_map_size];
+    let num_contexts = decode_context_map(reader, &mut context_map)?;
+    if num_contexts > 16 {
+        return Err(Error::InvalidCodestream(
+            "VarDCT block context map has too many contexts",
+        ));
+    }
+
+    Ok(VarDctBlockContextMapMetadata {
+        all_default,
+        dc_thresholds,
+        qf_thresholds,
+        context_map_size,
+        num_contexts,
+        num_dc_contexts,
+    })
+}
+
+fn read_vardct_color_correlation(
+    reader: &mut BitReader<'_>,
+) -> Result<VarDctColorCorrelationMetadata> {
+    const DEFAULT_COLOR_FACTOR: u32 = 84;
+    const DEFAULT_BASE_CORRELATION_X: f32 = 0.0;
+    const DEFAULT_BASE_CORRELATION_B: f32 = 1.0;
+
+    let all_default = reader.read_bool()?;
+    if all_default {
+        return Ok(VarDctColorCorrelationMetadata {
+            all_default,
+            color_factor: DEFAULT_COLOR_FACTOR,
+            base_correlation_x: DEFAULT_BASE_CORRELATION_X,
+            base_correlation_b: DEFAULT_BASE_CORRELATION_B,
+            ytox_dc: 0,
+            ytob_dc: 0,
+        });
+    }
+
+    let color_factor = reader.read_u32_selector(
+        val(DEFAULT_COLOR_FACTOR),
+        val(256),
+        bits_offset(8, 2),
+        bits_offset(16, 258),
+    )?;
+    if color_factor == 0 {
+        return Err(Error::InvalidCodestream("invalid VarDCT color factor"));
+    }
+    let base_correlation_x = reader.read_f16()?;
+    if base_correlation_x.abs() > 4.0 {
+        return Err(Error::InvalidCodestream(
+            "VarDCT base X correlation is out of range",
+        ));
+    }
+    let base_correlation_b = reader.read_f16()?;
+    if base_correlation_b.abs() > 4.0 {
+        return Err(Error::InvalidCodestream(
+            "VarDCT base B correlation is out of range",
+        ));
+    }
+    let ytox_dc = reader.read_bits(8)? as i32 - 128;
+    let ytob_dc = reader.read_bits(8)? as i32 - 128;
+
+    Ok(VarDctColorCorrelationMetadata {
+        all_default,
+        color_factor,
+        base_correlation_x,
+        base_correlation_b,
+        ytox_dc,
+        ytob_dc,
     })
 }
 
@@ -588,6 +746,7 @@ mod tests {
         ]);
         let mut codestream = vec![0; 64];
         codestream[10] = 1;
+        codestream[12] = 0b0000_0011;
 
         let plan = read_vardct_decode_plan(&codestream, &frame_header, &frame_data)
             .unwrap()
@@ -598,7 +757,12 @@ mod tests {
         assert!(global.dc_dequant.all_default);
         assert_eq!(global.quantizer.global_scale, 1);
         assert_eq!(global.quantizer.quant_dc, 16);
-        assert_eq!(global.bits_consumed, 16);
+        assert!(global.block_context_map.all_default);
+        assert_eq!(global.block_context_map.num_contexts, 15);
+        assert_eq!(global.block_context_map.context_map_size, 39);
+        assert!(global.color_correlation.all_default);
+        assert_eq!(global.color_correlation.color_factor, 84);
+        assert_eq!(global.bits_consumed, 18);
         assert_eq!(plan.global_payload.as_ref().unwrap().payload_range, 10..13);
         assert_eq!(
             plan.ac_global_payload.as_ref().unwrap().payload_range,

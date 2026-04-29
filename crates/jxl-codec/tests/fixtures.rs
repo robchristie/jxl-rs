@@ -585,6 +585,13 @@ fn parses_checked_in_fixture_vardct_metadata() {
     assert!(global.quantizer.scale > 0.0);
     assert!(global.quantizer.inv_global_scale > 0.0);
     assert!(global.quantizer.inv_quant_dc > 0.0);
+    assert!(global.block_context_map.context_map_size > 0);
+    assert!(global.block_context_map.num_contexts > 0);
+    assert!(global.block_context_map.num_contexts <= 16);
+    assert!(global.block_context_map.num_dc_contexts > 0);
+    assert!(global.color_correlation.color_factor > 0);
+    assert!(global.color_correlation.base_correlation_x.abs() <= 4.0);
+    assert!(global.color_correlation.base_correlation_b.abs() <= 4.0);
     assert_eq!(
         vardct_plan
             .global_payload
