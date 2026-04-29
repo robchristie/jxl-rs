@@ -483,6 +483,30 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(plan.modular_global_tree_direct_tree_end_bits, Some(520));
     assert_eq!(plan.modular_global_tree_direct_tree_node_count, Some(31));
     assert_eq!(plan.modular_global_tree_direct_error_bits, Some(1035));
+    assert_eq!(
+        plan.modular_global_tree_direct_residual_context_count,
+        Some(16)
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_residual_histogram_count,
+        Some(4)
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_residual_use_prefix_code,
+        Some(false)
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_residual_log_alpha_size,
+        Some(6)
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_residual_failed_histogram_index,
+        Some(3)
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_residual_error_stage,
+        Some(jxl_codec::VarDctHistogramProbeStage::AnsHistogram)
+    );
     assert_eq!(plan.modular_global_tree_start_bits, Some(220));
     assert_eq!(
         plan.modular_global_tree_direct_error,

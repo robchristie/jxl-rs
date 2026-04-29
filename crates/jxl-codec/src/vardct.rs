@@ -1,6 +1,6 @@
 use crate::bitstream::{BitReader, bits_offset, val};
 use crate::decode::ImageRegion;
-use crate::entropy::decode_context_map;
+use crate::entropy::{HistogramCodingProbeStage, decode_context_map};
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
 use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_payload_range};
@@ -63,6 +63,37 @@ pub struct VarDctPassGroupSectionMetadata {
     pub group: VarDctGroupMetadata,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarDctHistogramProbeStage {
+    Lz77Params,
+    Lz77UintConfig,
+    ContextMap,
+    EntropyMode,
+    LogAlphabetSize,
+    UintConfig,
+    PrefixAlphabetSize,
+    PrefixCode,
+    AnsHistogram,
+    AnsAliasTable,
+}
+
+impl From<HistogramCodingProbeStage> for VarDctHistogramProbeStage {
+    fn from(stage: HistogramCodingProbeStage) -> Self {
+        match stage {
+            HistogramCodingProbeStage::Lz77Params => Self::Lz77Params,
+            HistogramCodingProbeStage::Lz77UintConfig => Self::Lz77UintConfig,
+            HistogramCodingProbeStage::ContextMap => Self::ContextMap,
+            HistogramCodingProbeStage::EntropyMode => Self::EntropyMode,
+            HistogramCodingProbeStage::LogAlphabetSize => Self::LogAlphabetSize,
+            HistogramCodingProbeStage::UintConfig => Self::UintConfig,
+            HistogramCodingProbeStage::PrefixAlphabetSize => Self::PrefixAlphabetSize,
+            HistogramCodingProbeStage::PrefixCode => Self::PrefixCode,
+            HistogramCodingProbeStage::AnsHistogram => Self::AnsHistogram,
+            HistogramCodingProbeStage::AnsAliasTable => Self::AnsAliasTable,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct VarDctDecodePlan {
     pub frame: VarDctFrameMetadata,
@@ -71,6 +102,12 @@ pub struct VarDctDecodePlan {
     pub modular_global_tree_direct_tree_end_bits: Option<usize>,
     pub modular_global_tree_direct_tree_node_count: Option<usize>,
     pub modular_global_tree_direct_error_bits: Option<usize>,
+    pub modular_global_tree_direct_residual_context_count: Option<usize>,
+    pub modular_global_tree_direct_residual_histogram_count: Option<usize>,
+    pub modular_global_tree_direct_residual_use_prefix_code: Option<bool>,
+    pub modular_global_tree_direct_residual_log_alpha_size: Option<usize>,
+    pub modular_global_tree_direct_residual_failed_histogram_index: Option<usize>,
+    pub modular_global_tree_direct_residual_error_stage: Option<VarDctHistogramProbeStage>,
     pub modular_global_tree_start_bits: Option<usize>,
     pub modular_global_tree_direct_error: Option<Error>,
     pub modular_global_tree_error: Option<Error>,
@@ -306,6 +343,12 @@ pub fn read_vardct_decode_plan(
         modular_global_tree_direct_tree_end_bits,
         modular_global_tree_direct_tree_node_count,
         modular_global_tree_direct_error_bits,
+        modular_global_tree_direct_residual_context_count,
+        modular_global_tree_direct_residual_histogram_count,
+        modular_global_tree_direct_residual_use_prefix_code,
+        modular_global_tree_direct_residual_log_alpha_size,
+        modular_global_tree_direct_residual_failed_histogram_index,
+        modular_global_tree_direct_residual_error_stage,
         modular_global_tree_start_bits,
         modular_global_tree_direct_error,
         modular_global_tree_error,
@@ -323,6 +366,12 @@ pub fn read_vardct_decode_plan(
                 result.direct_tree_end_bits,
                 result.direct_tree_node_count,
                 result.direct_error_bits,
+                result.direct_residual_context_count,
+                result.direct_residual_histogram_count,
+                result.direct_residual_use_prefix_code,
+                result.direct_residual_log_alpha_size,
+                result.direct_residual_failed_histogram_index,
+                result.direct_residual_error_stage,
                 Some(result.tree_start_bits),
                 result.direct_error,
                 None,
@@ -335,10 +384,18 @@ pub fn read_vardct_decode_plan(
                 None,
                 None,
                 None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
                 Some(error),
             ),
         },
-        _ => (None, None, None, None, None, None, None, None),
+        _ => (
+            None, None, None, None, None, None, None, None, None, None, None, None, None, None,
+        ),
     };
     let ac_global_payload = frame
         .ac_global_section
@@ -390,6 +447,12 @@ pub fn read_vardct_decode_plan(
         modular_global_tree_direct_tree_end_bits,
         modular_global_tree_direct_tree_node_count,
         modular_global_tree_direct_error_bits,
+        modular_global_tree_direct_residual_context_count,
+        modular_global_tree_direct_residual_histogram_count,
+        modular_global_tree_direct_residual_use_prefix_code,
+        modular_global_tree_direct_residual_log_alpha_size,
+        modular_global_tree_direct_residual_failed_histogram_index,
+        modular_global_tree_direct_residual_error_stage,
         modular_global_tree_start_bits,
         modular_global_tree_direct_error,
         modular_global_tree_error,
@@ -495,6 +558,12 @@ fn read_vardct_modular_global_tree(
             direct_tree_end_bits: None,
             direct_tree_node_count: None,
             direct_error_bits: None,
+            direct_residual_context_count: None,
+            direct_residual_histogram_count: None,
+            direct_residual_use_prefix_code: None,
+            direct_residual_log_alpha_size: None,
+            direct_residual_failed_histogram_index: None,
+            direct_residual_error_stage: None,
             tree_start_bits: global.bits_consumed,
             direct_error: None,
             tree,
@@ -517,6 +586,25 @@ fn read_vardct_modular_global_tree(
                         direct_tree_end_bits: direct_probe.tree_end_bits,
                         direct_tree_node_count: direct_probe.tree_node_count,
                         direct_error_bits: direct_probe.error_bits,
+                        direct_residual_context_count: direct_probe.residual_context_count,
+                        direct_residual_histogram_count: direct_probe.residual_histogram_count,
+                        direct_residual_use_prefix_code: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .and_then(|probe| probe.use_prefix_code),
+                        direct_residual_log_alpha_size: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .and_then(|probe| probe.log_alpha_size),
+                        direct_residual_failed_histogram_index: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .and_then(|probe| probe.failed_histogram_index),
+                        direct_residual_error_stage: direct_probe
+                            .residual_histogram_probe
+                            .as_ref()
+                            .and_then(|probe| probe.error_stage)
+                            .map(VarDctHistogramProbeStage::from),
                         tree_start_bits: offset,
                         direct_error: Some(error.clone()),
                         tree,
@@ -533,6 +621,12 @@ struct VarDctModularGlobalTreeRead {
     direct_tree_end_bits: Option<usize>,
     direct_tree_node_count: Option<usize>,
     direct_error_bits: Option<usize>,
+    direct_residual_context_count: Option<usize>,
+    direct_residual_histogram_count: Option<usize>,
+    direct_residual_use_prefix_code: Option<bool>,
+    direct_residual_log_alpha_size: Option<usize>,
+    direct_residual_failed_histogram_index: Option<usize>,
+    direct_residual_error_stage: Option<VarDctHistogramProbeStage>,
     tree_start_bits: usize,
     direct_error: Option<Error>,
     tree: ModularTreeCoding,

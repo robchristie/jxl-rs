@@ -56,6 +56,6 @@ pub use vardct::{
     VarDctDcGroupCursorMetadata, VarDctDcGroupMetadata, VarDctDcGroupPayloadMetadata,
     VarDctDecodePlan, VarDctFrameMetadata, VarDctGlobalCursorMetadata, VarDctGlobalMetadata,
     VarDctGroupMetadata, VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata,
-    VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata, VarDctQuantizerMetadata,
-    VarDctSectionMetadata, VarDctSectionPayloadMetadata,
+    VarDctHistogramProbeStage, VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata,
+    VarDctQuantizerMetadata, VarDctSectionMetadata, VarDctSectionPayloadMetadata,
 };

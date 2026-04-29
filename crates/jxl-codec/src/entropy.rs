@@ -215,6 +215,37 @@ pub(crate) struct AnsCode {
     lz77: Lz77Params,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HistogramCodingProbeStage {
+    Lz77Params,
+    Lz77UintConfig,
+    ContextMap,
+    EntropyMode,
+    LogAlphabetSize,
+    UintConfig,
+    PrefixAlphabetSize,
+    PrefixCode,
+    AnsHistogram,
+    AnsAliasTable,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct HistogramCodingProbe {
+    pub lz77_end_bits: Option<usize>,
+    pub context_map_end_bits: Option<usize>,
+    pub entropy_mode_end_bits: Option<usize>,
+    pub uint_config_end_bits: Option<usize>,
+    pub histogram_end_bits: Option<usize>,
+    pub context_count: Option<usize>,
+    pub num_histograms: Option<usize>,
+    pub use_prefix_code: Option<bool>,
+    pub log_alpha_size: Option<usize>,
+    pub failed_histogram_index: Option<usize>,
+    pub error_stage: Option<HistogramCodingProbeStage>,
+    pub error_bits: Option<usize>,
+    pub error: Option<Error>,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct AliasEntry {
     cutoff: u32,
@@ -517,6 +548,312 @@ pub(crate) fn decode_histograms(
         },
         context_map,
     ))
+}
+
+pub(crate) fn probe_decode_histograms(
+    reader: &mut BitReader<'_>,
+    num_contexts: usize,
+    disallow_lz77: bool,
+) -> HistogramCodingProbe {
+    let mut lz77 = match read_lz77_params(reader) {
+        Ok(lz77) => lz77,
+        Err(error) => {
+            return histogram_probe_error(reader, HistogramCodingProbeStage::Lz77Params, error);
+        }
+    };
+    let lz77_end_bits = Some(reader.bits_consumed());
+    let mut context_count = num_contexts;
+    if lz77.enabled {
+        context_count += 1;
+        lz77.length_config = match decode_uint_config(8, reader) {
+            Ok(config) => config,
+            Err(error) => {
+                return HistogramCodingProbe {
+                    lz77_end_bits,
+                    context_count: Some(context_count),
+                    ..histogram_probe_error(
+                        reader,
+                        HistogramCodingProbeStage::Lz77UintConfig,
+                        error,
+                    )
+                };
+            }
+        };
+    }
+    if lz77.enabled && disallow_lz77 {
+        return HistogramCodingProbe {
+            lz77_end_bits,
+            context_count: Some(context_count),
+            error_stage: Some(HistogramCodingProbeStage::Lz77Params),
+            error_bits: Some(reader.bits_consumed()),
+            error: Some(Error::InvalidCodestream("LZ77 is not allowed here")),
+            ..HistogramCodingProbe::default()
+        };
+    }
+
+    let mut context_map = vec![0; context_count];
+    let num_histograms = if context_count > 1 {
+        match decode_context_map(reader, &mut context_map) {
+            Ok(num_histograms) => num_histograms,
+            Err(error) => {
+                return HistogramCodingProbe {
+                    lz77_end_bits,
+                    context_count: Some(context_count),
+                    ..histogram_probe_error(reader, HistogramCodingProbeStage::ContextMap, error)
+                };
+            }
+        }
+    } else {
+        1
+    };
+    let context_map_end_bits = Some(reader.bits_consumed());
+
+    let use_prefix_code = match reader.read_bool() {
+        Ok(value) => value,
+        Err(error) => {
+            return HistogramCodingProbe {
+                lz77_end_bits,
+                context_map_end_bits,
+                context_count: Some(context_count),
+                num_histograms: Some(num_histograms),
+                ..histogram_probe_error(reader, HistogramCodingProbeStage::EntropyMode, error)
+            };
+        }
+    };
+    let entropy_mode_end_bits = Some(reader.bits_consumed());
+    let log_alpha_size = if use_prefix_code {
+        PREFIX_MAX_BITS
+    } else {
+        match reader.read_bits(2) {
+            Ok(bits) => bits as usize + 5,
+            Err(error) => {
+                return HistogramCodingProbe {
+                    lz77_end_bits,
+                    context_map_end_bits,
+                    entropy_mode_end_bits,
+                    context_count: Some(context_count),
+                    num_histograms: Some(num_histograms),
+                    use_prefix_code: Some(use_prefix_code),
+                    ..histogram_probe_error(
+                        reader,
+                        HistogramCodingProbeStage::LogAlphabetSize,
+                        error,
+                    )
+                };
+            }
+        }
+    };
+
+    for _ in 0..num_histograms {
+        if let Err(error) = decode_uint_config(log_alpha_size, reader) {
+            return HistogramCodingProbe {
+                lz77_end_bits,
+                context_map_end_bits,
+                entropy_mode_end_bits,
+                context_count: Some(context_count),
+                num_histograms: Some(num_histograms),
+                use_prefix_code: Some(use_prefix_code),
+                log_alpha_size: Some(log_alpha_size),
+                ..histogram_probe_error(reader, HistogramCodingProbeStage::UintConfig, error)
+            };
+        }
+    }
+    let uint_config_end_bits = Some(reader.bits_consumed());
+
+    let max_alphabet_size = 1 << log_alpha_size;
+    if use_prefix_code && max_alphabet_size > PREFIX_MAX_ALPHABET_SIZE {
+        return HistogramCodingProbe {
+            lz77_end_bits,
+            context_map_end_bits,
+            entropy_mode_end_bits,
+            uint_config_end_bits,
+            context_count: Some(context_count),
+            num_histograms: Some(num_histograms),
+            use_prefix_code: Some(use_prefix_code),
+            log_alpha_size: Some(log_alpha_size),
+            error_stage: Some(HistogramCodingProbeStage::PrefixAlphabetSize),
+            error_bits: Some(reader.bits_consumed()),
+            error: Some(Error::InvalidCodestream("prefix alphabet is too large")),
+            ..HistogramCodingProbe::default()
+        };
+    }
+    if !use_prefix_code && max_alphabet_size > ANS_MAX_ALPHABET_SIZE {
+        return HistogramCodingProbe {
+            lz77_end_bits,
+            context_map_end_bits,
+            entropy_mode_end_bits,
+            uint_config_end_bits,
+            context_count: Some(context_count),
+            num_histograms: Some(num_histograms),
+            use_prefix_code: Some(use_prefix_code),
+            log_alpha_size: Some(log_alpha_size),
+            error_stage: Some(HistogramCodingProbeStage::AnsAliasTable),
+            error_bits: Some(reader.bits_consumed()),
+            error: Some(Error::InvalidCodestream("ANS alphabet is too large")),
+            ..HistogramCodingProbe::default()
+        };
+    }
+
+    if use_prefix_code {
+        let mut alphabet_sizes = Vec::with_capacity(num_histograms);
+        for index in 0..num_histograms {
+            let alphabet_size = match decode_var_len_uint16(reader) {
+                Ok(size) => size + 1,
+                Err(error) => {
+                    return HistogramCodingProbe {
+                        lz77_end_bits,
+                        context_map_end_bits,
+                        entropy_mode_end_bits,
+                        uint_config_end_bits,
+                        context_count: Some(context_count),
+                        num_histograms: Some(num_histograms),
+                        use_prefix_code: Some(use_prefix_code),
+                        log_alpha_size: Some(log_alpha_size),
+                        failed_histogram_index: Some(index),
+                        ..histogram_probe_error(
+                            reader,
+                            HistogramCodingProbeStage::PrefixAlphabetSize,
+                            error,
+                        )
+                    };
+                }
+            };
+            if alphabet_size > max_alphabet_size {
+                return HistogramCodingProbe {
+                    lz77_end_bits,
+                    context_map_end_bits,
+                    entropy_mode_end_bits,
+                    uint_config_end_bits,
+                    context_count: Some(context_count),
+                    num_histograms: Some(num_histograms),
+                    use_prefix_code: Some(use_prefix_code),
+                    log_alpha_size: Some(log_alpha_size),
+                    failed_histogram_index: Some(index),
+                    error_stage: Some(HistogramCodingProbeStage::PrefixAlphabetSize),
+                    error_bits: Some(reader.bits_consumed()),
+                    error: Some(Error::InvalidCodestream("prefix alphabet is too large")),
+                    ..HistogramCodingProbe::default()
+                };
+            }
+            alphabet_sizes.push(alphabet_size);
+        }
+        for (index, alphabet_size) in alphabet_sizes.into_iter().enumerate() {
+            if let Err(error) = HuffmanDecodingData::read_from_bitstream(alphabet_size, reader) {
+                return HistogramCodingProbe {
+                    lz77_end_bits,
+                    context_map_end_bits,
+                    entropy_mode_end_bits,
+                    uint_config_end_bits,
+                    context_count: Some(context_count),
+                    num_histograms: Some(num_histograms),
+                    use_prefix_code: Some(use_prefix_code),
+                    log_alpha_size: Some(log_alpha_size),
+                    failed_histogram_index: Some(index),
+                    ..histogram_probe_error(reader, HistogramCodingProbeStage::PrefixCode, error)
+                };
+            }
+        }
+    } else {
+        let table_size = 1 << log_alpha_size;
+        let mut table = vec![AliasEntry::default(); table_size];
+        for index in 0..num_histograms {
+            let mut counts = match read_histogram(ANS_LOG_TAB_SIZE, reader) {
+                Ok(counts) => counts,
+                Err(error) => {
+                    return HistogramCodingProbe {
+                        lz77_end_bits,
+                        context_map_end_bits,
+                        entropy_mode_end_bits,
+                        uint_config_end_bits,
+                        context_count: Some(context_count),
+                        num_histograms: Some(num_histograms),
+                        use_prefix_code: Some(use_prefix_code),
+                        log_alpha_size: Some(log_alpha_size),
+                        failed_histogram_index: Some(index),
+                        ..histogram_probe_error(
+                            reader,
+                            HistogramCodingProbeStage::AnsHistogram,
+                            error,
+                        )
+                    };
+                }
+            };
+            if counts.len() > max_alphabet_size {
+                return HistogramCodingProbe {
+                    lz77_end_bits,
+                    context_map_end_bits,
+                    entropy_mode_end_bits,
+                    uint_config_end_bits,
+                    context_count: Some(context_count),
+                    num_histograms: Some(num_histograms),
+                    use_prefix_code: Some(use_prefix_code),
+                    log_alpha_size: Some(log_alpha_size),
+                    failed_histogram_index: Some(index),
+                    error_stage: Some(HistogramCodingProbeStage::AnsHistogram),
+                    error_bits: Some(reader.bits_consumed()),
+                    error: Some(Error::InvalidCodestream("ANS alphabet is too large")),
+                    ..HistogramCodingProbe::default()
+                };
+            }
+            while counts.last() == Some(&0) {
+                counts.pop();
+            }
+            if let Err(error) =
+                init_alias_table(counts, ANS_LOG_TAB_SIZE, log_alpha_size, &mut table)
+            {
+                return HistogramCodingProbe {
+                    lz77_end_bits,
+                    context_map_end_bits,
+                    entropy_mode_end_bits,
+                    uint_config_end_bits,
+                    context_count: Some(context_count),
+                    num_histograms: Some(num_histograms),
+                    use_prefix_code: Some(use_prefix_code),
+                    log_alpha_size: Some(log_alpha_size),
+                    failed_histogram_index: Some(index),
+                    ..histogram_probe_error(reader, HistogramCodingProbeStage::AnsAliasTable, error)
+                };
+            }
+        }
+    }
+
+    HistogramCodingProbe {
+        lz77_end_bits,
+        context_map_end_bits,
+        entropy_mode_end_bits,
+        uint_config_end_bits,
+        histogram_end_bits: Some(reader.bits_consumed()),
+        context_count: Some(context_count),
+        num_histograms: Some(num_histograms),
+        use_prefix_code: Some(use_prefix_code),
+        log_alpha_size: Some(log_alpha_size),
+        failed_histogram_index: None,
+        error_stage: None,
+        error_bits: None,
+        error: None,
+    }
+}
+
+fn histogram_probe_error(
+    reader: &BitReader<'_>,
+    stage: HistogramCodingProbeStage,
+    error: Error,
+) -> HistogramCodingProbe {
+    HistogramCodingProbe {
+        lz77_end_bits: None,
+        context_map_end_bits: None,
+        entropy_mode_end_bits: None,
+        uint_config_end_bits: None,
+        histogram_end_bits: None,
+        context_count: None,
+        num_histograms: None,
+        use_prefix_code: None,
+        log_alpha_size: None,
+        failed_histogram_index: None,
+        error_stage: Some(stage),
+        error_bits: Some(reader.bits_consumed()),
+        error: Some(error),
+    }
 }
 
 fn read_lz77_params(reader: &mut BitReader<'_>) -> Result<Lz77Params> {

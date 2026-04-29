@@ -1,6 +1,8 @@
 use crate::bitstream::{BitReader, bits_offset, val};
 use crate::decode::{DecodeConfig, ImageRegion, ModularGroupExecution};
-use crate::entropy::{AnsCode, AnsSymbolReader, decode_histograms};
+use crate::entropy::{
+    AnsCode, AnsSymbolReader, HistogramCodingProbe, decode_histograms, probe_decode_histograms,
+};
 use crate::error::{Error, Result};
 use crate::frame::{ColorTransform, FrameEncoding, FrameHeader};
 use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_payload};
@@ -209,6 +211,9 @@ pub(crate) struct ModularTreeCodingProbe {
     pub tree_ans_start_bits: Option<usize>,
     pub tree_end_bits: Option<usize>,
     pub tree_node_count: Option<usize>,
+    pub residual_context_count: Option<usize>,
+    pub residual_histogram_count: Option<usize>,
+    pub residual_histogram_probe: Option<HistogramCodingProbe>,
     pub residual_coding_end_bits: Option<usize>,
     pub error_bits: Option<usize>,
     pub error: Option<Error>,
@@ -553,6 +558,9 @@ pub(crate) fn probe_modular_global_tree_coding(
                 tree_ans_start_bits: None,
                 tree_end_bits: None,
                 tree_node_count: None,
+                residual_context_count: None,
+                residual_histogram_count: None,
+                residual_histogram_probe: None,
                 residual_coding_end_bits: None,
                 error_bits: Some(reader.bits_consumed()),
                 error: Some(error),
@@ -567,6 +575,9 @@ pub(crate) fn probe_modular_global_tree_coding(
             tree_ans_start_bits: None,
             tree_end_bits: None,
             tree_node_count: None,
+            residual_context_count: None,
+            residual_histogram_count: None,
+            residual_histogram_probe: None,
             residual_coding_end_bits: None,
             error_bits: Some(reader.bits_consumed()),
             error: Some(Error::InvalidCodestream("modular frame has no global tree")),
@@ -582,6 +593,9 @@ pub(crate) fn probe_modular_global_tree_coding(
                 tree_ans_start_bits: None,
                 tree_end_bits: None,
                 tree_node_count: None,
+                residual_context_count: None,
+                residual_histogram_count: None,
+                residual_histogram_probe: None,
                 residual_coding_end_bits: None,
                 error_bits: Some(reader.bits_consumed()),
                 error: Some(error),
@@ -593,6 +607,7 @@ pub(crate) fn probe_modular_global_tree_coding(
             let tree_end_bits = Some(reader.bits_consumed());
             let tree_node_count = Some(tree.nodes.len());
             let contexts = tree.nodes.len().div_ceil(2);
+            let residual_probe_reader = reader.clone();
             match decode_histograms(reader, contexts, false) {
                 Ok(_) => ModularTreeCodingProbe {
                     has_global_tree_end_bits,
@@ -600,20 +615,31 @@ pub(crate) fn probe_modular_global_tree_coding(
                     tree_ans_start_bits: Some(tree_ans_start_bits),
                     tree_end_bits,
                     tree_node_count,
+                    residual_context_count: Some(contexts),
+                    residual_histogram_count: None,
+                    residual_histogram_probe: None,
                     residual_coding_end_bits: Some(reader.bits_consumed()),
                     error_bits: None,
                     error: None,
                 },
-                Err(error) => ModularTreeCodingProbe {
-                    has_global_tree_end_bits,
-                    tree_histogram_end_bits: Some(tree_histogram_end_bits),
-                    tree_ans_start_bits: Some(tree_ans_start_bits),
-                    tree_end_bits,
-                    tree_node_count,
-                    residual_coding_end_bits: None,
-                    error_bits: Some(reader.bits_consumed()),
-                    error: Some(error),
-                },
+                Err(error) => {
+                    let mut residual_probe_reader = residual_probe_reader;
+                    let residual_histogram_probe =
+                        probe_decode_histograms(&mut residual_probe_reader, contexts, false);
+                    ModularTreeCodingProbe {
+                        has_global_tree_end_bits,
+                        tree_histogram_end_bits: Some(tree_histogram_end_bits),
+                        tree_ans_start_bits: Some(tree_ans_start_bits),
+                        tree_end_bits,
+                        tree_node_count,
+                        residual_context_count: Some(contexts),
+                        residual_histogram_count: residual_histogram_probe.num_histograms,
+                        residual_histogram_probe: Some(residual_histogram_probe),
+                        residual_coding_end_bits: None,
+                        error_bits: Some(reader.bits_consumed()),
+                        error: Some(error),
+                    }
+                }
             }
         }
         Err((error, tree_histogram_end_bits, tree_ans_start_bits)) => ModularTreeCodingProbe {
@@ -622,6 +648,9 @@ pub(crate) fn probe_modular_global_tree_coding(
             tree_ans_start_bits,
             tree_end_bits: None,
             tree_node_count: None,
+            residual_context_count: None,
+            residual_histogram_count: None,
+            residual_histogram_probe: None,
             residual_coding_end_bits: None,
             error_bits: Some(reader.bits_consumed()),
             error: Some(error),
