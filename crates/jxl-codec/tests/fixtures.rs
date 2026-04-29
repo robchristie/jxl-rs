@@ -432,6 +432,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert!(plan.ac_global_payload.is_some());
     assert!(!plan.dc_group_payloads.is_empty());
     assert!(!plan.ac_group_payloads.is_empty());
+    assert_eq!(plan.modular_global_tree_payload_start_bits, Some(192));
+    assert_eq!(plan.modular_global_tree_payload_end_bits, Some(1232));
+    assert_eq!(plan.modular_global_tree_payload_len_bits, Some(1040));
 
     assert_eq!(plan.dc_group_payloads.len(), plan.frame.dc_groups.len());
     assert_eq!(plan.dc_group_metadata.len(), plan.dc_group_payloads.len());
@@ -480,9 +483,33 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
 
     let global = plan.global.as_ref().unwrap();
     assert_eq!(plan.modular_global_tree_direct_start_bits, Some(206));
+    assert_eq!(
+        plan.modular_global_tree_direct_start_absolute_bits,
+        Some(398)
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_start_remaining_bits,
+        Some(834)
+    );
     assert_eq!(plan.modular_global_tree_direct_tree_end_bits, Some(520));
+    assert_eq!(
+        plan.modular_global_tree_direct_tree_end_absolute_bits,
+        Some(712)
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_tree_end_remaining_bits,
+        Some(520)
+    );
     assert_eq!(plan.modular_global_tree_direct_tree_node_count, Some(31));
     assert_eq!(plan.modular_global_tree_direct_error_bits, Some(1035));
+    assert_eq!(
+        plan.modular_global_tree_direct_error_absolute_bits,
+        Some(1227)
+    );
+    assert_eq!(
+        plan.modular_global_tree_direct_error_remaining_bits,
+        Some(5)
+    );
     assert_eq!(
         plan.modular_global_tree_direct_residual_context_count,
         Some(16)
@@ -508,9 +535,17 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         Some(jxl_codec::VarDctHistogramProbeStage::AnsHistogram)
     );
     let histograms = &plan.modular_global_tree_direct_residual_ans_histograms;
+    let global_payload_start_bits = plan.modular_global_tree_payload_start_bits.unwrap();
+    let global_payload_len_bits = plan.modular_global_tree_payload_len_bits.unwrap();
     assert_eq!(histograms.len(), 4);
     assert_eq!(histograms[0].start_bits, 591);
     assert_eq!(histograms[0].end_bits, Some(874));
+    assert_eq!(global_payload_start_bits + histograms[0].start_bits, 783);
+    assert_eq!(
+        global_payload_start_bits + histograms[0].end_bits.unwrap(),
+        1066
+    );
+    assert_eq!(global_payload_len_bits - histograms[0].start_bits, 449);
     assert_eq!(
         histograms[0].kind,
         Some(jxl_codec::VarDctAnsHistogramProbeKind::Custom)
@@ -521,6 +556,12 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(histograms[0].error_stage, None);
     assert_eq!(histograms[1].start_bits, 874);
     assert_eq!(histograms[1].end_bits, Some(914));
+    assert_eq!(global_payload_start_bits + histograms[1].start_bits, 1066);
+    assert_eq!(
+        global_payload_start_bits + histograms[1].end_bits.unwrap(),
+        1106
+    );
+    assert_eq!(global_payload_len_bits - histograms[1].start_bits, 166);
     assert_eq!(
         histograms[1].kind,
         Some(jxl_codec::VarDctAnsHistogramProbeKind::Custom)
@@ -531,6 +572,12 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(histograms[1].error_stage, None);
     assert_eq!(histograms[2].start_bits, 914);
     assert_eq!(histograms[2].end_bits, Some(936));
+    assert_eq!(global_payload_start_bits + histograms[2].start_bits, 1106);
+    assert_eq!(
+        global_payload_start_bits + histograms[2].end_bits.unwrap(),
+        1128
+    );
+    assert_eq!(global_payload_len_bits - histograms[2].start_bits, 126);
     assert_eq!(
         histograms[2].kind,
         Some(jxl_codec::VarDctAnsHistogramProbeKind::Simple)
@@ -539,6 +586,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(histograms[2].error_stage, None);
     assert_eq!(histograms[3].start_bits, 936);
     assert_eq!(histograms[3].end_bits, None);
+    assert_eq!(global_payload_start_bits + histograms[3].start_bits, 1128);
+    assert_eq!(global_payload_len_bits - histograms[3].start_bits, 104);
     assert_eq!(
         histograms[3].kind,
         Some(jxl_codec::VarDctAnsHistogramProbeKind::Custom)
@@ -551,8 +600,18 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         Some(jxl_codec::VarDctAnsHistogramProbeStage::CustomLogCount)
     );
     assert_eq!(histograms[3].error_bits, Some(1035));
+    assert_eq!(
+        global_payload_start_bits + histograms[3].error_bits.unwrap(),
+        1227
+    );
+    assert_eq!(
+        global_payload_len_bits - histograms[3].error_bits.unwrap(),
+        5
+    );
     assert_eq!(histograms[3].error, Some(jxl_codec::Error::Truncated));
     assert_eq!(plan.modular_global_tree_start_bits, Some(220));
+    assert_eq!(plan.modular_global_tree_start_absolute_bits, Some(412));
+    assert_eq!(plan.modular_global_tree_start_remaining_bits, Some(820));
     assert_eq!(
         plan.modular_global_tree_direct_error,
         Some(jxl_codec::Error::Truncated)

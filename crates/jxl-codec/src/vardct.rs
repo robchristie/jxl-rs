@@ -188,10 +188,19 @@ impl From<HistogramCodingProbeStage> for VarDctHistogramProbeStage {
 pub struct VarDctDecodePlan {
     pub frame: VarDctFrameMetadata,
     pub global: Option<VarDctGlobalMetadata>,
+    pub modular_global_tree_payload_start_bits: Option<usize>,
+    pub modular_global_tree_payload_end_bits: Option<usize>,
+    pub modular_global_tree_payload_len_bits: Option<usize>,
     pub modular_global_tree_direct_start_bits: Option<usize>,
+    pub modular_global_tree_direct_start_absolute_bits: Option<usize>,
+    pub modular_global_tree_direct_start_remaining_bits: Option<usize>,
     pub modular_global_tree_direct_tree_end_bits: Option<usize>,
+    pub modular_global_tree_direct_tree_end_absolute_bits: Option<usize>,
+    pub modular_global_tree_direct_tree_end_remaining_bits: Option<usize>,
     pub modular_global_tree_direct_tree_node_count: Option<usize>,
     pub modular_global_tree_direct_error_bits: Option<usize>,
+    pub modular_global_tree_direct_error_absolute_bits: Option<usize>,
+    pub modular_global_tree_direct_error_remaining_bits: Option<usize>,
     pub modular_global_tree_direct_residual_context_count: Option<usize>,
     pub modular_global_tree_direct_residual_histogram_count: Option<usize>,
     pub modular_global_tree_direct_residual_use_prefix_code: Option<bool>,
@@ -200,6 +209,8 @@ pub struct VarDctDecodePlan {
     pub modular_global_tree_direct_residual_error_stage: Option<VarDctHistogramProbeStage>,
     pub modular_global_tree_direct_residual_ans_histograms: Vec<VarDctAnsHistogramProbe>,
     pub modular_global_tree_start_bits: Option<usize>,
+    pub modular_global_tree_start_absolute_bits: Option<usize>,
+    pub modular_global_tree_start_remaining_bits: Option<usize>,
     pub modular_global_tree_direct_error: Option<Error>,
     pub modular_global_tree_error: Option<Error>,
     pub global_payload: Option<VarDctSectionPayloadMetadata>,
@@ -547,14 +558,54 @@ pub fn read_vardct_decode_plan(
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let modular_global_tree_payload_start_bits = global_payload
+        .as_ref()
+        .and_then(|payload| payload.payload_range.start.checked_mul(8));
+    let modular_global_tree_payload_len_bits = global_payload
+        .as_ref()
+        .and_then(|payload| payload.payload_range.len().checked_mul(8));
+    let modular_global_tree_payload_end_bits = modular_global_tree_payload_start_bits
+        .zip(modular_global_tree_payload_len_bits)
+        .and_then(|(start, len)| start.checked_add(len));
+    let absolute_bits = |relative_bits: Option<usize>| {
+        modular_global_tree_payload_start_bits
+            .zip(relative_bits)
+            .and_then(|(start, bits)| start.checked_add(bits))
+    };
+    let remaining_bits = |relative_bits: Option<usize>| {
+        modular_global_tree_payload_len_bits
+            .zip(relative_bits)
+            .and_then(|(len, bits)| len.checked_sub(bits))
+    };
 
     Ok(Some(VarDctDecodePlan {
         frame,
         global,
+        modular_global_tree_payload_start_bits,
+        modular_global_tree_payload_end_bits,
+        modular_global_tree_payload_len_bits,
         modular_global_tree_direct_start_bits,
+        modular_global_tree_direct_start_absolute_bits: absolute_bits(
+            modular_global_tree_direct_start_bits,
+        ),
+        modular_global_tree_direct_start_remaining_bits: remaining_bits(
+            modular_global_tree_direct_start_bits,
+        ),
         modular_global_tree_direct_tree_end_bits,
+        modular_global_tree_direct_tree_end_absolute_bits: absolute_bits(
+            modular_global_tree_direct_tree_end_bits,
+        ),
+        modular_global_tree_direct_tree_end_remaining_bits: remaining_bits(
+            modular_global_tree_direct_tree_end_bits,
+        ),
         modular_global_tree_direct_tree_node_count,
         modular_global_tree_direct_error_bits,
+        modular_global_tree_direct_error_absolute_bits: absolute_bits(
+            modular_global_tree_direct_error_bits,
+        ),
+        modular_global_tree_direct_error_remaining_bits: remaining_bits(
+            modular_global_tree_direct_error_bits,
+        ),
         modular_global_tree_direct_residual_context_count,
         modular_global_tree_direct_residual_histogram_count,
         modular_global_tree_direct_residual_use_prefix_code,
@@ -563,6 +614,8 @@ pub fn read_vardct_decode_plan(
         modular_global_tree_direct_residual_error_stage,
         modular_global_tree_direct_residual_ans_histograms,
         modular_global_tree_start_bits,
+        modular_global_tree_start_absolute_bits: absolute_bits(modular_global_tree_start_bits),
+        modular_global_tree_start_remaining_bits: remaining_bits(modular_global_tree_start_bits),
         modular_global_tree_direct_error,
         modular_global_tree_error,
         global_payload,
