@@ -431,6 +431,33 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     );
     assert!(plan.global_payload.is_some());
     assert!(plan.ac_global_payload.is_some());
+    let ac_global = plan.ac_global_metadata.as_ref().unwrap();
+    assert_eq!(ac_global.section.payload_range, 2807..3843);
+    assert_eq!(ac_global.all_default_quant_matrices, Some(true));
+    assert_eq!(ac_global.quant_matrices_end_bits, Some(1));
+    assert_eq!(ac_global.num_histograms, Some(1));
+    assert_eq!(ac_global.num_histograms_end_bits, Some(2));
+    assert_eq!(ac_global.bits_consumed, None);
+    assert_eq!(
+        ac_global.parse_error,
+        Some(jxl_codec::Error::Unsupported(
+            "custom VarDCT AC coefficient orders"
+        ))
+    );
+    assert_eq!(ac_global.passes.len(), 1);
+    assert_eq!(ac_global.passes[0].pass, 0);
+    assert_eq!(ac_global.passes[0].used_orders, Some(7));
+    assert_eq!(ac_global.passes[0].used_orders_end_bits, Some(17));
+    assert_eq!(ac_global.passes[0].histogram_contexts, None);
+    assert_eq!(ac_global.passes[0].histogram_count, None);
+    assert_eq!(ac_global.passes[0].histogram_end_bits, None);
+    assert_eq!(ac_global.passes[0].error_bits, Some(17));
+    assert_eq!(
+        ac_global.passes[0].error,
+        Some(jxl_codec::Error::Unsupported(
+            "custom VarDCT AC coefficient orders"
+        ))
+    );
     assert!(!plan.dc_group_payloads.is_empty());
     assert!(!plan.ac_group_payloads.is_empty());
     assert_eq!(plan.modular_global_tree_payload_start_bits, Some(192));

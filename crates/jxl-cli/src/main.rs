@@ -469,6 +469,30 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     section.section_logical_id, section.codestream_offset, section.payload_size
                 );
             }
+            if let Some(ac_global) = info
+                .first_frame_vardct_plan
+                .as_ref()
+                .and_then(|plan| plan.ac_global_metadata.as_ref())
+            {
+                println!(
+                    "First frame VarDCT AC global metadata: default_quant={} num_histograms={} bits={:?} error={:?}",
+                    ac_global.all_default_quant_matrices.unwrap_or(false),
+                    ac_global.num_histograms.unwrap_or_default(),
+                    ac_global.bits_consumed,
+                    ac_global.parse_error
+                );
+                for pass in &ac_global.passes {
+                    println!(
+                        "First frame VarDCT AC global pass {}: used_orders={} histogram_contexts={} histograms={} histogram_bits={:?} error={:?}",
+                        pass.pass,
+                        pass.used_orders.unwrap_or_default(),
+                        pass.histogram_contexts.unwrap_or_default(),
+                        pass.histogram_count.unwrap_or_default(),
+                        pass.histogram_end_bits,
+                        pass.error
+                    );
+                }
+            }
             for section in &vardct.sections {
                 println!(
                     "First frame VarDCT section {}: logical={} kind={:?} offset={} size={}",

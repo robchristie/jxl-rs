@@ -4,7 +4,7 @@ use crate::entropy::{
     AnsAliasTableProbe, AnsHistogramLogCountProbe, AnsHistogramPopulationProbe, AnsHistogramProbe,
     AnsHistogramProbeKind, AnsHistogramProbeStage, ContextMapProbe, ContextMapProbeKind,
     ContextMapProbeStage, ContextMapSymbolProbe, HistogramCodingProbeStage, decode_context_map,
-    probe_decode_context_map,
+    probe_decode_context_map, probe_decode_histograms,
 };
 use crate::error::{Error, Result};
 use crate::frame::{FrameEncoding, FrameHeader};
@@ -511,9 +511,35 @@ pub struct VarDctDecodePlan {
     pub modular_global_tree_error: Option<Error>,
     pub global_payload: Option<VarDctSectionPayloadMetadata>,
     pub ac_global_payload: Option<VarDctSectionPayloadMetadata>,
+    pub ac_global_metadata: Option<VarDctAcGlobalMetadata>,
     pub ac_group_payloads: Vec<VarDctPassGroupPayloadMetadata>,
     pub dc_group_payloads: Vec<VarDctDcGroupPayloadMetadata>,
     pub dc_group_metadata: Vec<VarDctDcGroupMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcGlobalMetadata {
+    pub section: VarDctSectionPayloadMetadata,
+    pub all_default_quant_matrices: Option<bool>,
+    pub quant_matrices_end_bits: Option<usize>,
+    pub num_histograms: Option<usize>,
+    pub num_histograms_end_bits: Option<usize>,
+    pub passes: Vec<VarDctAcGlobalPassMetadata>,
+    pub bits_consumed: Option<usize>,
+    pub parse_error: Option<Error>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcGlobalPassMetadata {
+    pub pass: usize,
+    pub used_orders: Option<u32>,
+    pub used_orders_end_bits: Option<usize>,
+    pub histogram_contexts: Option<usize>,
+    pub histogram_count: Option<usize>,
+    pub histogram_end_bits: Option<usize>,
+    pub error_stage: Option<VarDctHistogramProbeStage>,
+    pub error_bits: Option<usize>,
+    pub error: Option<Error>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -929,6 +955,13 @@ pub fn read_vardct_decode_plan(
         .as_ref()
         .map(|section| section_payload_metadata(codestream, frame_data, section))
         .transpose()?;
+    let ac_global_metadata = ac_global_payload
+        .as_ref()
+        .zip(global.as_ref())
+        .map(|(payload, global)| {
+            read_vardct_ac_global_metadata(codestream, frame_header, payload, global)
+        })
+        .transpose()?;
     let dc_group_payloads = frame
         .dc_group_sections
         .iter()
@@ -1042,6 +1075,7 @@ pub fn read_vardct_decode_plan(
         modular_global_tree_error,
         global_payload,
         ac_global_payload,
+        ac_global_metadata,
         ac_group_payloads,
         dc_group_payloads,
         dc_group_metadata,
@@ -1177,6 +1211,160 @@ fn read_vardct_dc_group_metadata(
         ac_metadata,
         ac_metadata_error,
         parse_error,
+    })
+}
+
+fn read_vardct_ac_global_metadata(
+    codestream: &[u8],
+    frame_header: &FrameHeader,
+    payload: &VarDctSectionPayloadMetadata,
+    global: &VarDctGlobalMetadata,
+) -> Result<VarDctAcGlobalMetadata> {
+    let bytes = codestream
+        .get(payload.payload_range.clone())
+        .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
+    let mut reader = BitReader::new(bytes);
+    let all_default_quant_matrices = match reader.read_bool() {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(VarDctAcGlobalMetadata {
+                section: payload.clone(),
+                all_default_quant_matrices: None,
+                quant_matrices_end_bits: None,
+                num_histograms: None,
+                num_histograms_end_bits: None,
+                passes: Vec::new(),
+                bits_consumed: None,
+                parse_error: Some(error),
+            });
+        }
+    };
+    let quant_matrices_end_bits = Some(reader.bits_consumed());
+    if !all_default_quant_matrices {
+        return Ok(VarDctAcGlobalMetadata {
+            section: payload.clone(),
+            all_default_quant_matrices: Some(false),
+            quant_matrices_end_bits,
+            num_histograms: None,
+            num_histograms_end_bits: None,
+            passes: Vec::new(),
+            bits_consumed: None,
+            parse_error: Some(Error::Unsupported("custom VarDCT AC quant matrices")),
+        });
+    }
+
+    let num_histo_bits = ceil_log2_nonzero(frame_header.group_layout.num_groups as usize);
+    let num_histograms = match reader.read_bits(num_histo_bits) {
+        Ok(bits) => bits as usize + 1,
+        Err(error) => {
+            return Ok(VarDctAcGlobalMetadata {
+                section: payload.clone(),
+                all_default_quant_matrices: Some(true),
+                quant_matrices_end_bits,
+                num_histograms: None,
+                num_histograms_end_bits: None,
+                passes: Vec::new(),
+                bits_consumed: None,
+                parse_error: Some(error),
+            });
+        }
+    };
+    let num_histograms_end_bits = Some(reader.bits_consumed());
+    let mut passes = Vec::with_capacity(frame_header.passes.num_passes as usize);
+    for pass in 0..frame_header.passes.num_passes as usize {
+        let used_orders =
+            match reader.read_u32_selector(val(0x5f), val(0x13), val(0), bits_offset(13, 0)) {
+                Ok(used_orders) => used_orders,
+                Err(error) => {
+                    passes.push(VarDctAcGlobalPassMetadata {
+                        pass,
+                        used_orders: None,
+                        used_orders_end_bits: None,
+                        histogram_contexts: None,
+                        histogram_count: None,
+                        histogram_end_bits: None,
+                        error_stage: None,
+                        error_bits: Some(reader.bits_consumed()),
+                        error: Some(error.clone()),
+                    });
+                    return Ok(VarDctAcGlobalMetadata {
+                        section: payload.clone(),
+                        all_default_quant_matrices: Some(true),
+                        quant_matrices_end_bits,
+                        num_histograms: Some(num_histograms),
+                        num_histograms_end_bits,
+                        passes,
+                        bits_consumed: None,
+                        parse_error: Some(error),
+                    });
+                }
+            };
+        let used_orders_end_bits = Some(reader.bits_consumed());
+        if used_orders != 0 {
+            let error = Error::Unsupported("custom VarDCT AC coefficient orders");
+            passes.push(VarDctAcGlobalPassMetadata {
+                pass,
+                used_orders: Some(used_orders),
+                used_orders_end_bits,
+                histogram_contexts: None,
+                histogram_count: None,
+                histogram_end_bits: None,
+                error_stage: None,
+                error_bits: Some(reader.bits_consumed()),
+                error: Some(error.clone()),
+            });
+            return Ok(VarDctAcGlobalMetadata {
+                section: payload.clone(),
+                all_default_quant_matrices: Some(true),
+                quant_matrices_end_bits,
+                num_histograms: Some(num_histograms),
+                num_histograms_end_bits,
+                passes,
+                bits_consumed: None,
+                parse_error: Some(error),
+            });
+        }
+
+        let histogram_contexts =
+            num_histograms * global.block_context_map.num_contexts * (37 + 458);
+        let histogram_probe = probe_decode_histograms(&mut reader, histogram_contexts, false);
+        let pass_error = histogram_probe.error.clone();
+        passes.push(VarDctAcGlobalPassMetadata {
+            pass,
+            used_orders: Some(used_orders),
+            used_orders_end_bits,
+            histogram_contexts: Some(histogram_contexts),
+            histogram_count: histogram_probe.num_histograms,
+            histogram_end_bits: histogram_probe.histogram_end_bits,
+            error_stage: histogram_probe
+                .error_stage
+                .map(VarDctHistogramProbeStage::from),
+            error_bits: histogram_probe.error_bits,
+            error: pass_error.clone(),
+        });
+        if let Some(error) = pass_error {
+            return Ok(VarDctAcGlobalMetadata {
+                section: payload.clone(),
+                all_default_quant_matrices: Some(true),
+                quant_matrices_end_bits,
+                num_histograms: Some(num_histograms),
+                num_histograms_end_bits,
+                passes,
+                bits_consumed: None,
+                parse_error: Some(error),
+            });
+        }
+    }
+
+    Ok(VarDctAcGlobalMetadata {
+        section: payload.clone(),
+        all_default_quant_matrices: Some(true),
+        quant_matrices_end_bits,
+        num_histograms: Some(num_histograms),
+        num_histograms_end_bits,
+        passes,
+        bits_consumed: Some(reader.bits_consumed()),
+        parse_error: None,
     })
 }
 
