@@ -534,6 +534,13 @@ pub struct VarDctXybImage {
     pub channels: [Vec<f32>; 3],
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct VarDctRgbImage {
+    pub width: u32,
+    pub height: u32,
+    pub channels: [Vec<f32>; 3],
+}
+
 impl VarDctXybImage {
     pub fn sample(&self, channel: usize, x: u32, y: u32) -> Option<f32> {
         if channel >= self.channels.len() || x >= self.width || y >= self.height {
@@ -552,6 +559,15 @@ impl VarDctXybImage {
 /// and left as zeroes in the output buffers.
 pub fn assemble_vardct_xyb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
     assemble_vardct_xyb_image_from_groups(&plan.frame, &plan.ac_group_metadata)
+}
+
+/// Assembles available VarDCT XYB data and converts it to linear RGB.
+///
+/// This is intentionally still an internal reconstruction stage: it applies the
+/// inverse opsin transform, but not output color management, transfer functions,
+/// orientation, or conversion to integer samples.
+pub fn assemble_vardct_linear_rgb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctRgbImage>> {
+    assemble_vardct_xyb_image(plan).map(|image| image.map(|image| vardct_xyb_to_linear_rgb(&image)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1022,6 +1038,54 @@ fn copy_vardct_spatial_group_to_image(
         }
     }
     Ok(())
+}
+
+fn vardct_xyb_to_linear_rgb(xyb: &VarDctXybImage) -> VarDctRgbImage {
+    let mut rgb = VarDctRgbImage {
+        width: xyb.width,
+        height: xyb.height,
+        channels: [
+            vec![0.0; xyb.channels[0].len()],
+            vec![0.0; xyb.channels[1].len()],
+            vec![0.0; xyb.channels[2].len()],
+        ],
+    };
+
+    for index in 0..xyb.channels[0].len() {
+        let [r, g, b] = xyb_sample_to_linear_rgb(
+            xyb.channels[0][index],
+            xyb.channels[1][index],
+            xyb.channels[2][index],
+        );
+        rgb.channels[0][index] = r;
+        rgb.channels[1][index] = g;
+        rgb.channels[2][index] = b;
+    }
+
+    rgb
+}
+
+fn xyb_sample_to_linear_rgb(x: f32, y: f32, b: f32) -> [f32; 3] {
+    let gamma_r = y + x - DEFAULT_OPSIN_BIASES_CBRT[0];
+    let gamma_g = y - x - DEFAULT_OPSIN_BIASES_CBRT[1];
+    let gamma_b = b - DEFAULT_OPSIN_BIASES_CBRT[2];
+    let mixed = [
+        gamma_r * gamma_r * gamma_r + DEFAULT_OPSIN_BIASES[0],
+        gamma_g * gamma_g * gamma_g + DEFAULT_OPSIN_BIASES[1],
+        gamma_b * gamma_b * gamma_b + DEFAULT_OPSIN_BIASES[2],
+    ];
+
+    [
+        DEFAULT_INVERSE_OPSIN_MATRIX[0][0] * mixed[0]
+            + DEFAULT_INVERSE_OPSIN_MATRIX[0][1] * mixed[1]
+            + DEFAULT_INVERSE_OPSIN_MATRIX[0][2] * mixed[2],
+        DEFAULT_INVERSE_OPSIN_MATRIX[1][0] * mixed[0]
+            + DEFAULT_INVERSE_OPSIN_MATRIX[1][1] * mixed[1]
+            + DEFAULT_INVERSE_OPSIN_MATRIX[1][2] * mixed[2],
+        DEFAULT_INVERSE_OPSIN_MATRIX[2][0] * mixed[0]
+            + DEFAULT_INVERSE_OPSIN_MATRIX[2][1] * mixed[1]
+            + DEFAULT_INVERSE_OPSIN_MATRIX[2][2] * mixed[2],
+    ]
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3314,6 +3378,13 @@ const AFV_WEIGHTS: [[f32; 9]; 3] = [
     [1024.0, 1024.0, 50.0, 50.0, 50.0, 58.0, 0.0, 0.0, 0.0],
     [384.0, 384.0, 12.0, 12.0, 12.0, 22.0, -0.25, -0.25, -0.25],
 ];
+const DEFAULT_OPSIN_BIASES: [f32; 3] = [-0.0037930732, -0.0037930732, -0.0037930732];
+const DEFAULT_OPSIN_BIASES_CBRT: [f32; 3] = [-0.1559542, -0.1559542, -0.1559542];
+const DEFAULT_INVERSE_OPSIN_MATRIX: [[f32; 3]; 3] = [
+    [11.031567, -9.866944, -0.164623],
+    [-3.2541473, 4.4187703, -0.164623],
+    [-3.6588514, 2.712923, 1.9459282],
+];
 const AFV_4X4_BASIS: [[f32; 16]; 16] = [
     [0.25; 16],
     [
@@ -5436,6 +5507,32 @@ mod tests {
         let image = assemble_vardct_xyb_image_from_groups(&frame, &[metadata]).unwrap();
 
         assert!(image.is_none());
+    }
+
+    #[test]
+    fn converts_zero_xyb_to_zero_linear_rgb() {
+        let rgb = xyb_sample_to_linear_rgb(0.0, 0.0, 0.0);
+
+        assert!(rgb.iter().all(|sample| sample.abs() < 1.0e-7));
+    }
+
+    #[test]
+    fn converts_xyb_image_to_linear_rgb() {
+        let xyb = VarDctXybImage {
+            width: 1,
+            height: 1,
+            groups_assembled: 1,
+            groups_missing: 0,
+            channels: [vec![0.1], vec![0.2], vec![0.3]],
+        };
+
+        let rgb = vardct_xyb_to_linear_rgb(&xyb);
+
+        assert_eq!(rgb.width, 1);
+        assert_eq!(rgb.height, 1);
+        assert!((rgb.channels[0][0] - 0.860836).abs() < 1.0e-6);
+        assert!((rgb.channels[1][0] + 0.25376424).abs() < 1.0e-6);
+        assert!((rgb.channels[2][0] + 0.12067059).abs() < 1.0e-6);
     }
 
     #[test]

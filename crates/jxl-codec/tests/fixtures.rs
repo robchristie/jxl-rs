@@ -7,7 +7,8 @@ use std::{
 use jxl_codec::{
     BlendMode, ColorSpace, ColorTransform, DecodeConfig, ExtraChannelType, FileFormat,
     FrameEncoding, FrameSectionKind, FrameType, ImageRegion, ModularGroupExecution,
-    TransferFunction, TransformId, assemble_vardct_xyb_image, parse_file, parse_file_with_config,
+    TransferFunction, TransformId, assemble_vardct_linear_rgb_image, assemble_vardct_xyb_image,
+    parse_file, parse_file_with_config,
 };
 
 #[test]
@@ -816,6 +817,47 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         ],
         [
             3082885028, 979252264, 3128142621, 939077272, 1037259029, 993675808
+        ]
+    );
+    let rgb_image = assemble_vardct_linear_rgb_image(plan).unwrap().unwrap();
+    assert_eq!(rgb_image.width, 320);
+    assert_eq!(rgb_image.height, 192);
+    assert_eq!(
+        rgb_image
+            .channels
+            .iter()
+            .map(|channel| {
+                channel
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, sample)| **sample != 0.0)
+                    .fold((0usize, 0u64), |(count, checksum), (index, sample)| {
+                        let checksum = checksum
+                            .wrapping_mul(1_099_511_628_211)
+                            .wrapping_add(index as u64)
+                            .rotate_left(11)
+                            ^ sample.to_bits() as u64;
+                        (count + 1, checksum)
+                    })
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (61440, 15064254349359623470),
+            (61440, 12335775192485236224),
+            (61440, 17103813569572295799),
+        ]
+    );
+    assert_eq!(
+        [
+            rgb_image.channels[0][0].to_bits(),
+            rgb_image.channels[1][0].to_bits(),
+            rgb_image.channels[2][0].to_bits(),
+            rgb_image.channels[0][(191 * 320 + 319) as usize].to_bits(),
+            rgb_image.channels[1][(191 * 320 + 319) as usize].to_bits(),
+            rgb_image.channels[2][(191 * 320 + 319) as usize].to_bits(),
+        ],
+        [
+            944338351, 952793869, 3107710532, 1015190061, 1015098281, 3159149374
         ]
     );
     assert_eq!(dequantized_grid.group, 0);
