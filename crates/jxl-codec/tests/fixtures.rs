@@ -609,6 +609,21 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         16906932721961906726
     );
     assert_eq!(channel_trace.block_summaries.len(), 8);
+    let mut summary_strategy_counts = std::collections::BTreeMap::<usize, usize>::new();
+    for summary in plan
+        .ac_group_metadata
+        .iter()
+        .filter_map(|metadata| metadata.channel_trace.as_ref())
+        .flat_map(|trace| trace.block_summaries.iter())
+    {
+        *summary_strategy_counts
+            .entry(summary.raw_strategy)
+            .or_default() += 1;
+    }
+    assert_eq!(
+        summary_strategy_counts.into_iter().collect::<Vec<_>>(),
+        vec![(0, 8), (2, 1), (4, 5), (13, 1), (14, 1)]
+    );
     let coefficient_summary = plan.ac_group_metadata[0]
         .coefficient_summary
         .as_ref()
