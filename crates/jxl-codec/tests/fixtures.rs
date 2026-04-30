@@ -620,6 +620,90 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         .unwrap();
     let dequantized_grid = plan.ac_group_metadata[0].dequantized_grid.as_ref().unwrap();
     let spatial_grid = plan.ac_group_metadata[0].spatial_grid.as_ref().unwrap();
+    let spatial_with_dc_grid = plan.ac_group_metadata[0]
+        .spatial_with_dc_grid
+        .as_ref()
+        .unwrap();
+    assert_eq!(spatial_with_dc_grid.group, 0);
+    assert_eq!(spatial_with_dc_grid.pass, 0);
+    assert_eq!(spatial_with_dc_grid.width_blocks, 32);
+    assert_eq!(spatial_with_dc_grid.height_blocks, 24);
+    assert_eq!(spatial_with_dc_grid.blocks_attempted, 477);
+    assert_eq!(spatial_with_dc_grid.blocks_transformed, 325);
+    assert_eq!(spatial_with_dc_grid.blocks_skipped, 152);
+    assert_eq!(
+        spatial_with_dc_grid
+            .per_channel
+            .iter()
+            .map(|channel| (channel.nonzero_samples, channel.sample_checksum))
+            .collect::<Vec<_>>(),
+        vec![
+            (20800, 1672132728476003188),
+            (20800, 667801018979819796),
+            (20800, 6904762356536387308),
+        ]
+    );
+    assert_eq!(
+        (0..spatial_with_dc_grid.height_blocks)
+            .flat_map(|block_y| {
+                (0..spatial_with_dc_grid.width_blocks).map(move |block_x| (block_x, block_y))
+            })
+            .find_map(|(block_x, block_y)| {
+                let samples = (0..3)
+                    .map(|channel| {
+                        (0..64)
+                            .filter_map(|sample| {
+                                spatial_with_dc_grid
+                                    .sample(channel, block_x, block_y, sample)
+                                    .filter(|value| *value != 0.0)
+                                    .map(|value| (channel, sample, value.to_bits()))
+                            })
+                            .take(8)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                samples
+                    .iter()
+                    .any(|channel| !channel.is_empty())
+                    .then_some((block_x, block_y, samples))
+            }),
+        Some((
+            2,
+            0,
+            vec![
+                vec![
+                    (0, 0, 3082451896),
+                    (0, 1, 3087639404),
+                    (0, 2, 3093015612),
+                    (0, 3, 3097718162),
+                    (0, 4, 3101519714),
+                    (0, 5, 3104408427),
+                    (0, 6, 3105752479),
+                    (0, 7, 3106479874),
+                ],
+                vec![
+                    (1, 0, 1029897145),
+                    (1, 1, 1029955996),
+                    (1, 2, 1030064737),
+                    (1, 3, 1030206815),
+                    (1, 4, 1030360599),
+                    (1, 5, 1030502677),
+                    (1, 6, 1030611418),
+                    (1, 7, 1030670269),
+                ],
+                vec![
+                    (2, 0, 1007527462),
+                    (2, 1, 1007704014),
+                    (2, 2, 1008030238),
+                    (2, 3, 1008456472),
+                    (2, 4, 1008917823),
+                    (2, 5, 1009344056),
+                    (2, 6, 1009670281),
+                    (2, 7, 1009846832),
+                ],
+            ],
+        ))
+    );
     assert_eq!(spatial_grid.group, 0);
     assert_eq!(spatial_grid.pass, 0);
     assert_eq!(spatial_grid.width_blocks, 32);
@@ -860,6 +944,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert!(plan.ac_group_metadata[1].base_dequantized_grid.is_none());
     assert!(plan.ac_group_metadata[1].dequantized_grid.is_none());
     assert!(plan.ac_group_metadata[1].spatial_grid.is_none());
+    assert!(plan.ac_group_metadata[1].spatial_with_dc_grid.is_none());
     assert_eq!(plan.modular_global_tree_payload_start_bits, Some(192));
     assert_eq!(plan.modular_global_tree_payload_end_bits, Some(1232));
     assert_eq!(plan.modular_global_tree_payload_len_bits, Some(1040));

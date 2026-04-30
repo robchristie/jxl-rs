@@ -630,6 +630,7 @@ pub struct VarDctAcGroupMetadata {
     pub base_dequantized_grid: Option<VarDctAcBaseDequantizedGrid>,
     pub dequantized_grid: Option<VarDctAcDequantizedGrid>,
     pub spatial_grid: Option<VarDctAcSpatialGrid>,
+    pub spatial_with_dc_grid: Option<VarDctAcSpatialGrid>,
     pub parse_error: Option<Error>,
 }
 
@@ -1488,6 +1489,7 @@ fn read_vardct_ac_group_metadata(
         base_dequantized_grid: None,
         dequantized_grid: None,
         spatial_grid: None,
+        spatial_with_dc_grid: None,
         parse_error: None,
     };
 
@@ -1551,10 +1553,23 @@ fn read_vardct_ac_group_metadata(
                                         dequantized_grid.as_ref().and_then(|dequantized| {
                                             spatialize_vardct_ac_dct8_grid(
                                                 dequantized,
+                                                None,
                                                 &metadata,
                                                 dc_groups,
                                             )
                                             .ok()
+                                        });
+                                    let spatial_with_dc_grid =
+                                        dequantized_grid.as_ref().and_then(|dequantized| {
+                                            global.and_then(|global| {
+                                                spatialize_vardct_ac_dct8_grid(
+                                                    dequantized,
+                                                    Some(global),
+                                                    &metadata,
+                                                    dc_groups,
+                                                )
+                                                .ok()
+                                            })
                                         });
                                     metadata.channel_trace = Some(trace);
                                     metadata.coefficient_summary = Some(summary);
@@ -1562,6 +1577,7 @@ fn read_vardct_ac_group_metadata(
                                     metadata.base_dequantized_grid = base_dequantized_grid;
                                     metadata.dequantized_grid = dequantized_grid;
                                     metadata.spatial_grid = spatial_grid;
+                                    metadata.spatial_with_dc_grid = spatial_with_dc_grid;
                                     Ok(probe)
                                 }
                                 Err(error) => Err(error),
@@ -2389,10 +2405,14 @@ fn write_dequantized_coefficient(
 
 fn spatialize_vardct_ac_dct8_grid(
     grid: &VarDctAcDequantizedGrid,
+    global: Option<&VarDctGlobalMetadata>,
     metadata: &VarDctAcGroupMetadata,
     dc_groups: &[VarDctDcGroupMetadata],
 ) -> Result<VarDctAcSpatialGrid> {
     let blocks = vardct_ac_blocks_for_group(metadata, dc_groups)?;
+    let dc_grid = global
+        .map(|global| vardct_dc_coefficients_for_group(metadata, global, dc_groups))
+        .transpose()?;
     let sample_len = grid
         .width_blocks
         .checked_mul(grid.height_blocks)
@@ -2430,6 +2450,9 @@ fn spatialize_vardct_ac_dct8_grid(
                         "invalid dequantized coefficient grid",
                     ))?;
             }
+            if let Some(dc_grid) = &dc_grid {
+                coefficients[0] = dc_grid.coefficient(channel, block.block_x, block.block_y)?;
+            }
             let samples = inverse_dct_8x8(&coefficients);
             for (sample, value) in samples.into_iter().enumerate() {
                 let index =
@@ -2439,6 +2462,80 @@ fn spatialize_vardct_ac_dct8_grid(
         }
     }
     Ok(spatial)
+}
+
+#[derive(Debug, Clone)]
+struct VarDctDcCoefficientGrid {
+    width_blocks: usize,
+    height_blocks: usize,
+    per_channel: [Vec<f32>; 3],
+}
+
+impl VarDctDcCoefficientGrid {
+    fn coefficient(&self, channel: usize, block_x: usize, block_y: usize) -> Result<f32> {
+        if channel >= self.per_channel.len()
+            || block_x >= self.width_blocks
+            || block_y >= self.height_blocks
+        {
+            return Err(Error::InvalidCodestream("invalid VarDCT DC coefficient"));
+        }
+        self.per_channel[channel]
+            .get(block_y * self.width_blocks + block_x)
+            .copied()
+            .ok_or(Error::InvalidCodestream("invalid VarDCT DC coefficient"))
+    }
+}
+
+fn vardct_dc_coefficients_for_group(
+    metadata: &VarDctAcGroupMetadata,
+    global: &VarDctGlobalMetadata,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<VarDctDcCoefficientGrid> {
+    const DEFAULT_DC_QUANT: [f32; 3] = [1.0 / 4096.0, 1.0 / 512.0, 1.0 / 256.0];
+    const XYB_DC_CHANNELS: [usize; 3] = [1, 0, 2];
+
+    let dc_group = vardct_dc_group_for_ac_group(metadata, dc_groups)?;
+    let var_dct_dc = dc_group
+        .var_dct_dc
+        .as_ref()
+        .ok_or(Error::Unsupported("VarDCT DC coefficients"))?;
+    let width_blocks = metadata.payload.group.width.div_ceil(8).min(256 / 8) as usize;
+    let height_blocks = metadata.payload.group.height.div_ceil(8).min(256 / 8) as usize;
+    let group_min_x = ((metadata.payload.group.x - dc_group.payload.group.x) / 8) as usize;
+    let group_min_y = ((metadata.payload.group.y - dc_group.payload.group.y) / 8) as usize;
+    let dc_quant = global.dc_dequant.coefficients.unwrap_or(DEFAULT_DC_QUANT);
+    let mut per_channel = [
+        vec![0.0; width_blocks * height_blocks],
+        vec![0.0; width_blocks * height_blocks],
+        vec![0.0; width_blocks * height_blocks],
+    ];
+
+    for output_channel in 0..3 {
+        let modular_channel_index = XYB_DC_CHANNELS[output_channel];
+        let channel = var_dct_dc
+            .channels
+            .iter()
+            .find(|channel| channel.channel_index == modular_channel_index)
+            .ok_or(Error::Unsupported("VarDCT DC coefficients"))?;
+        let scale = global.quantizer.inv_quant_dc * dc_quant[output_channel];
+        for y in 0..height_blocks {
+            for x in 0..width_blocks {
+                let source_x = group_min_x + x;
+                let source_y = group_min_y + y;
+                if source_x >= channel.width as usize || source_y >= channel.height as usize {
+                    return Err(Error::InvalidCodestream("invalid VarDCT DC coefficient"));
+                }
+                let sample = channel.samples[source_y * channel.width as usize + source_x];
+                per_channel[output_channel][y * width_blocks + x] = sample as f32 * scale;
+            }
+        }
+    }
+
+    Ok(VarDctDcCoefficientGrid {
+        width_blocks,
+        height_blocks,
+        per_channel,
+    })
 }
 
 fn write_spatial_sample(grid: &mut VarDctAcSpatialChannelGrid, index: usize, value: f32) {
