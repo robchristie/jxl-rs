@@ -1027,6 +1027,14 @@ fn assemble_vardct_xyb_image_from_groups(
     frame: &VarDctFrameMetadata,
     groups: &[VarDctAcGroupMetadata],
 ) -> Result<Option<VarDctXybImage>> {
+    assemble_vardct_xyb_image_from_groups_with_mode(frame, groups, VarDctAssemblyMode::Final)
+}
+
+fn assemble_vardct_xyb_image_from_groups_with_mode(
+    frame: &VarDctFrameMetadata,
+    groups: &[VarDctAcGroupMetadata],
+    mode: VarDctAssemblyMode,
+) -> Result<Option<VarDctXybImage>> {
     let sample_len = (frame.width as usize)
         .checked_mul(frame.height as usize)
         .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
@@ -1042,7 +1050,7 @@ fn assemble_vardct_xyb_image_from_groups(
         ],
     };
 
-    for metadata in final_vardct_ac_passes_by_group(groups) {
+    for metadata in vardct_ac_groups_for_assembly(groups, mode) {
         let Some(grid) = metadata.spatial_with_dc_grid.as_ref() else {
             image.groups_missing += 1;
             continue;
@@ -1058,6 +1066,23 @@ fn assemble_vardct_xyb_image_from_groups(
     }
 
     Ok((image.groups_assembled > 0).then_some(image))
+}
+
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+enum VarDctAssemblyMode {
+    Final,
+    Pass { pass: usize },
+}
+
+fn vardct_ac_groups_for_assembly(
+    groups: &[VarDctAcGroupMetadata],
+    mode: VarDctAssemblyMode,
+) -> Vec<&VarDctAcGroupMetadata> {
+    match mode {
+        VarDctAssemblyMode::Final => final_vardct_ac_passes_by_group(groups),
+        VarDctAssemblyMode::Pass { pass } => vardct_ac_passes_by_group(groups, pass),
+    }
 }
 
 fn final_vardct_ac_passes_by_group(
@@ -1076,6 +1101,18 @@ fn final_vardct_ac_passes_by_group(
             None => selected.push(metadata),
         }
     }
+    selected.sort_by_key(|metadata| metadata.payload.group.group);
+    selected
+}
+
+fn vardct_ac_passes_by_group(
+    groups: &[VarDctAcGroupMetadata],
+    pass: usize,
+) -> Vec<&VarDctAcGroupMetadata> {
+    let mut selected = groups
+        .iter()
+        .filter(|metadata| metadata.payload.pass == pass)
+        .collect::<Vec<_>>();
     selected.sort_by_key(|metadata| metadata.payload.group.group);
     selected
 }
@@ -6332,6 +6369,77 @@ mod tests {
         assert_eq!(image.sample(0, 0, 0), Some(20.0));
         assert_eq!(image.sample(1, 0, 0), Some(21.0));
         assert_eq!(image.sample(2, 0, 0), Some(22.0));
+    }
+
+    #[test]
+    fn vardct_xyb_image_assembly_can_select_specific_progressive_ac_pass() {
+        let mut pass0_spatial = VarDctAcSpatialGrid {
+            group: 0,
+            pass: 0,
+            width_blocks: 1,
+            height_blocks: 1,
+            blocks_attempted: 1,
+            blocks_transformed: 1,
+            blocks_skipped: 0,
+            per_channel: [
+                VarDctAcSpatialChannelGrid::new(DCT_BLOCK_SIZE),
+                VarDctAcSpatialChannelGrid::new(DCT_BLOCK_SIZE),
+                VarDctAcSpatialChannelGrid::new(DCT_BLOCK_SIZE),
+            ],
+        };
+        let mut pass2_spatial = pass0_spatial.clone();
+        pass2_spatial.pass = 2;
+        for channel in 0..3 {
+            pass0_spatial.per_channel[channel].samples[0] = (10.0 + channel as f32).to_bits();
+            pass2_spatial.per_channel[channel].samples[0] = (20.0 + channel as f32).to_bits();
+        }
+        let group = group(0, 0, 0, 8, 8);
+        let pass0 = ac_group_metadata_for_pass(0, group, Some(pass0_spatial));
+        let pass2 = ac_group_metadata_for_pass(2, group, Some(pass2_spatial));
+        let frame = vardct_frame_metadata(8, 8);
+
+        let image = assemble_vardct_xyb_image_from_groups_with_mode(
+            &frame,
+            &[pass2, pass0],
+            VarDctAssemblyMode::Pass { pass: 0 },
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(image.groups_assembled, 1);
+        assert_eq!(image.groups_missing, 0);
+        assert_eq!(image.sample(0, 0, 0), Some(10.0));
+        assert_eq!(image.sample(1, 0, 0), Some(11.0));
+        assert_eq!(image.sample(2, 0, 0), Some(12.0));
+    }
+
+    #[test]
+    fn vardct_xyb_image_assembly_missing_specific_pass_returns_none() {
+        let spatial = VarDctAcSpatialGrid {
+            group: 0,
+            pass: 0,
+            width_blocks: 1,
+            height_blocks: 1,
+            blocks_attempted: 1,
+            blocks_transformed: 1,
+            blocks_skipped: 0,
+            per_channel: [
+                VarDctAcSpatialChannelGrid::new(DCT_BLOCK_SIZE),
+                VarDctAcSpatialChannelGrid::new(DCT_BLOCK_SIZE),
+                VarDctAcSpatialChannelGrid::new(DCT_BLOCK_SIZE),
+            ],
+        };
+        let metadata = ac_group_metadata_for_pass(0, group(0, 0, 0, 8, 8), Some(spatial));
+        let frame = vardct_frame_metadata(8, 8);
+
+        let image = assemble_vardct_xyb_image_from_groups_with_mode(
+            &frame,
+            &[metadata],
+            VarDctAssemblyMode::Pass { pass: 2 },
+        )
+        .unwrap();
+
+        assert!(image.is_none());
     }
 
     #[test]
