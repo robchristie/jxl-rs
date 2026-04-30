@@ -1747,6 +1747,194 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
 }
 
 #[test]
+fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
+    let Some(cjxl) = reference_cjxl() else {
+        eprintln!("skipping generated progressive-AC VarDCT fixture; reference cjxl is not built");
+        return;
+    };
+
+    let input = unique_temp_path("jxl-rs-vardct-progressive-ac-source", "ppm");
+    let encoded = unique_temp_path("jxl-rs-vardct-progressive-ac", "jxl");
+    write_split_vardct_source_ppm(&input);
+
+    let cjxl_output = Command::new(&cjxl)
+        .arg(&input)
+        .arg(&encoded)
+        .args([
+            "-d",
+            "1.0",
+            "-m",
+            "0",
+            "--progressive_ac",
+            "--container=0",
+            "--quiet",
+        ])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&input);
+    assert!(
+        cjxl_output.status.success(),
+        "reference cjxl failed: {}",
+        String::from_utf8_lossy(&cjxl_output.stderr)
+    );
+
+    let encoded_bytes = std::fs::read(&encoded).unwrap();
+    let _ = std::fs::remove_file(&encoded);
+    let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+    let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+    let ac_global = plan.ac_global_metadata.as_ref().unwrap();
+
+    assert_eq!(ac_global.passes.len(), 3);
+    assert_eq!(
+        ac_global
+            .passes
+            .iter()
+            .map(|pass| (
+                pass.pass,
+                pass.used_orders,
+                pass.histogram_contexts,
+                pass.histogram_count,
+                pass.histogram_end_bits,
+                pass.use_prefix_code,
+                pass.log_alpha_size,
+                pass.error_bits,
+                pass.error.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                0,
+                Some(7),
+                Some(7425),
+                Some(13),
+                Some(2002),
+                Some(false),
+                Some(7),
+                None,
+                None
+            ),
+            (
+                1,
+                Some(7),
+                Some(7425),
+                Some(9),
+                Some(4230),
+                Some(false),
+                Some(7),
+                None,
+                None
+            ),
+            (
+                2,
+                Some(7),
+                Some(7425),
+                Some(11),
+                Some(10513),
+                Some(false),
+                Some(7),
+                None,
+                None
+            ),
+        ]
+    );
+    assert_eq!(plan.ac_group_payloads.len(), 6);
+    assert_eq!(
+        plan.ac_group_payloads
+            .iter()
+            .map(|payload| (
+                payload.pass,
+                payload.group.group,
+                payload.section.payload_range.clone()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 4130..5624),
+            (0, 1, 5624..5988),
+            (1, 0, 5988..7036),
+            (1, 1, 7036..7272),
+            (2, 0, 7272..9518),
+            (2, 1, 9518..10018),
+        ]
+    );
+    assert_eq!(plan.ac_group_metadata.len(), plan.ac_group_payloads.len());
+    assert_eq!(
+        plan.ac_group_metadata
+            .iter()
+            .map(|metadata| (
+                metadata.payload.pass,
+                metadata.payload.group.group,
+                metadata.cursor.payload_end_bits,
+                metadata.cursor.coefficient_stream_start_bits,
+                metadata.cursor.modular_ac_start_bits,
+                metadata.parse_error.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                0,
+                0,
+                11952,
+                Some(32),
+                None,
+                Some(jxl_codec::Error::Unsupported(
+                    "VarDCT AC coefficient stream decoding"
+                )),
+            ),
+            (
+                0,
+                1,
+                2912,
+                Some(32),
+                None,
+                Some(jxl_codec::Error::Unsupported(
+                    "VarDCT AC coefficient stream decoding"
+                )),
+            ),
+            (
+                1,
+                0,
+                8384,
+                Some(32),
+                None,
+                Some(jxl_codec::Error::Unsupported(
+                    "VarDCT AC coefficient stream decoding"
+                )),
+            ),
+            (
+                1,
+                1,
+                1888,
+                Some(32),
+                None,
+                Some(jxl_codec::Error::Unsupported(
+                    "VarDCT AC coefficient stream decoding"
+                )),
+            ),
+            (
+                2,
+                0,
+                17968,
+                Some(32),
+                None,
+                Some(jxl_codec::Error::Unsupported(
+                    "VarDCT AC coefficient stream decoding"
+                )),
+            ),
+            (
+                2,
+                1,
+                4000,
+                Some(32),
+                None,
+                Some(jxl_codec::Error::Unsupported(
+                    "VarDCT AC coefficient stream decoding"
+                )),
+            ),
+        ]
+    );
+}
+
+#[test]
 fn generated_vardct_intensity_target_scales_opsin_plan_when_available() {
     let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
         eprintln!("skipping generated VarDCT intensity fixture; reference tools are not built");
