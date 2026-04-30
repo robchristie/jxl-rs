@@ -1968,6 +1968,172 @@ fn generated_vardct_no_gaborish_skips_filter_when_available() {
     );
 }
 
+#[test]
+fn generated_vardct_epf_disabled_keeps_gaborish_when_available() {
+    let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+        eprintln!("skipping generated EPF-disabled VarDCT fixture; reference tools are not built");
+        return;
+    };
+
+    let input = unique_temp_path("jxl-rs-vardct-no-epf-source", "ppm");
+    let encoded = unique_temp_path("jxl-rs-vardct-no-epf", "jxl");
+    let reference_output = unique_temp_path("jxl-rs-vardct-no-epf-reference", "ppm");
+    write_split_vardct_source_ppm(&input);
+
+    let cjxl_output = Command::new(&cjxl)
+        .arg(&input)
+        .arg(&encoded)
+        .args([
+            "-d",
+            "1.0",
+            "-m",
+            "0",
+            "--container=0",
+            "--epf=0",
+            "--quiet",
+        ])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&input);
+    assert!(
+        cjxl_output.status.success(),
+        "reference cjxl failed: {}",
+        String::from_utf8_lossy(&cjxl_output.stderr)
+    );
+
+    let djxl_output = Command::new(&djxl)
+        .arg(&encoded)
+        .arg(&reference_output)
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        djxl_output.status.success(),
+        "reference djxl failed: {}",
+        String::from_utf8_lossy(&djxl_output.stderr)
+    );
+    let reference = std::fs::read(&reference_output).unwrap();
+    let reference = parse_ppm_rgb(&reference);
+    let _ = std::fs::remove_file(&reference_output);
+
+    let encoded_bytes = std::fs::read(&encoded).unwrap();
+    let _ = std::fs::remove_file(&encoded);
+    let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+    let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+    assert!(plan.loop_filter.gab);
+    assert_eq!(plan.loop_filter.epf_iters, 0);
+
+    let xyb_image = assemble_vardct_xyb_image(plan).unwrap().unwrap();
+    assert_eq!(xyb_image.width, 320);
+    assert_eq!(xyb_image.height, 192);
+    assert_eq!(xyb_image.groups_assembled, 2);
+    assert_eq!(xyb_image.groups_missing, 0);
+    let xyb_summary = xyb_image
+        .channels
+        .iter()
+        .map(|channel| {
+            channel
+                .iter()
+                .enumerate()
+                .filter(|(_, sample)| **sample != 0.0)
+                .fold((0usize, 0u64), |(count, checksum), (index, sample)| {
+                    let checksum = checksum
+                        .wrapping_mul(1_099_511_628_211)
+                        .wrapping_add(index as u64)
+                        .rotate_left(11)
+                        ^ sample.to_bits() as u64;
+                    (count + 1, checksum)
+                })
+        })
+        .collect::<Vec<_>>();
+    let xyb_anchors = [
+        xyb_image.sample(0, 0, 0).unwrap().to_bits(),
+        xyb_image.sample(1, 0, 0).unwrap().to_bits(),
+        xyb_image.sample(2, 0, 0).unwrap().to_bits(),
+        xyb_image.sample(0, 319, 191).unwrap().to_bits(),
+        xyb_image.sample(1, 319, 191).unwrap().to_bits(),
+        xyb_image.sample(2, 319, 191).unwrap().to_bits(),
+    ];
+
+    let rgb_image = assemble_vardct_linear_rgb_image(plan).unwrap().unwrap();
+    let rgb_summary = rgb_image
+        .channels
+        .iter()
+        .map(|channel| {
+            channel
+                .iter()
+                .enumerate()
+                .filter(|(_, sample)| **sample != 0.0)
+                .fold((0usize, 0u64), |(count, checksum), (index, sample)| {
+                    let checksum = checksum
+                        .wrapping_mul(1_099_511_628_211)
+                        .wrapping_add(index as u64)
+                        .rotate_left(11)
+                        ^ sample.to_bits() as u64;
+                    (count + 1, checksum)
+                })
+        })
+        .collect::<Vec<_>>();
+    let rgb_anchors = [
+        rgb_image.channels[0][0].to_bits(),
+        rgb_image.channels[1][0].to_bits(),
+        rgb_image.channels[2][0].to_bits(),
+        rgb_image.channels[0][(191 * 320 + 319) as usize].to_bits(),
+        rgb_image.channels[1][(191 * 320 + 319) as usize].to_bits(),
+        rgb_image.channels[2][(191 * 320 + 319) as usize].to_bits(),
+    ];
+
+    let srgb8_image = assemble_vardct_srgb8_image(plan).unwrap().unwrap();
+    let anchor_indices = [
+        0usize,
+        1,
+        2,
+        ((95 * 320 + 159) * 3) as usize,
+        ((95 * 320 + 159) * 3 + 1) as usize,
+        ((95 * 320 + 159) * 3 + 2) as usize,
+        ((191 * 320 + 319) * 3) as usize,
+        ((191 * 320 + 319) * 3 + 1) as usize,
+        ((191 * 320 + 319) * 3 + 2) as usize,
+    ];
+    let metrics = srgb8_oracle_metrics(&srgb8_image, &reference, &anchor_indices);
+    assert_eq!(
+        xyb_summary,
+        vec![
+            (59525, 3148783885712997862),
+            (59547, 8179999271320941248),
+            (59554, 11189150345044084047),
+        ]
+    );
+    assert_eq!(
+        xyb_anchors,
+        [
+            3082885028, 979076178, 3128274685, 940837884, 1037228049, 992849658
+        ]
+    );
+    assert_eq!(
+        rgb_summary,
+        vec![
+            (61440, 11220725426516025707),
+            (61440, 3408914844508450388),
+            (61440, 3579285547816920914),
+        ]
+    );
+    assert_eq!(
+        rgb_anchors,
+        [
+            944126269, 952684638, 3107735916, 1015174801, 1015065925, 3159140182
+        ]
+    );
+    assert_eq!(metrics.max_abs_error, 255);
+    assert_eq!(metrics.sum_abs_error, 20235971);
+    assert_eq!(metrics.checksum, 3789787639564895058);
+    assert_eq!(metrics.anchors, vec![0, 0, 0, 17, 14, 0, 34, 34, 0]);
+    assert_eq!(
+        metrics.reference_anchors,
+        vec![0, 1, 1, 125, 128, 124, 253, 255, 255]
+    );
+}
+
 fn parse_ppm_rgb(bytes: &[u8]) -> PpmRgb {
     let (magic, offset) = netpbm_token(bytes, 0);
     assert_eq!(magic, b"P6");
