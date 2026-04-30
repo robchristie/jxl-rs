@@ -7,8 +7,8 @@ use std::{
 use jxl_codec::{
     BlendMode, ColorSpace, ColorTransform, DecodeConfig, ExtraChannelType, FileFormat,
     FrameEncoding, FrameSectionKind, FrameType, ImageRegion, ModularGroupExecution,
-    TransferFunction, TransformId, assemble_vardct_linear_rgb_image, assemble_vardct_srgb8_image,
-    assemble_vardct_xyb_image, parse_file, parse_file_with_config,
+    TransferFunction, TransformId, VarDctSrgb8Image, assemble_vardct_linear_rgb_image,
+    assemble_vardct_srgb8_image, assemble_vardct_xyb_image, parse_file, parse_file_with_config,
 };
 
 #[test]
@@ -310,7 +310,17 @@ fn assembled_rgb_modular_pixels_match_reference_djxl_when_available() {
 struct PpmRgb {
     width: u32,
     height: u32,
+    maxval: u32,
     samples: Vec<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Srgb8OracleMetrics {
+    max_abs_error: u8,
+    sum_abs_error: u64,
+    checksum: u64,
+    anchors: Vec<u8>,
+    reference_anchors: Vec<u8>,
 }
 
 #[test]
@@ -863,28 +873,6 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         ]
     );
     let srgb8_image = assemble_vardct_srgb8_image(plan).unwrap().unwrap();
-    assert_eq!(srgb8_image.width, reference.width);
-    assert_eq!(srgb8_image.height, reference.height);
-    assert_eq!(srgb8_image.pixels.len(), reference.samples.len());
-    let mut max_abs_error = 0u8;
-    let mut sum_abs_error = 0u64;
-    let mut checksum = 0u64;
-    for (index, (&actual, &expected)) in srgb8_image
-        .pixels
-        .iter()
-        .zip(reference.samples.iter())
-        .enumerate()
-    {
-        let expected = u8::try_from(expected).unwrap();
-        let error = actual.abs_diff(expected);
-        max_abs_error = max_abs_error.max(error);
-        sum_abs_error += u64::from(error);
-        checksum = checksum
-            .wrapping_mul(1_099_511_628_211)
-            .wrapping_add(index as u64)
-            .rotate_left(11)
-            ^ u64::from(actual);
-    }
     let anchor_indices = [
         0usize,
         1,
@@ -896,20 +884,13 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         ((191 * 320 + 319) * 3 + 1) as usize,
         ((191 * 320 + 319) * 3 + 2) as usize,
     ];
-    let anchors = anchor_indices
-        .iter()
-        .map(|&index| srgb8_image.pixels[index])
-        .collect::<Vec<_>>();
-    let reference_anchors = anchor_indices
-        .iter()
-        .map(|&index| reference.samples[index])
-        .collect::<Vec<_>>();
-    assert_eq!(max_abs_error, 255);
-    assert_eq!(sum_abs_error, 20254198);
-    assert_eq!(checksum, 6608536069640658384);
-    assert_eq!(anchors, vec![0, 0, 0, 22, 17, 0, 34, 34, 0]);
+    let metrics = srgb8_oracle_metrics(&srgb8_image, &reference, &anchor_indices);
+    assert_eq!(metrics.max_abs_error, 255);
+    assert_eq!(metrics.sum_abs_error, 20254198);
+    assert_eq!(metrics.checksum, 6608536069640658384);
+    assert_eq!(metrics.anchors, vec![0, 0, 0, 22, 17, 0, 34, 34, 0]);
     assert_eq!(
-        reference_anchors,
+        metrics.reference_anchors,
         vec![0, 1, 1, 125, 128, 124, 253, 255, 255]
     );
     assert_eq!(dequantized_grid.group, 0);
@@ -1734,6 +1715,89 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_vardct_global_cursor_in_payload(global, global.section.section.payload_size);
 }
 
+#[test]
+fn generated_vardct_intensity_target_scales_opsin_plan_when_available() {
+    let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+        eprintln!("skipping generated VarDCT intensity fixture; reference tools are not built");
+        return;
+    };
+
+    let input = unique_temp_path("jxl-rs-vardct-intensity-source", "ppm");
+    let encoded = unique_temp_path("jxl-rs-vardct-intensity", "jxl");
+    let reference_output = unique_temp_path("jxl-rs-vardct-intensity-reference", "ppm");
+    write_split_vardct_source_ppm(&input);
+
+    let cjxl_output = Command::new(&cjxl)
+        .arg(&input)
+        .arg(&encoded)
+        .args([
+            "-d",
+            "1.0",
+            "-m",
+            "0",
+            "--container=0",
+            "--intensity_target=510",
+            "--quiet",
+        ])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&input);
+    assert!(
+        cjxl_output.status.success(),
+        "reference cjxl failed: {}",
+        String::from_utf8_lossy(&cjxl_output.stderr)
+    );
+
+    let djxl_output = Command::new(&djxl)
+        .arg(&encoded)
+        .arg(&reference_output)
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        djxl_output.status.success(),
+        "reference djxl failed: {}",
+        String::from_utf8_lossy(&djxl_output.stderr)
+    );
+    let reference = std::fs::read(&reference_output).unwrap();
+    let reference = parse_ppm_rgb(&reference);
+    let _ = std::fs::remove_file(&reference_output);
+
+    let encoded_bytes = std::fs::read(&encoded).unwrap();
+    let _ = std::fs::remove_file(&encoded);
+    let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+    assert!((codestream.metadata.tone_mapping.intensity_target - 510.0).abs() < 1.0e-3);
+    assert!(codestream.transform_data.opsin_inverse_matrix.is_none());
+    let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+    assert!((plan.opsin_params.inverse_matrix[0][0] - 5.5157833).abs() < 1.0e-6);
+    assert!((plan.opsin_params.inverse_matrix[1][1] - 2.2093852).abs() < 1.0e-6);
+    assert!((plan.opsin_params.inverse_matrix[2][2] - 0.9729641).abs() < 1.0e-6);
+    assert!((plan.opsin_params.opsin_biases[0] + 0.0037930732).abs() < 1.0e-9);
+    assert!((plan.opsin_params.opsin_biases_cbrt[0] + 0.15595423).abs() < 1.0e-7);
+
+    let srgb8_image = assemble_vardct_srgb8_image(plan).unwrap().unwrap();
+    let anchor_indices = [
+        0usize,
+        1,
+        2,
+        ((95 * 320 + 159) * 3) as usize,
+        ((95 * 320 + 159) * 3 + 1) as usize,
+        ((95 * 320 + 159) * 3 + 2) as usize,
+        ((191 * 320 + 319) * 3) as usize,
+        ((191 * 320 + 319) * 3 + 1) as usize,
+        ((191 * 320 + 319) * 3 + 2) as usize,
+    ];
+    let metrics = srgb8_oracle_metrics(&srgb8_image, &reference, &anchor_indices);
+    assert_eq!(metrics.max_abs_error, 255);
+    assert_eq!(metrics.sum_abs_error, 20686120);
+    assert_eq!(metrics.checksum, 6815371859480925080);
+    assert_eq!(metrics.anchors, vec![0, 0, 0, 19, 13, 0, 29, 29, 0]);
+    assert_eq!(
+        metrics.reference_anchors,
+        vec![0, 0, 0, 127, 126, 124, 253, 255, 255]
+    );
+}
+
 fn parse_ppm_rgb(bytes: &[u8]) -> PpmRgb {
     let (magic, offset) = netpbm_token(bytes, 0);
     assert_eq!(magic, b"P6");
@@ -1764,7 +1828,60 @@ fn parse_ppm_rgb(bytes: &[u8]) -> PpmRgb {
     PpmRgb {
         width,
         height,
+        maxval,
         samples,
+    }
+}
+
+fn srgb8_oracle_metrics(
+    image: &VarDctSrgb8Image,
+    reference: &PpmRgb,
+    anchor_indices: &[usize],
+) -> Srgb8OracleMetrics {
+    assert_eq!(image.width, reference.width);
+    assert_eq!(image.height, reference.height);
+    assert_eq!(image.pixels.len(), reference.samples.len());
+
+    let mut max_abs_error = 0u8;
+    let mut sum_abs_error = 0u64;
+    let mut checksum = 0u64;
+    for (index, (&actual, &expected)) in image
+        .pixels
+        .iter()
+        .zip(reference.samples.iter())
+        .enumerate()
+    {
+        let expected = ppm_sample_to_srgb8(expected, reference.maxval);
+        let error = actual.abs_diff(expected);
+        max_abs_error = max_abs_error.max(error);
+        sum_abs_error += u64::from(error);
+        checksum = checksum
+            .wrapping_mul(1_099_511_628_211)
+            .wrapping_add(index as u64)
+            .rotate_left(11)
+            ^ u64::from(actual);
+    }
+
+    Srgb8OracleMetrics {
+        max_abs_error,
+        sum_abs_error,
+        checksum,
+        anchors: anchor_indices
+            .iter()
+            .map(|&index| image.pixels[index])
+            .collect(),
+        reference_anchors: anchor_indices
+            .iter()
+            .map(|&index| ppm_sample_to_srgb8(reference.samples[index], reference.maxval))
+            .collect(),
+    }
+}
+
+fn ppm_sample_to_srgb8(sample: u16, maxval: u32) -> u8 {
+    match maxval {
+        255 => u8::try_from(sample).unwrap(),
+        65535 => ((u32::from(sample) * 255 + 32767) / 65535) as u8,
+        _ => unreachable!("unsupported PPM maxval"),
     }
 }
 
