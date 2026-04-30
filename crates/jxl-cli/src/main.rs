@@ -587,6 +587,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             trace.block_summaries.len()
                         );
                     }
+                    if let Some(summary) = &metadata.coefficient_summary {
+                        println!(
+                            "First frame VarDCT AC coefficient summary: pass={} group={} blocks={} final_bits={} first_block_checksum={} ch0=({},{},{}) ch1=({},{},{}) ch2=({},{},{})",
+                            summary.pass,
+                            summary.group,
+                            summary.blocks_decoded,
+                            summary.final_bits,
+                            summary.first_block_checksum,
+                            summary.per_channel[0].blocks_decoded,
+                            summary.per_channel[0].nonzero_coefficients,
+                            summary.per_channel[0].coefficient_checksum,
+                            summary.per_channel[1].blocks_decoded,
+                            summary.per_channel[1].nonzero_coefficients,
+                            summary.per_channel[1].coefficient_checksum,
+                            summary.per_channel[2].blocks_decoded,
+                            summary.per_channel[2].nonzero_coefficients,
+                            summary.per_channel[2].coefficient_checksum
+                        );
+                    }
                 }
             }
             for group in &vardct.dc_groups {

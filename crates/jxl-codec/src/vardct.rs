@@ -557,6 +557,7 @@ pub struct VarDctCoeffOrderMetadata {
     pub size: usize,
     pub permutation_end: usize,
     pub checksum: u64,
+    pub positions: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -624,6 +625,7 @@ pub struct VarDctAcGroupMetadata {
     pub entropy_uses_prefix_code: Option<bool>,
     pub coefficient_probe: Option<VarDctAcCoefficientProbe>,
     pub channel_trace: Option<VarDctAcChannelTrace>,
+    pub coefficient_summary: Option<VarDctAcCoefficientSummary>,
     pub parse_error: Option<Error>,
 }
 
@@ -659,6 +661,8 @@ pub struct VarDctAcCoefficientProbe {
     pub coefficient_event_count: usize,
     pub coefficient_events: Vec<VarDctAcCoefficientEvent>,
     pub coefficient_event_checksum: u64,
+    pub placed_nonzero_coefficients: usize,
+    pub placed_coefficient_checksum: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -684,6 +688,24 @@ pub struct VarDctAcChannelTrace {
     pub row_nzeros_checksum: u64,
     pub coefficient_event_checksum: u64,
     pub block_summaries: Vec<VarDctAcBlockSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcCoefficientSummary {
+    pub group: usize,
+    pub pass: usize,
+    pub blocks_decoded: usize,
+    pub final_bits: usize,
+    pub per_channel: [VarDctAcChannelCoefficientSummary; 3],
+    pub first_block_checksum: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct VarDctAcChannelCoefficientSummary {
+    pub blocks_decoded: usize,
+    pub coefficients_written: usize,
+    pub nonzero_coefficients: usize,
+    pub coefficient_checksum: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1251,6 +1273,7 @@ fn read_vardct_ac_group_metadata(
         entropy_uses_prefix_code,
         coefficient_probe: None,
         channel_trace: None,
+        coefficient_summary: None,
         parse_error: None,
     };
 
@@ -1294,10 +1317,12 @@ fn read_vardct_ac_group_metadata(
                                 &entropy.context_map,
                                 &metadata,
                                 global,
+                                ac_global,
                                 dc_groups,
                             ) {
-                                Ok((probe, trace)) => {
+                                Ok((probe, trace, summary)) => {
                                     metadata.channel_trace = Some(trace);
+                                    metadata.coefficient_summary = Some(summary);
                                     Ok(probe)
                                 }
                                 Err(error) => Err(error),
@@ -1404,6 +1429,7 @@ fn probe_first_vardct_ac_coefficient(
     let first_block = first_vardct_ac_block(metadata, dc_groups)
         .ok_or(Error::Unsupported("VarDCT AC metadata grid"))?;
     let mut row_nzeros = vec![0i32; FIRST_AC_BLOCK_EVENT_LIMIT];
+    let mut natural_coeff_orders = vec![None; STRATEGY_BLOCKS_X.len()];
     decode_vardct_ac_block_probe(
         reader,
         symbol_reader,
@@ -1415,6 +1441,8 @@ fn probe_first_vardct_ac_coefficient(
         &mut row_nzeros,
         None,
         FIRST_AC_BLOCK_EVENT_LIMIT,
+        &mut natural_coeff_orders,
+        None,
         true,
     )
 }
@@ -1425,13 +1453,26 @@ fn trace_vardct_ac_group_channel(
     context_map: &[u8],
     metadata: &VarDctAcGroupMetadata,
     global: Option<&VarDctGlobalMetadata>,
+    ac_global: Option<&VarDctAcGlobalMetadata>,
     dc_groups: &[VarDctDcGroupMetadata],
-) -> Result<(VarDctAcCoefficientProbe, VarDctAcChannelTrace)> {
+) -> Result<(
+    VarDctAcCoefficientProbe,
+    VarDctAcChannelTrace,
+    VarDctAcCoefficientSummary,
+)> {
     const TRACE_CHANNEL: usize = 1;
     const CHANNEL_ORDER: [usize; 3] = [1, 0, 2];
     const SUMMARY_LIMIT: usize = 8;
 
     let global = global.ok_or(Error::Unsupported("VarDCT AC global metadata"))?;
+    let coeff_orders = ac_global
+        .and_then(|global_metadata| {
+            global_metadata
+                .passes
+                .iter()
+                .find(|pass| pass.pass == metadata.payload.pass)
+        })
+        .map(|pass| pass.coeff_orders.as_slice());
     let blocks = vardct_ac_blocks_for_group(metadata, dc_groups)?;
     let width_blocks = metadata.payload.group.width.div_ceil(8) as usize;
     let height_blocks = metadata.payload.group.height.div_ceil(8) as usize;
@@ -1447,6 +1488,16 @@ fn trace_vardct_ac_group_channel(
     let mut blocks_decoded = 0usize;
     let mut coefficient_events_decoded = 0usize;
     let mut coefficient_event_checksum = 0xcbf29ce484222325;
+    let mut natural_coeff_orders = vec![None; STRATEGY_BLOCKS_X.len()];
+    let mut coefficient_summary = VarDctAcCoefficientSummary {
+        group: metadata.payload.group.group,
+        pass: metadata.payload.pass,
+        blocks_decoded: 0,
+        final_bits: 0,
+        per_channel: [VarDctAcChannelCoefficientSummary::default(); 3],
+        first_block_checksum: 0,
+    };
+    let mut first_block_seen = false;
     let mut block_summaries = Vec::new();
 
     for block in blocks {
@@ -1470,8 +1521,22 @@ fn trace_vardct_ac_group_channel(
                 &mut row_nzeros[channel],
                 None,
                 width_blocks,
+                &mut natural_coeff_orders,
+                coeff_orders,
                 capture_events,
             )?;
+            coefficient_summary.blocks_decoded += 1;
+            let channel_summary = &mut coefficient_summary.per_channel[channel];
+            channel_summary.blocks_decoded += 1;
+            channel_summary.coefficients_written += probe.coefficient_event_count;
+            channel_summary.nonzero_coefficients += probe.placed_nonzero_coefficients;
+            channel_summary.coefficient_checksum = (channel_summary.coefficient_checksum
+                ^ probe.placed_coefficient_checksum)
+                .wrapping_mul(0x100000001b3);
+            if !first_block_seen {
+                coefficient_summary.first_block_checksum = probe.placed_coefficient_checksum;
+                first_block_seen = true;
+            }
             if channel == TRACE_CHANNEL {
                 blocks_decoded += 1;
                 coefficient_events_decoded += probe.coefficient_event_count;
@@ -1499,6 +1564,7 @@ fn trace_vardct_ac_group_channel(
     }
 
     let row_nzeros_checksum = checksum_i32_slice(&row_nzeros[TRACE_CHANNEL]);
+    coefficient_summary.final_bits = reader.bits_consumed();
     let trace = VarDctAcChannelTrace {
         channel: TRACE_CHANNEL,
         blocks_decoded,
@@ -1509,7 +1575,7 @@ fn trace_vardct_ac_group_channel(
         block_summaries,
     };
     let first_probe = first_probe.ok_or(Error::Unsupported("VarDCT AC metadata grid"))?;
-    Ok((first_probe, trace))
+    Ok((first_probe, trace, coefficient_summary))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1524,6 +1590,8 @@ fn decode_vardct_ac_block_probe(
     row_nzeros: &mut [i32],
     row_nzeros_top: Option<&[i32]>,
     nzeros_stride: usize,
+    natural_coeff_orders: &mut [Option<Vec<usize>>],
+    coeff_orders: Option<&[VarDctCoeffOrderMetadata]>,
     capture_events: bool,
 ) -> Result<VarDctAcCoefficientProbe> {
     let _ = row_nzeros_top;
@@ -1577,6 +1645,8 @@ fn decode_vardct_ac_block_probe(
     let mut coefficient_events = Vec::new();
     let mut coefficient_event_checksum = 0xcbf29ce484222325;
     let mut event_count = 0usize;
+    let mut placed_nonzero_coefficients = 0usize;
+    let mut placed_coefficient_checksum = 0xcbf29ce484222325;
     for k in covered_blocks..block_size {
         if remaining_nzeros == 0 {
             break;
@@ -1598,6 +1668,22 @@ fn decode_vardct_ac_block_probe(
         let u_coeff = symbol_reader.read_hybrid_uint_clustered(clustered_context, reader)?;
         let end_bits = reader.bits_consumed();
         let coeff = unpack_signed(u_coeff);
+        let coefficient_position = coefficient_order_position(
+            natural_coeff_orders,
+            coeff_orders,
+            order,
+            channel,
+            block.raw_strategy,
+            k,
+        )?;
+        if coeff != 0 {
+            placed_nonzero_coefficients += 1;
+            placed_coefficient_checksum = checksum_placed_coefficient(
+                placed_coefficient_checksum,
+                coefficient_position,
+                coeff,
+            );
+        }
         prev = usize::from(u_coeff != 0);
         remaining_nzeros = remaining_nzeros.saturating_sub(prev);
         let event = VarDctAcCoefficientEvent {
@@ -1648,6 +1734,8 @@ fn decode_vardct_ac_block_probe(
             Vec::with_capacity(event_count)
         },
         coefficient_event_checksum,
+        placed_nonzero_coefficients,
+        placed_coefficient_checksum,
     })
 }
 
@@ -1789,6 +1877,104 @@ fn vardct_nonzero_context(
     bucket * num_contexts + block_context
 }
 
+fn coefficient_order_position(
+    natural_coeff_orders: &mut [Option<Vec<usize>>],
+    coeff_orders: Option<&[VarDctCoeffOrderMetadata]>,
+    order: usize,
+    channel: usize,
+    raw_strategy: usize,
+    k: usize,
+) -> Result<usize> {
+    if let Some(custom_order) = coeff_orders.and_then(|orders| {
+        orders
+            .iter()
+            .find(|candidate| candidate.order == order && candidate.channel == channel)
+    }) {
+        return custom_order
+            .positions
+            .get(k)
+            .copied()
+            .ok_or(Error::InvalidCodestream("invalid coefficient order index"));
+    }
+    let order = natural_coeff_orders
+        .get_mut(raw_strategy)
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+    if order.is_none() {
+        *order = Some(natural_coeff_order(raw_strategy)?);
+    }
+    order
+        .as_ref()
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?
+        .get(k)
+        .copied()
+        .ok_or(Error::InvalidCodestream("invalid coefficient order index"))
+}
+
+fn natural_coeff_order(raw_strategy: usize) -> Result<Vec<usize>> {
+    let mut cx = *STRATEGY_BLOCKS_X
+        .get(raw_strategy)
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+    let mut cy = *STRATEGY_BLOCKS_Y
+        .get(raw_strategy)
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+    if cy > cx {
+        std::mem::swap(&mut cy, &mut cx);
+    }
+    let size = cx * cy * DCT_BLOCK_SIZE;
+    let mut order = vec![0usize; size];
+    let xs = cx / cy;
+    let xsm = xs - 1;
+    let xss = ceil_log2_nonzero(xs);
+    let block_dim = 8usize;
+    let full = cx * block_dim;
+    let mut cur = cx * cy;
+
+    for i in 0..full {
+        for j in 0..=i {
+            let mut x = j;
+            let mut y = i - j;
+            if i % 2 == 1 {
+                std::mem::swap(&mut x, &mut y);
+            }
+            if (y & xsm) != 0 {
+                continue;
+            }
+            y >>= xss;
+            let val = if x < cx && y < cy {
+                y * cx + x
+            } else {
+                let val = cur;
+                cur += 1;
+                val
+            };
+            if val < size {
+                order[val] = y * cx * block_dim + x;
+            }
+        }
+    }
+
+    for ip in (1..full).rev() {
+        let i = ip - 1;
+        for j in 0..=i {
+            let mut x = full - 1 - (i - j);
+            let mut y = full - 1 - j;
+            if i % 2 == 1 {
+                std::mem::swap(&mut x, &mut y);
+            }
+            if (y & xsm) != 0 {
+                continue;
+            }
+            y >>= xss;
+            let val = cur;
+            cur += 1;
+            if val < size {
+                order[val] = y * cx * block_dim + x;
+            }
+        }
+    }
+    Ok(order)
+}
+
 fn zero_density_context(
     nonzeros_left: usize,
     k: usize,
@@ -1835,6 +2021,14 @@ fn checksum_i32_slice(values: &[i32]) -> u64 {
     values.iter().fold(0xcbf29ce484222325, |hash, value| {
         (hash ^ i64::from(*value) as u64).wrapping_mul(0x100000001b3)
     })
+}
+
+fn checksum_placed_coefficient(hash: u64, position: usize, coefficient: i32) -> u64 {
+    [position as u64, i64::from(coefficient) as u64]
+        .into_iter()
+        .fold(hash, |hash, value| {
+            (hash ^ value).wrapping_mul(0x100000001b3)
+        })
 }
 
 fn checksum_coefficient_event(hash: u64, event: &VarDctAcCoefficientEvent) -> u64 {
@@ -2248,6 +2442,7 @@ fn read_vardct_coeff_orders(
                 &context_map,
                 order,
                 channel,
+                raw_strategy,
                 llf,
                 size,
             ) {
@@ -2282,6 +2477,7 @@ fn read_vardct_coeff_order_permutation(
     context_map: &[u8],
     order: usize,
     channel: usize,
+    raw_strategy: usize,
     skip: usize,
     size: usize,
 ) -> Result<VarDctCoeffOrderMetadata> {
@@ -2305,7 +2501,18 @@ fn read_vardct_coeff_order_permutation(
         *value = code;
         last = code as usize;
     }
-    let checksum = checksum_permutation(&decode_lehmer_code(&lehmer)?);
+    let permutation = decode_lehmer_code(&lehmer)?;
+    let natural_order = natural_coeff_order(raw_strategy)?;
+    let positions = permutation
+        .iter()
+        .map(|&index| {
+            natural_order
+                .get(index)
+                .copied()
+                .ok_or(Error::InvalidCodestream("invalid coefficient-order entry"))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let checksum = checksum_permutation(&permutation);
 
     Ok(VarDctCoeffOrderMetadata {
         order,
@@ -2314,6 +2521,7 @@ fn read_vardct_coeff_order_permutation(
         size,
         permutation_end: end,
         checksum,
+        positions,
     })
 }
 

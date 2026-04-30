@@ -584,7 +584,37 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         16906932721961906726
     );
     assert_eq!(channel_trace.block_summaries.len(), 8);
+    let coefficient_summary = plan.ac_group_metadata[0]
+        .coefficient_summary
+        .as_ref()
+        .unwrap();
+    assert_eq!(coefficient_summary.group, 0);
+    assert_eq!(coefficient_summary.pass, 0);
+    assert_eq!(coefficient_summary.blocks_decoded, 1431);
+    assert_eq!(coefficient_summary.final_bits, 35936);
+    assert_eq!(
+        coefficient_summary.first_block_checksum,
+        11040521211606080740
+    );
+    assert_eq!(
+        coefficient_summary
+            .per_channel
+            .iter()
+            .map(|summary| (
+                summary.blocks_decoded,
+                summary.coefficients_written,
+                summary.nonzero_coefficients,
+                summary.coefficient_checksum,
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (477, 3371, 1754, 4634077023953618635),
+            (477, 9983, 5649, 1443869010259603971),
+            (477, 2866, 1868, 3247447943926418888),
+        ]
+    );
     assert!(plan.ac_group_metadata[1].channel_trace.is_none());
+    assert!(plan.ac_group_metadata[1].coefficient_summary.is_none());
     assert_eq!(plan.modular_global_tree_payload_start_bits, Some(192));
     assert_eq!(plan.modular_global_tree_payload_end_bits, Some(1232));
     assert_eq!(plan.modular_global_tree_payload_len_bits, Some(1040));
