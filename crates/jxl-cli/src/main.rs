@@ -652,6 +652,24 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             grid.per_channel[2].coefficient_checksum
                         );
                     }
+                    if let Some(grid) = &metadata.spatial_grid {
+                        println!(
+                            "First frame VarDCT AC DCT8 spatial grid: pass={} group={} size={}x{} blocks=({},{},{}) ch0=({},{}) ch1=({},{}) ch2=({},{})",
+                            grid.pass,
+                            grid.group,
+                            grid.width_blocks,
+                            grid.height_blocks,
+                            grid.blocks_attempted,
+                            grid.blocks_transformed,
+                            grid.blocks_skipped,
+                            grid.per_channel[0].nonzero_samples,
+                            grid.per_channel[0].sample_checksum,
+                            grid.per_channel[1].nonzero_samples,
+                            grid.per_channel[1].sample_checksum,
+                            grid.per_channel[2].nonzero_samples,
+                            grid.per_channel[2].sample_checksum
+                        );
+                    }
                 }
             }
             for group in &vardct.dc_groups {

@@ -619,6 +619,87 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         .as_ref()
         .unwrap();
     let dequantized_grid = plan.ac_group_metadata[0].dequantized_grid.as_ref().unwrap();
+    let spatial_grid = plan.ac_group_metadata[0].spatial_grid.as_ref().unwrap();
+    assert_eq!(spatial_grid.group, 0);
+    assert_eq!(spatial_grid.pass, 0);
+    assert_eq!(spatial_grid.width_blocks, 32);
+    assert_eq!(spatial_grid.height_blocks, 24);
+    assert_eq!(spatial_grid.blocks_attempted, 477);
+    assert_eq!(spatial_grid.blocks_transformed, 325);
+    assert_eq!(spatial_grid.blocks_skipped, 152);
+    assert_eq!(
+        spatial_grid
+            .per_channel
+            .iter()
+            .map(|channel| (channel.nonzero_samples, channel.sample_checksum))
+            .collect::<Vec<_>>(),
+        vec![
+            (18630, 6501391360360730637),
+            (20736, 14301705538478083478),
+            (20800, 14073632302109356825),
+        ]
+    );
+    assert_eq!(
+        (0..spatial_grid.height_blocks)
+            .flat_map(|block_y| {
+                (0..spatial_grid.width_blocks).map(move |block_x| (block_x, block_y))
+            })
+            .find_map(|(block_x, block_y)| {
+                let samples = (0..3)
+                    .map(|channel| {
+                        (0..64)
+                            .filter_map(|sample| {
+                                spatial_grid
+                                    .sample(channel, block_x, block_y, sample)
+                                    .filter(|value| *value != 0.0)
+                                    .map(|value| (channel, sample, value.to_bits()))
+                            })
+                            .take(8)
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                samples
+                    .iter()
+                    .any(|channel| !channel.is_empty())
+                    .then_some((block_x, block_y, samples))
+            }),
+        Some((
+            2,
+            0,
+            vec![
+                vec![
+                    (0, 0, 3082451896),
+                    (0, 1, 3087639404),
+                    (0, 2, 3093015612),
+                    (0, 3, 3097718162),
+                    (0, 4, 3101519714),
+                    (0, 5, 3104408427),
+                    (0, 6, 3105752479),
+                    (0, 7, 3106479874),
+                ],
+                vec![
+                    (1, 0, 1006930935),
+                    (1, 1, 1007166337),
+                    (1, 2, 1007601304),
+                    (1, 3, 1008169615),
+                    (1, 4, 1008784749),
+                    (1, 5, 1009353060),
+                    (1, 6, 1009788026),
+                    (1, 7, 1010023428),
+                ],
+                vec![
+                    (2, 0, 1002885618),
+                    (2, 1, 1003238722),
+                    (2, 2, 1003891170),
+                    (2, 3, 1004743638),
+                    (2, 4, 1005666340),
+                    (2, 5, 1006518806),
+                    (2, 6, 1006902108),
+                    (2, 7, 1007078660),
+                ],
+            ],
+        ))
+    );
     assert_eq!(dequantized_grid.group, 0);
     assert_eq!(dequantized_grid.pass, 0);
     assert_eq!(dequantized_grid.width_blocks, 32);
@@ -778,6 +859,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert!(plan.ac_group_metadata[1].coefficient_grid.is_none());
     assert!(plan.ac_group_metadata[1].base_dequantized_grid.is_none());
     assert!(plan.ac_group_metadata[1].dequantized_grid.is_none());
+    assert!(plan.ac_group_metadata[1].spatial_grid.is_none());
     assert_eq!(plan.modular_global_tree_payload_start_bits, Some(192));
     assert_eq!(plan.modular_global_tree_payload_end_bits, Some(1232));
     assert_eq!(plan.modular_global_tree_payload_len_bits, Some(1040));

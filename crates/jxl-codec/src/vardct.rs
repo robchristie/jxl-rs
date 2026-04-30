@@ -629,6 +629,7 @@ pub struct VarDctAcGroupMetadata {
     pub coefficient_grid: Option<VarDctAcCoefficientGrid>,
     pub base_dequantized_grid: Option<VarDctAcBaseDequantizedGrid>,
     pub dequantized_grid: Option<VarDctAcDequantizedGrid>,
+    pub spatial_grid: Option<VarDctAcSpatialGrid>,
     pub parse_error: Option<Error>,
 }
 
@@ -855,6 +856,60 @@ impl VarDctAcDequantizedGrid {
         let index = ((block_y * self.width_blocks + block_x) * DCT_BLOCK_SIZE) + coeff;
         self.per_channel[channel]
             .coefficients
+            .get(index)
+            .copied()
+            .map(f32::from_bits)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcSpatialGrid {
+    pub group: usize,
+    pub pass: usize,
+    pub width_blocks: usize,
+    pub height_blocks: usize,
+    pub blocks_attempted: usize,
+    pub blocks_transformed: usize,
+    pub blocks_skipped: usize,
+    pub per_channel: [VarDctAcSpatialChannelGrid; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcSpatialChannelGrid {
+    /// Spatial-domain DCT8 samples as `f32::to_bits()` for deterministic metadata equality.
+    pub samples: Vec<u32>,
+    pub nonzero_samples: usize,
+    pub sample_checksum: u64,
+}
+
+impl VarDctAcSpatialChannelGrid {
+    fn new(len: usize) -> Self {
+        Self {
+            samples: vec![0; len],
+            nonzero_samples: 0,
+            sample_checksum: 0,
+        }
+    }
+}
+
+impl VarDctAcSpatialGrid {
+    pub fn sample(
+        &self,
+        channel: usize,
+        block_x: usize,
+        block_y: usize,
+        sample: usize,
+    ) -> Option<f32> {
+        if channel >= self.per_channel.len()
+            || block_x >= self.width_blocks
+            || block_y >= self.height_blocks
+            || sample >= DCT_BLOCK_SIZE
+        {
+            return None;
+        }
+        let index = ((block_y * self.width_blocks + block_x) * DCT_BLOCK_SIZE) + sample;
+        self.per_channel[channel]
+            .samples
             .get(index)
             .copied()
             .map(f32::from_bits)
@@ -1432,6 +1487,7 @@ fn read_vardct_ac_group_metadata(
         coefficient_grid: None,
         base_dequantized_grid: None,
         dequantized_grid: None,
+        spatial_grid: None,
         parse_error: None,
     };
 
@@ -1491,11 +1547,21 @@ fn read_vardct_ac_group_metadata(
                                         dc_groups,
                                     )
                                     .ok();
+                                    let spatial_grid =
+                                        dequantized_grid.as_ref().and_then(|dequantized| {
+                                            spatialize_vardct_ac_dct8_grid(
+                                                dequantized,
+                                                &metadata,
+                                                dc_groups,
+                                            )
+                                            .ok()
+                                        });
                                     metadata.channel_trace = Some(trace);
                                     metadata.coefficient_summary = Some(summary);
                                     metadata.coefficient_grid = Some(grid);
                                     metadata.base_dequantized_grid = base_dequantized_grid;
                                     metadata.dequantized_grid = dequantized_grid;
+                                    metadata.spatial_grid = spatial_grid;
                                     Ok(probe)
                                 }
                                 Err(error) => Err(error),
@@ -2319,6 +2385,91 @@ fn write_dequantized_coefficient(
     grid.nonzero_coefficients += 1;
     grid.coefficient_checksum =
         checksum_dequantized_coefficient(grid.coefficient_checksum, index, value);
+}
+
+fn spatialize_vardct_ac_dct8_grid(
+    grid: &VarDctAcDequantizedGrid,
+    metadata: &VarDctAcGroupMetadata,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<VarDctAcSpatialGrid> {
+    let blocks = vardct_ac_blocks_for_group(metadata, dc_groups)?;
+    let sample_len = grid
+        .width_blocks
+        .checked_mul(grid.height_blocks)
+        .and_then(|blocks| blocks.checked_mul(DCT_BLOCK_SIZE))
+        .ok_or(Error::InvalidCodestream(
+            "AC group spatial grid is too large",
+        ))?;
+    let mut spatial = VarDctAcSpatialGrid {
+        group: grid.group,
+        pass: grid.pass,
+        width_blocks: grid.width_blocks,
+        height_blocks: grid.height_blocks,
+        blocks_attempted: blocks.len(),
+        blocks_transformed: 0,
+        blocks_skipped: 0,
+        per_channel: [
+            VarDctAcSpatialChannelGrid::new(sample_len),
+            VarDctAcSpatialChannelGrid::new(sample_len),
+            VarDctAcSpatialChannelGrid::new(sample_len),
+        ],
+    };
+
+    for block in blocks {
+        if block.raw_strategy != 0 {
+            spatial.blocks_skipped += 1;
+            continue;
+        }
+        spatial.blocks_transformed += 1;
+        for channel in 0..3 {
+            let mut coefficients = [0.0f32; DCT_BLOCK_SIZE];
+            for coeff in 0..DCT_BLOCK_SIZE {
+                coefficients[coeff] = grid
+                    .coefficient(channel, block.block_x, block.block_y, coeff)
+                    .ok_or(Error::InvalidCodestream(
+                        "invalid dequantized coefficient grid",
+                    ))?;
+            }
+            let samples = inverse_dct_8x8(&coefficients);
+            for (sample, value) in samples.into_iter().enumerate() {
+                let index =
+                    ((block.block_y * grid.width_blocks + block.block_x) * DCT_BLOCK_SIZE) + sample;
+                write_spatial_sample(&mut spatial.per_channel[channel], index, value);
+            }
+        }
+    }
+    Ok(spatial)
+}
+
+fn write_spatial_sample(grid: &mut VarDctAcSpatialChannelGrid, index: usize, value: f32) {
+    if value == 0.0 {
+        return;
+    }
+    grid.samples[index] = value.to_bits();
+    grid.nonzero_samples += 1;
+    grid.sample_checksum = checksum_dequantized_coefficient(grid.sample_checksum, index, value);
+}
+
+fn inverse_dct_8x8(coefficients: &[f32; DCT_BLOCK_SIZE]) -> [f32; DCT_BLOCK_SIZE] {
+    let mut samples = [0.0f32; DCT_BLOCK_SIZE];
+    let inv_sqrt_2 = std::f32::consts::FRAC_1_SQRT_2;
+    for y in 0..8 {
+        for x in 0..8 {
+            let mut sum = 0.0f32;
+            for v in 0..8 {
+                let cv = if v == 0 { inv_sqrt_2 } else { 1.0 };
+                let cos_y = (((2 * y + 1) as f32 * v as f32 * std::f32::consts::PI) / 16.0).cos();
+                for u in 0..8 {
+                    let cu = if u == 0 { inv_sqrt_2 } else { 1.0 };
+                    let cos_x =
+                        (((2 * x + 1) as f32 * u as f32 * std::f32::consts::PI) / 16.0).cos();
+                    sum += cu * cv * coefficients[v * 8 + u] * cos_x * cos_y;
+                }
+            }
+            samples[y * 8 + x] = 0.25 * sum;
+        }
+    }
+    samples
 }
 
 fn coefficient_grid_index_for_local_position(
@@ -4485,6 +4636,36 @@ mod tests {
         assert_eq!(plan.ac_group_payloads[0].group.group, 0);
         assert_eq!(plan.ac_group_payloads[1].section.payload_range, 36..49);
         assert_eq!(plan.ac_group_payloads[1].group.group, 1);
+    }
+
+    #[test]
+    fn inverse_dct_8x8_zero_block_stays_zero() {
+        let coefficients = [0.0f32; DCT_BLOCK_SIZE];
+        let samples = inverse_dct_8x8(&coefficients);
+
+        assert!(samples.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn inverse_dct_8x8_dc_only_is_constant() {
+        let mut coefficients = [0.0f32; DCT_BLOCK_SIZE];
+        coefficients[0] = 8.0;
+        let samples = inverse_dct_8x8(&coefficients);
+
+        for sample in samples {
+            assert!((sample - 1.0).abs() < 1.0e-6);
+        }
+    }
+
+    #[test]
+    fn inverse_dct_8x8_single_horizontal_ac_has_expected_shape() {
+        let mut coefficients = [0.0f32; DCT_BLOCK_SIZE];
+        coefficients[1] = 1.0;
+        let samples = inverse_dct_8x8(&coefficients);
+
+        assert!((samples[0] - 0.17337999).abs() < 1.0e-6);
+        assert!((samples[7] + 0.17337997).abs() < 1.0e-6);
+        assert!((samples[8] - samples[0]).abs() < 1.0e-6);
     }
 
     #[test]
