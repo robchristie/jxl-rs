@@ -62,7 +62,7 @@ pub use vardct::{
     VarDctBlockContextMapMetadata, VarDctCoeffOrderMetadata, VarDctColorCorrelationMetadata,
     VarDctContextMapProbe, VarDctContextMapProbeKind, VarDctContextMapProbeStage,
     VarDctDcDequantMetadata, VarDctDcGroupCursorMetadata, VarDctDcGroupMetadata,
-    VarDctDcGroupPayloadMetadata, VarDctDecodePlan, VarDctFrameMetadata,
+    VarDctDcGroupPayloadMetadata, VarDctDecodePlan, VarDctEpfMetadata, VarDctFrameMetadata,
     VarDctGlobalCursorMetadata, VarDctGlobalMetadata, VarDctGroupMetadata,
     VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata, VarDctHistogramProbeStage,
     VarDctOpsinParams, VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata,

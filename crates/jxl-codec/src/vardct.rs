@@ -472,6 +472,7 @@ pub struct VarDctDecodePlan {
     pub frame: VarDctFrameMetadata,
     pub loop_filter: LoopFilter,
     pub opsin_params: VarDctOpsinParams,
+    pub epf_metadata: Option<VarDctEpfMetadata>,
     pub global: Option<VarDctGlobalMetadata>,
     pub modular_global_tree_payload_start_bits: Option<usize>,
     pub modular_global_tree_payload_end_bits: Option<usize>,
@@ -527,6 +528,21 @@ pub struct VarDctOpsinParams {
     pub inverse_matrix: [[f32; 3]; 3],
     pub opsin_biases: [f32; 3],
     pub opsin_biases_cbrt: [f32; 3],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VarDctEpfMetadata {
+    pub width_blocks: usize,
+    pub height_blocks: usize,
+    pub raw_quant_field: Vec<i32>,
+    pub epf_sharpness: Vec<u8>,
+    /// Per-image-block inverse sigma as `f32::to_bits()`.
+    pub inv_sigma: Vec<u32>,
+    pub first_block_count: usize,
+    pub raw_quant_checksum: u64,
+    pub epf_sharpness_checksum: u64,
+    pub inv_sigma_checksum: u64,
+    pub parse_error: Option<Error>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1690,6 +1706,9 @@ pub fn read_vardct_decode_plan(
             )
         })
         .collect::<Result<Vec<_>>>()?;
+    let epf_metadata = (frame_header.loop_filter.epf_iters > 0)
+        .then(|| vardct_epf_metadata(frame_header, &frame, global.as_ref(), &dc_group_metadata))
+        .transpose()?;
     let modular_global_tree_payload_start_bits = global_payload
         .as_ref()
         .and_then(|payload| payload.payload_range.start.checked_mul(8));
@@ -1714,6 +1733,7 @@ pub fn read_vardct_decode_plan(
         frame,
         loop_filter: frame_header.loop_filter.clone(),
         opsin_params: vardct_opsin_params(metadata, transform_data),
+        epf_metadata,
         global,
         modular_global_tree_payload_start_bits,
         modular_global_tree_payload_end_bits,
@@ -1774,6 +1794,263 @@ pub fn read_vardct_decode_plan(
         dc_group_payloads,
         dc_group_metadata,
     }))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct VarDctEpfFirstBlock {
+    x: usize,
+    y: usize,
+    raw_strategy: usize,
+    quant: i32,
+}
+
+fn vardct_epf_metadata(
+    frame_header: &FrameHeader,
+    frame: &VarDctFrameMetadata,
+    global: Option<&VarDctGlobalMetadata>,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<VarDctEpfMetadata> {
+    let width_blocks = frame.width.div_ceil(8) as usize;
+    let height_blocks = frame.height.div_ceil(8) as usize;
+    let sample_count = width_blocks
+        .checked_mul(height_blocks)
+        .ok_or(Error::InvalidCodestream("VarDCT EPF metadata is too large"))?;
+    let mut metadata = VarDctEpfMetadata {
+        width_blocks,
+        height_blocks,
+        raw_quant_field: vec![0; sample_count],
+        epf_sharpness: vec![0; sample_count],
+        inv_sigma: vec![0; sample_count],
+        first_block_count: 0,
+        raw_quant_checksum: 0,
+        epf_sharpness_checksum: 0,
+        inv_sigma_checksum: 0,
+        parse_error: None,
+    };
+
+    let Some(global) = global else {
+        metadata.parse_error = Some(Error::Unsupported("VarDCT EPF metadata"));
+        return Ok(metadata);
+    };
+
+    match fill_vardct_epf_metadata(frame_header, global, dc_groups, &mut metadata) {
+        Ok(()) => {}
+        Err(error) => metadata.parse_error = Some(error),
+    }
+    metadata.raw_quant_checksum = checksum_i32_samples(&metadata.raw_quant_field);
+    metadata.epf_sharpness_checksum = checksum_u8_samples(&metadata.epf_sharpness);
+    metadata.inv_sigma_checksum = checksum_u32_samples(&metadata.inv_sigma);
+    Ok(metadata)
+}
+
+fn fill_vardct_epf_metadata(
+    frame_header: &FrameHeader,
+    global: &VarDctGlobalMetadata,
+    dc_groups: &[VarDctDcGroupMetadata],
+    metadata: &mut VarDctEpfMetadata,
+) -> Result<()> {
+    let mut first_blocks = Vec::new();
+    for dc_group in dc_groups {
+        collect_vardct_epf_fields_for_dc_group(dc_group, metadata, &mut first_blocks)?;
+    }
+    metadata.first_block_count = first_blocks.len();
+
+    let sharp_lut = effective_epf_sharp_lut(&frame_header.loop_filter);
+    let epf_quant_mul = frame_header.loop_filter.epf_quant_mul.unwrap_or(0.46);
+    let quant_scale = global.quantizer.global_scale as f32 / GLOBAL_SCALE_DENOMINATOR;
+    if quant_scale <= 0.0 {
+        return Err(Error::InvalidCodestream("invalid VarDCT quantizer"));
+    }
+
+    for block in first_blocks {
+        let block_x = *STRATEGY_BLOCKS_X
+            .get(block.raw_strategy)
+            .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+        let block_y = *STRATEGY_BLOCKS_Y
+            .get(block.raw_strategy)
+            .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+        if block.quant <= 0 {
+            return Err(Error::InvalidCodestream("invalid AC quant field"));
+        }
+        let sigma_quant =
+            epf_quant_mul / (quant_scale * block.quant as f32 * EPF_INV_SIGMA_NUMERATOR);
+        for dy in 0..block_y {
+            for dx in 0..block_x {
+                let x = block.x + dx;
+                let y = block.y + dy;
+                if x >= metadata.width_blocks || y >= metadata.height_blocks {
+                    continue;
+                }
+                let index = y * metadata.width_blocks + x;
+                let sharpness = metadata.epf_sharpness[index] as usize;
+                let Some(&sharpness_scale) = sharp_lut.get(sharpness) else {
+                    return Err(Error::InvalidCodestream("invalid EPF sharpness"));
+                };
+                let sigma = (sigma_quant * sharpness_scale).min(-1.0e-4);
+                metadata.inv_sigma[index] = (1.0 / sigma).to_bits();
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn collect_vardct_epf_fields_for_dc_group(
+    dc_group: &VarDctDcGroupMetadata,
+    metadata: &mut VarDctEpfMetadata,
+    first_blocks: &mut Vec<VarDctEpfFirstBlock>,
+) -> Result<()> {
+    let ac_metadata = dc_group
+        .ac_metadata
+        .as_ref()
+        .ok_or(Error::Unsupported("VarDCT EPF metadata"))?;
+    let strategy_channel = ac_metadata
+        .channels
+        .iter()
+        .find(|channel| channel.channel_index == 2)
+        .ok_or(Error::Unsupported("VarDCT EPF metadata"))?;
+    let sharpness_channel = ac_metadata
+        .channels
+        .iter()
+        .find(|channel| channel.channel_index == 3)
+        .ok_or(Error::Unsupported("VarDCT EPF metadata"))?;
+    let dc_width_blocks = dc_group.payload.group.width.div_ceil(8) as usize;
+    let dc_height_blocks = dc_group.payload.group.height.div_ceil(8) as usize;
+    let group_min_x = (dc_group.payload.group.x / 8) as usize;
+    let group_min_y = (dc_group.payload.group.y / 8) as usize;
+    let count = strategy_channel.width as usize;
+    if strategy_channel.height != 2
+        || strategy_channel.samples.len() < count * 2
+        || sharpness_channel.width as usize != dc_width_blocks
+        || sharpness_channel.height as usize != dc_height_blocks
+        || sharpness_channel.samples.len() < dc_width_blocks * dc_height_blocks
+    {
+        return Err(Error::Unsupported("VarDCT EPF metadata"));
+    }
+
+    let mut valid = vec![false; dc_width_blocks * dc_height_blocks];
+    let mut cursor = 0usize;
+    for y in 0..dc_height_blocks {
+        for x in 0..dc_width_blocks {
+            let local_index = y * dc_width_blocks + x;
+            let frame_x = group_min_x + x;
+            let frame_y = group_min_y + y;
+            if frame_x < metadata.width_blocks && frame_y < metadata.height_blocks {
+                let output_index = frame_y * metadata.width_blocks + frame_x;
+                let sharpness = *sharpness_channel
+                    .samples
+                    .get(local_index)
+                    .ok_or(Error::InvalidCodestream("invalid EPF sharpness"))?;
+                if !(0..8).contains(&sharpness) {
+                    return Err(Error::InvalidCodestream("invalid EPF sharpness"));
+                }
+                metadata.epf_sharpness[output_index] = sharpness as u8;
+            }
+            if valid[local_index] {
+                continue;
+            }
+            let raw_strategy = *strategy_channel
+                .samples
+                .get(cursor)
+                .ok_or(Error::InvalidCodestream("invalid AC metadata stream"))?
+                as usize;
+            let block_x = *STRATEGY_BLOCKS_X
+                .get(raw_strategy)
+                .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+            let block_y = *STRATEGY_BLOCKS_Y
+                .get(raw_strategy)
+                .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+            let quant = 1
+                + (*strategy_channel
+                    .samples
+                    .get(count + cursor)
+                    .ok_or(Error::InvalidCodestream("invalid AC quant field"))?)
+                .clamp(0, 32_767);
+            if frame_x < metadata.width_blocks && frame_y < metadata.height_blocks {
+                first_blocks.push(VarDctEpfFirstBlock {
+                    x: frame_x,
+                    y: frame_y,
+                    raw_strategy,
+                    quant,
+                });
+            }
+            for dy in 0..block_y {
+                for dx in 0..block_x {
+                    let covered_x = x + dx;
+                    let covered_y = y + dy;
+                    if covered_x < dc_width_blocks && covered_y < dc_height_blocks {
+                        valid[covered_y * dc_width_blocks + covered_x] = true;
+                    }
+                    let frame_covered_x = group_min_x + covered_x;
+                    let frame_covered_y = group_min_y + covered_y;
+                    if frame_covered_x < metadata.width_blocks
+                        && frame_covered_y < metadata.height_blocks
+                    {
+                        metadata.raw_quant_field
+                            [frame_covered_y * metadata.width_blocks + frame_covered_x] = quant;
+                    }
+                }
+            }
+            cursor += 1;
+            if cursor > count {
+                return Err(Error::InvalidCodestream("invalid AC metadata stream"));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn effective_epf_sharp_lut(loop_filter: &LoopFilter) -> [f32; 8] {
+    loop_filter.epf_sharp_lut.unwrap_or([
+        0.0,
+        1.0 / 7.0,
+        2.0 / 7.0,
+        3.0 / 7.0,
+        4.0 / 7.0,
+        5.0 / 7.0,
+        6.0 / 7.0,
+        1.0,
+    ])
+}
+
+fn checksum_i32_samples(samples: &[i32]) -> u64 {
+    samples
+        .iter()
+        .enumerate()
+        .fold(0u64, |checksum, (index, value)| {
+            checksum
+                .wrapping_mul(1_099_511_628_211)
+                .wrapping_add(index as u64)
+                .rotate_left(11)
+                ^ (*value as u32 as u64)
+        })
+}
+
+fn checksum_u8_samples(samples: &[u8]) -> u64 {
+    samples
+        .iter()
+        .enumerate()
+        .fold(0u64, |checksum, (index, value)| {
+            checksum
+                .wrapping_mul(1_099_511_628_211)
+                .wrapping_add(index as u64)
+                .rotate_left(11)
+                ^ u64::from(*value)
+        })
+}
+
+fn checksum_u32_samples(samples: &[u32]) -> u64 {
+    samples
+        .iter()
+        .enumerate()
+        .fold(0u64, |checksum, (index, value)| {
+            checksum
+                .wrapping_mul(1_099_511_628_211)
+                .wrapping_add(index as u64)
+                .rotate_left(11)
+                ^ u64::from(*value)
+        })
 }
 
 fn read_vardct_ac_group_metadata(
@@ -3548,6 +3825,8 @@ const DEFAULT_GABORISH_WEIGHTS: [f32; 6] = [
     1.1 * 0.104699568,
     1.1 * 0.055680538,
 ];
+const GLOBAL_SCALE_DENOMINATOR: f32 = 65_536.0;
+const EPF_INV_SIGMA_NUMERATOR: f32 = -1.1715729;
 const DEFAULT_OPSIN_BIASES: [f32; 3] = [-0.0037930732, -0.0037930732, -0.0037930732];
 const DEFAULT_INVERSE_OPSIN_MATRIX: [[f32; 3]; 3] = [
     [11.031567, -9.866944, -0.164623],

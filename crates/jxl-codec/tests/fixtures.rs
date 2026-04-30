@@ -435,6 +435,18 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     let encoded_bytes = std::fs::read(&encoded).unwrap();
     let (_, codestream) = parse_file(&encoded_bytes).unwrap();
     let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+    let epf = plan.epf_metadata.as_ref().unwrap();
+    assert_eq!(plan.loop_filter.epf_iters, 1);
+    assert_eq!(epf.width_blocks, 40);
+    assert_eq!(epf.height_blocks, 24);
+    assert_eq!(epf.raw_quant_field.len(), 960);
+    assert_eq!(epf.epf_sharpness.len(), 960);
+    assert_eq!(epf.inv_sigma.len(), 960);
+    assert_eq!(epf.first_block_count, 597);
+    assert_eq!(epf.raw_quant_checksum, 17281363532486367397);
+    assert_eq!(epf.epf_sharpness_checksum, 14227648644844916129);
+    assert_eq!(epf.inv_sigma_checksum, 7982429068295389998);
+    assert_eq!(epf.parse_error, None);
     compare_reference_vardct_trace(&encoded, plan);
     let _ = std::fs::remove_file(&encoded);
 
@@ -2022,6 +2034,7 @@ fn generated_vardct_epf_disabled_keeps_gaborish_when_available() {
     let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
     assert!(plan.loop_filter.gab);
     assert_eq!(plan.loop_filter.epf_iters, 0);
+    assert!(plan.epf_metadata.is_none());
 
     let xyb_image = assemble_vardct_xyb_image(plan).unwrap().unwrap();
     assert_eq!(xyb_image.width, 320);
