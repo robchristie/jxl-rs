@@ -7,8 +7,8 @@ use std::{
 use jxl_codec::{
     BlendMode, ColorSpace, ColorTransform, DecodeConfig, ExtraChannelType, FileFormat,
     FrameEncoding, FrameSectionKind, FrameType, ImageRegion, ModularGroupExecution,
-    TransferFunction, TransformId, assemble_vardct_linear_rgb_image, assemble_vardct_xyb_image,
-    parse_file, parse_file_with_config,
+    TransferFunction, TransformId, assemble_vardct_linear_rgb_image, assemble_vardct_srgb8_image,
+    assemble_vardct_xyb_image, parse_file, parse_file_with_config,
 };
 
 #[test]
@@ -418,6 +418,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         "reference djxl failed: {}",
         String::from_utf8_lossy(&djxl_output.stderr)
     );
+    let reference = std::fs::read(&reference_output).unwrap();
+    let reference = parse_ppm_rgb(&reference);
     let _ = std::fs::remove_file(&reference_output);
 
     let encoded_bytes = std::fs::read(&encoded).unwrap();
@@ -859,6 +861,56 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         [
             944338351, 952793869, 3107710532, 1015190061, 1015098281, 3159149374
         ]
+    );
+    let srgb8_image = assemble_vardct_srgb8_image(plan).unwrap().unwrap();
+    assert_eq!(srgb8_image.width, reference.width);
+    assert_eq!(srgb8_image.height, reference.height);
+    assert_eq!(srgb8_image.pixels.len(), reference.samples.len());
+    let mut max_abs_error = 0u8;
+    let mut sum_abs_error = 0u64;
+    let mut checksum = 0u64;
+    for (index, (&actual, &expected)) in srgb8_image
+        .pixels
+        .iter()
+        .zip(reference.samples.iter())
+        .enumerate()
+    {
+        let expected = u8::try_from(expected).unwrap();
+        let error = actual.abs_diff(expected);
+        max_abs_error = max_abs_error.max(error);
+        sum_abs_error += u64::from(error);
+        checksum = checksum
+            .wrapping_mul(1_099_511_628_211)
+            .wrapping_add(index as u64)
+            .rotate_left(11)
+            ^ u64::from(actual);
+    }
+    let anchor_indices = [
+        0usize,
+        1,
+        2,
+        ((95 * 320 + 159) * 3) as usize,
+        ((95 * 320 + 159) * 3 + 1) as usize,
+        ((95 * 320 + 159) * 3 + 2) as usize,
+        ((191 * 320 + 319) * 3) as usize,
+        ((191 * 320 + 319) * 3 + 1) as usize,
+        ((191 * 320 + 319) * 3 + 2) as usize,
+    ];
+    let anchors = anchor_indices
+        .iter()
+        .map(|&index| srgb8_image.pixels[index])
+        .collect::<Vec<_>>();
+    let reference_anchors = anchor_indices
+        .iter()
+        .map(|&index| reference.samples[index])
+        .collect::<Vec<_>>();
+    assert_eq!(max_abs_error, 255);
+    assert_eq!(sum_abs_error, 20254198);
+    assert_eq!(checksum, 6608536069640658384);
+    assert_eq!(anchors, vec![0, 0, 0, 22, 17, 0, 34, 34, 0]);
+    assert_eq!(
+        reference_anchors,
+        vec![0, 1, 1, 125, 128, 124, 253, 255, 255]
     );
     assert_eq!(dequantized_grid.group, 0);
     assert_eq!(dequantized_grid.pass, 0);
