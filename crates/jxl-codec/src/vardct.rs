@@ -1042,7 +1042,7 @@ fn assemble_vardct_xyb_image_from_groups(
         ],
     };
 
-    for metadata in groups.iter().filter(|metadata| metadata.payload.pass == 0) {
+    for metadata in final_vardct_ac_passes_by_group(groups) {
         let Some(grid) = metadata.spatial_with_dc_grid.as_ref() else {
             image.groups_missing += 1;
             continue;
@@ -1058,6 +1058,26 @@ fn assemble_vardct_xyb_image_from_groups(
     }
 
     Ok((image.groups_assembled > 0).then_some(image))
+}
+
+fn final_vardct_ac_passes_by_group(
+    groups: &[VarDctAcGroupMetadata],
+) -> Vec<&VarDctAcGroupMetadata> {
+    let mut selected: Vec<&VarDctAcGroupMetadata> = Vec::new();
+    for metadata in groups {
+        match selected
+            .iter_mut()
+            .find(|existing| existing.payload.group.group == metadata.payload.group.group)
+        {
+            Some(existing) if metadata.payload.pass >= existing.payload.pass => {
+                *existing = metadata;
+            }
+            Some(_) => {}
+            None => selected.push(metadata),
+        }
+    }
+    selected.sort_by_key(|metadata| metadata.payload.group.group);
+    selected
 }
 
 fn copy_vardct_spatial_group_to_image(
@@ -6277,6 +6297,44 @@ mod tests {
     }
 
     #[test]
+    fn vardct_xyb_image_assembly_uses_final_progressive_ac_pass_per_group() {
+        let mut pass0_spatial = VarDctAcSpatialGrid {
+            group: 0,
+            pass: 0,
+            width_blocks: 1,
+            height_blocks: 1,
+            blocks_attempted: 1,
+            blocks_transformed: 1,
+            blocks_skipped: 0,
+            per_channel: [
+                VarDctAcSpatialChannelGrid::new(DCT_BLOCK_SIZE),
+                VarDctAcSpatialChannelGrid::new(DCT_BLOCK_SIZE),
+                VarDctAcSpatialChannelGrid::new(DCT_BLOCK_SIZE),
+            ],
+        };
+        let mut pass2_spatial = pass0_spatial.clone();
+        pass2_spatial.pass = 2;
+        for channel in 0..3 {
+            pass0_spatial.per_channel[channel].samples[0] = (10.0 + channel as f32).to_bits();
+            pass2_spatial.per_channel[channel].samples[0] = (20.0 + channel as f32).to_bits();
+        }
+        let group = group(0, 0, 0, 8, 8);
+        let pass0 = ac_group_metadata_for_pass(0, group, Some(pass0_spatial));
+        let pass2 = ac_group_metadata_for_pass(2, group, Some(pass2_spatial));
+        let frame = vardct_frame_metadata(8, 8);
+
+        let image = assemble_vardct_xyb_image_from_groups(&frame, &[pass2, pass0])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(image.groups_assembled, 1);
+        assert_eq!(image.groups_missing, 0);
+        assert_eq!(image.sample(0, 0, 0), Some(20.0));
+        assert_eq!(image.sample(1, 0, 0), Some(21.0));
+        assert_eq!(image.sample(2, 0, 0), Some(22.0));
+    }
+
+    #[test]
     fn converts_zero_xyb_to_zero_linear_rgb() {
         let opsin = default_vardct_opsin_params();
         let rgb = xyb_sample_to_linear_rgb(0.0, 0.0, 0.0, &opsin);
@@ -6790,6 +6848,20 @@ mod tests {
             spatial_with_dc_grid,
             parse_error: None,
         }
+    }
+
+    fn ac_group_metadata_for_pass(
+        pass: usize,
+        group: VarDctGroupMetadata,
+        spatial_with_dc_grid: Option<VarDctAcSpatialGrid>,
+    ) -> VarDctAcGroupMetadata {
+        let mut metadata = ac_group_metadata(group, spatial_with_dc_grid);
+        metadata.payload.pass = pass;
+        metadata.payload.section.section.section_kind = FrameSectionKind::AcGroup {
+            pass,
+            group: metadata.payload.group.group,
+        };
+        metadata
     }
 
     fn vardct_header(width: u32, height: u32) -> FrameHeader {
