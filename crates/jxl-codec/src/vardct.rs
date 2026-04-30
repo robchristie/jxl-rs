@@ -18,6 +18,7 @@ use crate::modular::{
     probe_modular_global_tree_coding, read_modular_global_tree_coding,
     read_modular_group_header_metadata,
 };
+use crate::transform::CustomTransformData;
 use std::ops::Range;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -469,6 +470,7 @@ impl From<HistogramCodingProbeStage> for VarDctHistogramProbeStage {
 #[derive(Debug, Clone, PartialEq)]
 pub struct VarDctDecodePlan {
     pub frame: VarDctFrameMetadata,
+    pub opsin_params: VarDctOpsinParams,
     pub global: Option<VarDctGlobalMetadata>,
     pub modular_global_tree_payload_start_bits: Option<usize>,
     pub modular_global_tree_payload_end_bits: Option<usize>,
@@ -517,6 +519,13 @@ pub struct VarDctDecodePlan {
     pub ac_group_metadata: Vec<VarDctAcGroupMetadata>,
     pub dc_group_payloads: Vec<VarDctDcGroupPayloadMetadata>,
     pub dc_group_metadata: Vec<VarDctDcGroupMetadata>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct VarDctOpsinParams {
+    pub inverse_matrix: [[f32; 3]; 3],
+    pub opsin_biases: [f32; 3],
+    pub opsin_biases_cbrt: [f32; 3],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -576,7 +585,8 @@ pub fn assemble_vardct_xyb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDc
 /// inverse opsin transform, but not output color management, transfer functions,
 /// orientation, or conversion to integer samples.
 pub fn assemble_vardct_linear_rgb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctRgbImage>> {
-    assemble_vardct_xyb_image(plan).map(|image| image.map(|image| vardct_xyb_to_linear_rgb(&image)))
+    assemble_vardct_xyb_image(plan)
+        .map(|image| image.map(|image| vardct_xyb_to_linear_rgb(&image, &plan.opsin_params)))
 }
 
 /// Assembles available VarDCT XYB data and converts it to interleaved sRGB8.
@@ -1059,7 +1069,43 @@ fn copy_vardct_spatial_group_to_image(
     Ok(())
 }
 
-fn vardct_xyb_to_linear_rgb(xyb: &VarDctXybImage) -> VarDctRgbImage {
+fn vardct_opsin_params(
+    metadata: &ImageMetadata,
+    transform_data: &CustomTransformData,
+) -> VarDctOpsinParams {
+    let matrix = transform_data
+        .opsin_inverse_matrix
+        .as_ref()
+        .map(|opsin| opsin.inverse_matrix)
+        .unwrap_or(DEFAULT_INVERSE_OPSIN_MATRIX);
+    let opsin_biases = transform_data
+        .opsin_inverse_matrix
+        .as_ref()
+        .map(|opsin| opsin.opsin_biases)
+        .unwrap_or(DEFAULT_OPSIN_BIASES);
+    vardct_opsin_params_from_matrix(matrix, opsin_biases, metadata.tone_mapping.intensity_target)
+}
+
+fn vardct_opsin_params_from_matrix(
+    mut inverse_matrix: [[f32; 3]; 3],
+    opsin_biases: [f32; 3],
+    intensity_target: f32,
+) -> VarDctOpsinParams {
+    let intensity_scale = 255.0 / intensity_target;
+    for row in &mut inverse_matrix {
+        for value in row {
+            *value *= intensity_scale;
+        }
+    }
+    let opsin_biases_cbrt = opsin_biases.map(f32::cbrt);
+    VarDctOpsinParams {
+        inverse_matrix,
+        opsin_biases,
+        opsin_biases_cbrt,
+    }
+}
+
+fn vardct_xyb_to_linear_rgb(xyb: &VarDctXybImage, opsin: &VarDctOpsinParams) -> VarDctRgbImage {
     let mut rgb = VarDctRgbImage {
         width: xyb.width,
         height: xyb.height,
@@ -1075,6 +1121,7 @@ fn vardct_xyb_to_linear_rgb(xyb: &VarDctXybImage) -> VarDctRgbImage {
             xyb.channels[0][index],
             xyb.channels[1][index],
             xyb.channels[2][index],
+            opsin,
         );
         rgb.channels[0][index] = r;
         rgb.channels[1][index] = g;
@@ -1110,26 +1157,26 @@ fn linear_sample_to_srgb8(sample: f32) -> u8 {
     (encoded * 255.0).round().clamp(0.0, 255.0) as u8
 }
 
-fn xyb_sample_to_linear_rgb(x: f32, y: f32, b: f32) -> [f32; 3] {
-    let gamma_r = y + x - DEFAULT_OPSIN_BIASES_CBRT[0];
-    let gamma_g = y - x - DEFAULT_OPSIN_BIASES_CBRT[1];
-    let gamma_b = b - DEFAULT_OPSIN_BIASES_CBRT[2];
+fn xyb_sample_to_linear_rgb(x: f32, y: f32, b: f32, opsin: &VarDctOpsinParams) -> [f32; 3] {
+    let gamma_r = y + x - opsin.opsin_biases_cbrt[0];
+    let gamma_g = y - x - opsin.opsin_biases_cbrt[1];
+    let gamma_b = b - opsin.opsin_biases_cbrt[2];
     let mixed = [
-        gamma_r * gamma_r * gamma_r + DEFAULT_OPSIN_BIASES[0],
-        gamma_g * gamma_g * gamma_g + DEFAULT_OPSIN_BIASES[1],
-        gamma_b * gamma_b * gamma_b + DEFAULT_OPSIN_BIASES[2],
+        gamma_r * gamma_r * gamma_r + opsin.opsin_biases[0],
+        gamma_g * gamma_g * gamma_g + opsin.opsin_biases[1],
+        gamma_b * gamma_b * gamma_b + opsin.opsin_biases[2],
     ];
 
     [
-        DEFAULT_INVERSE_OPSIN_MATRIX[0][0] * mixed[0]
-            + DEFAULT_INVERSE_OPSIN_MATRIX[0][1] * mixed[1]
-            + DEFAULT_INVERSE_OPSIN_MATRIX[0][2] * mixed[2],
-        DEFAULT_INVERSE_OPSIN_MATRIX[1][0] * mixed[0]
-            + DEFAULT_INVERSE_OPSIN_MATRIX[1][1] * mixed[1]
-            + DEFAULT_INVERSE_OPSIN_MATRIX[1][2] * mixed[2],
-        DEFAULT_INVERSE_OPSIN_MATRIX[2][0] * mixed[0]
-            + DEFAULT_INVERSE_OPSIN_MATRIX[2][1] * mixed[1]
-            + DEFAULT_INVERSE_OPSIN_MATRIX[2][2] * mixed[2],
+        opsin.inverse_matrix[0][0] * mixed[0]
+            + opsin.inverse_matrix[0][1] * mixed[1]
+            + opsin.inverse_matrix[0][2] * mixed[2],
+        opsin.inverse_matrix[1][0] * mixed[0]
+            + opsin.inverse_matrix[1][1] * mixed[1]
+            + opsin.inverse_matrix[1][2] * mixed[2],
+        opsin.inverse_matrix[2][0] * mixed[0]
+            + opsin.inverse_matrix[2][1] * mixed[1]
+            + opsin.inverse_matrix[2][2] * mixed[2],
     ]
 }
 
@@ -1349,6 +1396,7 @@ pub fn read_vardct_frame_metadata(
 pub fn read_vardct_decode_plan(
     codestream: &[u8],
     metadata: &ImageMetadata,
+    transform_data: &CustomTransformData,
     frame_header: &FrameHeader,
     frame_data: &FrameData,
 ) -> Result<Option<VarDctDecodePlan>> {
@@ -1597,6 +1645,7 @@ pub fn read_vardct_decode_plan(
 
     Ok(Some(VarDctDecodePlan {
         frame,
+        opsin_params: vardct_opsin_params(metadata, transform_data),
         global,
         modular_global_tree_payload_start_bits,
         modular_global_tree_payload_end_bits,
@@ -3424,7 +3473,6 @@ const AFV_WEIGHTS: [[f32; 9]; 3] = [
     [384.0, 384.0, 12.0, 12.0, 12.0, 22.0, -0.25, -0.25, -0.25],
 ];
 const DEFAULT_OPSIN_BIASES: [f32; 3] = [-0.0037930732, -0.0037930732, -0.0037930732];
-const DEFAULT_OPSIN_BIASES_CBRT: [f32; 3] = [-0.1559542, -0.1559542, -0.1559542];
 const DEFAULT_INVERSE_OPSIN_MATRIX: [[f32; 3]; 3] = [
     [11.031567, -9.866944, -0.164623],
     [-3.2541473, 4.4187703, -0.164623],
@@ -5199,6 +5247,15 @@ mod tests {
         FrameType, LoopFilter, Passes, YCbCrChromaSubsampling,
     };
     use crate::frame_data::{FrameSection, FrameToc};
+    use crate::transform::OpsinInverseMatrix;
+
+    fn default_vardct_opsin_params() -> VarDctOpsinParams {
+        vardct_opsin_params_from_matrix(
+            DEFAULT_INVERSE_OPSIN_MATRIX,
+            DEFAULT_OPSIN_BIASES,
+            ImageMetadata::default().tone_mapping.intensity_target,
+        )
+    }
 
     #[test]
     fn classifies_multi_section_vardct_sections() {
@@ -5313,9 +5370,16 @@ mod tests {
         codestream[13] = 0b0000_1000;
 
         let metadata = ImageMetadata::default();
-        let plan = read_vardct_decode_plan(&codestream, &metadata, &frame_header, &frame_data)
-            .unwrap()
-            .unwrap();
+        let transform_data = CustomTransformData::default();
+        let plan = read_vardct_decode_plan(
+            &codestream,
+            &metadata,
+            &transform_data,
+            &frame_header,
+            &frame_data,
+        )
+        .unwrap()
+        .unwrap();
 
         assert!(!plan.frame.is_combined);
         let global = plan.global.as_ref().unwrap();
@@ -5556,7 +5620,8 @@ mod tests {
 
     #[test]
     fn converts_zero_xyb_to_zero_linear_rgb() {
-        let rgb = xyb_sample_to_linear_rgb(0.0, 0.0, 0.0);
+        let opsin = default_vardct_opsin_params();
+        let rgb = xyb_sample_to_linear_rgb(0.0, 0.0, 0.0, &opsin);
 
         assert!(rgb.iter().all(|sample| sample.abs() < 1.0e-7));
     }
@@ -5571,13 +5636,53 @@ mod tests {
             channels: [vec![0.1], vec![0.2], vec![0.3]],
         };
 
-        let rgb = vardct_xyb_to_linear_rgb(&xyb);
+        let opsin = default_vardct_opsin_params();
+        let rgb = vardct_xyb_to_linear_rgb(&xyb, &opsin);
 
         assert_eq!(rgb.width, 1);
         assert_eq!(rgb.height, 1);
         assert!((rgb.channels[0][0] - 0.860836).abs() < 1.0e-6);
         assert!((rgb.channels[1][0] + 0.25376424).abs() < 1.0e-6);
         assert!((rgb.channels[2][0] + 0.12067059).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn scales_vardct_opsin_matrix_by_intensity_target() {
+        let opsin = vardct_opsin_params_from_matrix(
+            [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+            [-8.0, -27.0, -64.0],
+            510.0,
+        );
+
+        assert_eq!(
+            opsin.inverse_matrix,
+            [[0.5, 1.0, 1.5], [2.0, 2.5, 3.0], [3.5, 4.0, 4.5]]
+        );
+        assert_eq!(opsin.opsin_biases, [-8.0, -27.0, -64.0]);
+        assert_eq!(opsin.opsin_biases_cbrt, [-2.0, -3.0, -4.0]);
+    }
+
+    #[test]
+    fn builds_vardct_opsin_params_from_custom_transform_data() {
+        let mut metadata = ImageMetadata::default();
+        metadata.tone_mapping.intensity_target = 127.5;
+        let transform_data = CustomTransformData {
+            opsin_inverse_matrix: Some(OpsinInverseMatrix {
+                inverse_matrix: [[1.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 3.0]],
+                opsin_biases: [-1.0, -8.0, -27.0],
+                quant_biases: [0.1, 0.2, 0.3, 0.4],
+            }),
+            ..CustomTransformData::default()
+        };
+
+        let opsin = vardct_opsin_params(&metadata, &transform_data);
+
+        assert_eq!(
+            opsin.inverse_matrix,
+            [[2.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 6.0]]
+        );
+        assert_eq!(opsin.opsin_biases, [-1.0, -8.0, -27.0]);
+        assert_eq!(opsin.opsin_biases_cbrt, [-1.0, -2.0, -3.0]);
     }
 
     #[test]
@@ -5613,8 +5718,15 @@ mod tests {
         let codestream = vec![0; 12];
 
         let metadata = ImageMetadata::default();
-        let error = read_vardct_decode_plan(&codestream, &metadata, &frame_header, &frame_data)
-            .unwrap_err();
+        let transform_data = CustomTransformData::default();
+        let error = read_vardct_decode_plan(
+            &codestream,
+            &metadata,
+            &transform_data,
+            &frame_header,
+            &frame_data,
+        )
+        .unwrap_err();
 
         assert_eq!(
             error,
@@ -5629,8 +5741,15 @@ mod tests {
         let codestream = vec![1];
 
         let metadata = ImageMetadata::default();
-        let error = read_vardct_decode_plan(&codestream, &metadata, &frame_header, &frame_data)
-            .unwrap_err();
+        let transform_data = CustomTransformData::default();
+        let error = read_vardct_decode_plan(
+            &codestream,
+            &metadata,
+            &transform_data,
+            &frame_header,
+            &frame_data,
+        )
+        .unwrap_err();
 
         assert_eq!(error, Error::Truncated);
     }

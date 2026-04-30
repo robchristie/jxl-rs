@@ -97,7 +97,7 @@ pub fn parse_codestream_with_config(input: &[u8], config: DecodeConfig) -> Resul
     };
     let first_frame_vardct_plan = match (&first_frame, &first_frame_data) {
         (Some(frame), Some(frame_data)) => {
-            read_vardct_decode_plan(input, &metadata, frame, frame_data)?
+            read_vardct_decode_plan(input, &metadata, &transform_data, frame, frame_data)?
         }
         _ => None,
     };
