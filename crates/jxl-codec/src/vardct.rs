@@ -1287,20 +1287,33 @@ impl EpfPipeline<'_> {
                 };
                 let mut weights = [0.0f32; 12];
                 let mut neighbor_weight_sum = 0.0;
-                if matches!(pass, EpfPass::One) {
-                    for (index, sad) in epf_stage1_directional_sads(input, ctx)
-                        .into_iter()
-                        .enumerate()
-                    {
-                        let weight = epf_weight(sad, inv_sigma);
-                        weights[index] = weight;
-                        neighbor_weight_sum += weight;
+                match pass {
+                    EpfPass::Zero => {
+                        for (index, sad) in epf_stage0_directional_sads(input, ctx)
+                            .into_iter()
+                            .enumerate()
+                        {
+                            let weight = epf_weight(sad, inv_sigma);
+                            weights[index] = weight;
+                            neighbor_weight_sum += weight;
+                        }
                     }
-                } else {
-                    for (index, &(dx, dy)) in offsets.iter().enumerate() {
-                        let weight = epf_weight(pass.sad(input, ctx, dx, dy), inv_sigma);
-                        weights[index] = weight;
-                        neighbor_weight_sum += weight;
+                    EpfPass::One => {
+                        for (index, sad) in epf_stage1_directional_sads(input, ctx)
+                            .into_iter()
+                            .enumerate()
+                        {
+                            let weight = epf_weight(sad, inv_sigma);
+                            weights[index] = weight;
+                            neighbor_weight_sum += weight;
+                        }
+                    }
+                    EpfPass::Two => {
+                        for (index, &(dx, dy)) in offsets.iter().enumerate() {
+                            let weight = epf_weight(pass.sad(input, ctx, dx, dy), inv_sigma);
+                            weights[index] = weight;
+                            neighbor_weight_sum += weight;
+                        }
                     }
                 }
                 let weight_sum = 1.0 + neighbor_weight_sum;
@@ -1325,6 +1338,22 @@ impl EpfPipeline<'_> {
             base
         }
     }
+}
+
+fn epf_stage0_directional_sads(channels: &[Vec<f32>; 3], ctx: EpfSampleContext) -> [f32; 12] {
+    let mut sads = [0.0; 12];
+    for (index, &(dx, dy)) in EpfPass::Zero.neighbor_offsets().iter().enumerate() {
+        for channel in 0..3 {
+            let mut channel_sad = 0.0;
+            for (px, py) in EPF_PLUS_OFFSETS {
+                let center = epf_sample(channels, channel, ctx, px, py);
+                let neighbor = epf_sample(channels, channel, ctx, dx + px, dy + py);
+                channel_sad += (center - neighbor).abs();
+            }
+            sads[index] += channel_sad * ctx.channel_scale[channel];
+        }
+    }
+    sads
 }
 
 fn epf_stage1_directional_sads(channels: &[Vec<f32>; 3], ctx: EpfSampleContext) -> [f32; 4] {
@@ -1374,11 +1403,10 @@ fn epf_stage1_directional_sads(channels: &[Vec<f32>; 3], ctx: EpfSampleContext) 
 }
 
 fn epf_plus_sad(channels: &[Vec<f32>; 3], ctx: EpfSampleContext, dx: isize, dy: isize) -> f32 {
-    const PLUS_OFFSETS: [(isize, isize); 5] = [(0, 0), (-1, 0), (0, -1), (1, 0), (0, 1)];
     let mut sad = 0.0;
     for channel in 0..3 {
         let mut channel_sad = 0.0;
-        for (px, py) in PLUS_OFFSETS {
+        for (px, py) in EPF_PLUS_OFFSETS {
             let ax = mirror_coordinate(ctx.x as isize + px, ctx.width);
             let ay = mirror_coordinate(ctx.y as isize + py, ctx.height);
             let bx = mirror_coordinate(ctx.x as isize + dx + px, ctx.width);
@@ -4101,6 +4129,7 @@ const DEFAULT_GABORISH_WEIGHTS: [f32; 6] = [
 const GLOBAL_SCALE_DENOMINATOR: f32 = 65_536.0;
 const EPF_INV_SIGMA_NUMERATOR: f32 = -1.1715729;
 const EPF_MIN_SIGMA: f32 = -3.905243;
+const EPF_PLUS_OFFSETS: [(isize, isize); 5] = [(0, 0), (-1, 0), (0, -1), (1, 0), (0, 1)];
 const DEFAULT_OPSIN_BIASES: [f32; 3] = [-0.0037930732, -0.0037930732, -0.0037930732];
 const DEFAULT_INVERSE_OPSIN_MATRIX: [[f32; 3]; 3] = [
     [11.031567, -9.866944, -0.164623],
@@ -6416,6 +6445,31 @@ mod tests {
         let sads = epf_stage1_directional_sads(&channels, ctx);
 
         assert_eq!(sads, [25.0, 5.0, 5.0, 25.0]);
+    }
+
+    #[test]
+    fn epf_stage0_directional_sads_cover_all_wide_offsets() {
+        let channels = [
+            (0..49).map(|sample| sample as f32).collect::<Vec<_>>(),
+            vec![0.0; 49],
+            vec![0.0; 49],
+        ];
+        let ctx = EpfSampleContext {
+            width: 7,
+            height: 7,
+            x: 3,
+            y: 3,
+            channel_scale: [1.0, 0.0, 0.0],
+        };
+
+        let sads = epf_stage0_directional_sads(&channels, ctx);
+
+        assert_eq!(
+            sads,
+            [
+                10.0, 40.0, 5.0, 30.0, 70.0, 35.0, 35.0, 70.0, 30.0, 5.0, 40.0, 10.0
+            ]
+        );
     }
 
     #[test]
