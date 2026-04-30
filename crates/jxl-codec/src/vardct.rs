@@ -2453,6 +2453,7 @@ fn spatialize_vardct_ac_grid(
             }
             let samples = match transform.kind {
                 SpatialTransformKind::Identity => coefficients,
+                SpatialTransformKind::Afv(kind) => inverse_afv_8x8(kind, &coefficients)?,
                 SpatialTransformKind::Dct => {
                     if transform.width == 8 && transform.height == 8 {
                         let mut block = [0.0f32; DCT_BLOCK_SIZE];
@@ -2492,6 +2493,7 @@ struct SpatialTransform {
 enum SpatialTransformKind {
     Dct,
     Identity,
+    Afv(usize),
 }
 
 fn spatial_transform_for_strategy(raw_strategy: usize) -> Option<SpatialTransform> {
@@ -2504,6 +2506,7 @@ fn spatial_transform_for_strategy(raw_strategy: usize) -> Option<SpatialTransfor
         7 => (16, 8, SpatialTransformKind::Dct),
         12 => (4, 8, SpatialTransformKind::Dct),
         13 => (8, 4, SpatialTransformKind::Dct),
+        14..=17 => (8, 8, SpatialTransformKind::Afv(raw_strategy - 14)),
         _ => return None,
     };
     Some(SpatialTransform {
@@ -2687,6 +2690,93 @@ fn inverse_dct_rect(width: usize, height: usize, coefficients: &[f32]) -> Result
         }
     }
     Ok(output)
+}
+
+fn inverse_afv_8x8(kind: usize, coefficients: &[f32]) -> Result<Vec<f32>> {
+    if kind >= 4 || coefficients.len() != DCT_BLOCK_SIZE {
+        return Err(Error::InvalidCodestream("invalid AFV transform"));
+    }
+    let afv_x = kind & 1;
+    let afv_y = kind / 2;
+    let block00 = coefficients[0];
+    let block01 = coefficients[1];
+    let block10 = coefficients[8];
+    let dcs = [
+        (block00 + block10 + block01) * 4.0,
+        block00 + block10 - block01,
+        block00 - block10,
+    ];
+    let mut pixels = vec![0.0f32; DCT_BLOCK_SIZE];
+
+    let mut afv_coefficients = [0.0f32; 16];
+    afv_coefficients[0] = dcs[0];
+    for y in 0..4 {
+        for x in 0..4 {
+            if x == 0 && y == 0 {
+                continue;
+            }
+            afv_coefficients[y * 4 + x] = coefficients[(y * 2) * 8 + x * 2];
+        }
+    }
+    let afv_block = inverse_afv_4x4(&afv_coefficients);
+    for y in 0..4 {
+        for x in 0..4 {
+            let source_x = if afv_x == 1 { 3 - x } else { x };
+            let source_y = if afv_y == 1 { 3 - y } else { y };
+            pixels[(y + afv_y * 4) * 8 + afv_x * 4 + x] = afv_block[source_y * 4 + source_x];
+        }
+    }
+
+    let mut dct4 = [0.0f32; 16];
+    dct4[0] = dcs[1];
+    for y in 0..4 {
+        for x in 0..4 {
+            if x == 0 && y == 0 {
+                continue;
+            }
+            dct4[y * 4 + x] = coefficients[(y * 2) * 8 + x * 2 + 1];
+        }
+    }
+    let dct4_samples = inverse_dct_rect(4, 4, &dct4)?;
+    let dct4_origin_x = if afv_x == 1 { 0 } else { 4 };
+    let dct4_origin_y = afv_y * 4;
+    for y in 0..4 {
+        for x in 0..4 {
+            pixels[(dct4_origin_y + y) * 8 + dct4_origin_x + x] = dct4_samples[y * 4 + x];
+        }
+    }
+
+    let mut dct4x8 = [0.0f32; 32];
+    dct4x8[0] = dcs[2];
+    for y in 0..4 {
+        for x in 0..8 {
+            if x == 0 && y == 0 {
+                continue;
+            }
+            dct4x8[y * 8 + x] = coefficients[(1 + y * 2) * 8 + x];
+        }
+    }
+    let dct4x8_samples = inverse_dct_rect(8, 4, &dct4x8)?;
+    let dct4x8_origin_y = if afv_y == 1 { 0 } else { 4 };
+    for y in 0..4 {
+        for x in 0..8 {
+            pixels[(dct4x8_origin_y + y) * 8 + x] = dct4x8_samples[y * 8 + x];
+        }
+    }
+
+    Ok(pixels)
+}
+
+fn inverse_afv_4x4(coefficients: &[f32; 16]) -> [f32; 16] {
+    let mut pixels = [0.0f32; 16];
+    for pixel in 0..16 {
+        pixels[pixel] = coefficients
+            .iter()
+            .zip(AFV_4X4_BASIS.iter())
+            .map(|(coefficient, basis)| coefficient * basis[pixel])
+            .sum();
+    }
+    pixels
 }
 
 fn coefficient_grid_index_for_local_position(
@@ -3168,6 +3258,252 @@ const AFV_WEIGHTS: [[f32; 9]; 3] = [
     [3072.0, 3072.0, 256.0, 256.0, 256.0, 414.0, 0.0, 0.0, 0.0],
     [1024.0, 1024.0, 50.0, 50.0, 50.0, 58.0, 0.0, 0.0, 0.0],
     [384.0, 384.0, 12.0, 12.0, 12.0, 22.0, -0.25, -0.25, -0.25],
+];
+const AFV_4X4_BASIS: [[f32; 16]; 16] = [
+    [0.25; 16],
+    [
+        0.87690294, 0.2206518, -0.1014005, -0.1014005, 0.2206518, -0.1014005, -0.1014005,
+        -0.1014005, -0.1014005, -0.1014005, -0.1014005, -0.1014005, -0.1014005, -0.1014005,
+        -0.1014005, -0.1014005,
+    ],
+    [
+        0.0,
+        0.0,
+        0.40670076,
+        0.44444817,
+        0.0,
+        0.0,
+        0.19574399,
+        0.29291,
+        -0.40670076,
+        -0.195744,
+        0.0,
+        0.11379074,
+        -0.44444817,
+        -0.29291,
+        -0.11379074,
+        0.0,
+    ],
+    [
+        0.0,
+        0.0,
+        -0.21255748,
+        0.3085497,
+        0.0,
+        0.47067022,
+        -0.16212052,
+        0.0,
+        -0.21255748,
+        -0.16212052,
+        -0.47067022,
+        -0.14642918,
+        0.3085497,
+        0.0,
+        -0.14642918,
+        0.42511496,
+    ],
+    [
+        0.0,
+        -std::f32::consts::FRAC_1_SQRT_2,
+        0.0,
+        0.0,
+        std::f32::consts::FRAC_1_SQRT_2,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    ],
+    [
+        -0.41053775,
+        0.62354857,
+        -0.06435072,
+        -0.06435072,
+        0.62354857,
+        -0.06435072,
+        -0.06435072,
+        -0.06435072,
+        -0.06435072,
+        -0.06435072,
+        -0.06435072,
+        -0.06435072,
+        -0.06435072,
+        -0.06435072,
+        -0.06435072,
+        -0.06435072,
+    ],
+    [
+        0.0,
+        0.0,
+        -0.45175567,
+        0.15854503,
+        0.0,
+        -0.040385153,
+        0.0074182265,
+        0.39351034,
+        -0.45175567,
+        0.0074182265,
+        0.11074166,
+        0.08298163,
+        0.15854503,
+        0.39351034,
+        0.08298163,
+        -0.45175567,
+    ],
+    [
+        0.0,
+        0.0,
+        -0.30468476,
+        0.51126164,
+        0.0,
+        0.0,
+        -0.29048014,
+        -0.06578702,
+        0.30468476,
+        0.29048014,
+        0.0,
+        -0.23889774,
+        -0.51126164,
+        0.06578702,
+        0.23889774,
+        0.0,
+    ],
+    [
+        0.0,
+        0.0,
+        0.30179295,
+        0.25792363,
+        0.0,
+        0.1627234,
+        0.095200226,
+        0.0,
+        0.30179295,
+        0.095200226,
+        -0.1627234,
+        -0.35312384,
+        0.25792363,
+        0.0,
+        -0.35312384,
+        -0.6035859,
+    ],
+    [
+        0.0, 0.0, 0.4082483, 0.0, 0.0, 0.0, 0.0, -0.4082483, -0.4082483, 0.0, 0.0, -0.4082483, 0.0,
+        0.4082483, 0.4082483, 0.0,
+    ],
+    [
+        0.0,
+        0.0,
+        0.1747867,
+        0.08126112,
+        0.0,
+        0.0,
+        -0.3675398,
+        -0.30788222,
+        -0.1747867,
+        0.3675398,
+        0.0,
+        0.4826689,
+        -0.08126112,
+        0.30788222,
+        -0.4826689,
+        0.0,
+    ],
+    [
+        0.0,
+        0.0,
+        -0.21105601,
+        0.1856718,
+        0.0,
+        0.0,
+        0.4921586,
+        -0.38525015,
+        0.21105601,
+        -0.4921586,
+        0.0,
+        0.17419413,
+        -0.1856718,
+        0.38525015,
+        -0.17419413,
+        0.0,
+    ],
+    [
+        0.0,
+        0.0,
+        -0.14266084,
+        -0.34164467,
+        0.0,
+        0.73674977,
+        0.24627107,
+        -0.08574019,
+        -0.14266084,
+        0.24627107,
+        0.148834,
+        -0.047686804,
+        -0.34164467,
+        -0.08574019,
+        -0.047686804,
+        -0.14266084,
+    ],
+    [
+        0.0,
+        0.0,
+        -0.1381354,
+        0.33022827,
+        0.0,
+        0.08755115,
+        -0.079467066,
+        -0.46133748,
+        -0.1381354,
+        -0.079467066,
+        0.49724647,
+        0.12538059,
+        0.33022827,
+        -0.46133748,
+        0.12538059,
+        -0.1381354,
+    ],
+    [
+        0.0,
+        0.0,
+        -0.17437603,
+        0.07027907,
+        0.0,
+        -0.29210266,
+        0.36238173,
+        0.0,
+        -0.17437603,
+        0.36238173,
+        0.29210266,
+        -0.4326608,
+        0.07027907,
+        0.0,
+        -0.4326608,
+        0.34875205,
+    ],
+    [
+        0.0,
+        0.0,
+        0.11354987,
+        -0.074175045,
+        0.0,
+        0.19402893,
+        -0.4351905,
+        0.21918684,
+        0.11354987,
+        -0.4351905,
+        0.55504435,
+        -0.25468278,
+        -0.074175045,
+        0.21918684,
+        -0.25468278,
+        0.11354987,
+    ],
 ];
 
 fn natural_coeff_order(raw_strategy: usize) -> Result<Vec<usize>> {
@@ -4958,6 +5294,29 @@ mod tests {
         let target_index = ((2 * 4 + 2) * DCT_BLOCK_SIZE) + 3 * 8 + 4;
         assert_eq!(grid.samples[target_index], 3.25f32.to_bits());
         assert_eq!(grid.nonzero_samples, 1);
+    }
+
+    #[test]
+    fn inverse_afv_zero_block_stays_zero() {
+        let coefficients = [0.0f32; DCT_BLOCK_SIZE];
+        let samples = inverse_afv_8x8(0, &coefficients).unwrap();
+
+        assert_eq!(samples.len(), DCT_BLOCK_SIZE);
+        assert!(samples.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn inverse_afv_places_sub_transforms_by_kind() {
+        let mut coefficients = [0.0f32; DCT_BLOCK_SIZE];
+        coefficients[0] = 1.0;
+        let samples = inverse_afv_8x8(3, &coefficients).unwrap();
+
+        assert!((samples[0] - 0.17677669).abs() < 1.0e-6);
+        assert!((samples[3 * 8 + 7] - 0.17677669).abs() < 1.0e-6);
+        assert!((samples[4 * 8] - 0.25).abs() < 1.0e-6);
+        assert!((samples[7 * 8 + 3] - 0.25).abs() < 1.0e-6);
+        assert!((samples[4 * 8 + 4] - 1.0).abs() < 1.0e-6);
+        assert!((samples[7 * 8 + 7] - 1.0).abs() < 1.0e-6);
     }
 
     #[test]
