@@ -287,6 +287,13 @@ fn decode_channels_buffered(
     config: jxl_codec::DecodeConfig,
 ) -> Result<DecodedChannels> {
     let (_, codestream) = jxl_codec::parse_file_with_config(input, config)?;
+    decode_channels_codestream(codestream, config.region.is_some())
+}
+
+fn decode_channels_codestream(
+    codestream: jxl_codec::Codestream,
+    region_requested: bool,
+) -> Result<DecodedChannels> {
     if codestream.basic_info.have_animation {
         return Err(Error::Unsupported("animated image decode"));
     }
@@ -304,14 +311,11 @@ fn decode_channels_buffered(
     let image = match modular.image.as_ref() {
         Some(image) => image,
         None => {
-            return Err(modular
-                .image_error
-                .clone()
-                .unwrap_or(if config.region.is_some() {
-                    Error::Unsupported("region-of-interest raw channel decode")
-                } else {
-                    Error::Unsupported("modular pixel reconstruction")
-                }));
+            return Err(modular.image_error.clone().unwrap_or(if region_requested {
+                Error::Unsupported("region-of-interest raw channel decode")
+            } else {
+                Error::Unsupported("modular pixel reconstruction")
+            }));
         }
     };
     let color_channels = codestream.metadata.num_color_channels() as usize;
@@ -339,7 +343,17 @@ fn decode_channels_buffered(
 }
 
 fn decode_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<DecodedImage> {
-    let channels = decode_channels_buffered(input, config)?;
+    let (_, codestream) = jxl_codec::parse_file_with_config(input, config)?;
+    let channels = decode_channels_codestream(codestream, config.region.is_some())?;
+    decode_buffered_channels(channels)
+}
+
+fn decode_buffered_codestream(codestream: jxl_codec::Codestream) -> Result<DecodedImage> {
+    let channels = decode_channels_codestream(codestream, false)?;
+    decode_buffered_channels(channels)
+}
+
+fn decode_buffered_channels(channels: DecodedChannels) -> Result<DecodedImage> {
     let alpha = decode_interleaved_alpha(&channels)?;
     let output_channels = channels.color_channels + usize::from(alpha.is_some());
     if channels.channels.len() != output_channels {
@@ -375,7 +389,45 @@ fn decode_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<Deco
 }
 
 fn decode_rgba8_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<RgbaImage> {
+    if config.region.is_some() {
+        return decode_modular_rgba8_buffered(input, config);
+    }
+
+    let (_, codestream) = jxl_codec::parse_file_with_config(input, config)?;
+    if codestream.basic_info.have_animation {
+        return Err(Error::Unsupported("animated image decode"));
+    }
+    let frame = codestream
+        .first_frame
+        .as_ref()
+        .ok_or(Error::Unsupported("image has no decoded frame"))?;
+    if frame.encoding == FrameEncoding::VarDct {
+        let plan = codestream
+            .first_frame_vardct_plan
+            .as_ref()
+            .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+        let image = jxl_codec::assemble_vardct_srgb8_image(plan)?
+            .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+        return rgba8_from_vardct_srgb8(image);
+    }
+
+    rgba8_from_modular_codestream(codestream)
+}
+
+fn decode_modular_rgba8_buffered(
+    input: &[u8],
+    config: jxl_codec::DecodeConfig,
+) -> Result<RgbaImage> {
     let decoded = decode_buffered(input, config)?;
+    rgba8_from_decoded_image(&decoded)
+}
+
+fn rgba8_from_modular_codestream(codestream: jxl_codec::Codestream) -> Result<RgbaImage> {
+    let decoded = decode_buffered_codestream(codestream)?;
+    rgba8_from_decoded_image(&decoded)
+}
+
+fn rgba8_from_decoded_image(decoded: &DecodedImage) -> Result<RgbaImage> {
     let pixels = match &decoded.pixels {
         PixelData::U8(samples) => rgba8_from_u8(&decoded, samples)?,
         PixelData::U16(samples) => rgba8_from_u16(&decoded, samples)?,
@@ -383,6 +435,26 @@ fn decode_rgba8_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Resul
     Ok(RgbaImage {
         width: decoded.width,
         height: decoded.height,
+        pixels,
+    })
+}
+
+fn rgba8_from_vardct_srgb8(image: jxl_codec::VarDctSrgb8Image) -> Result<RgbaImage> {
+    let sample_count = (image.width as usize)
+        .checked_mul(image.height as usize)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    if image.pixels.len() != sample_count * 3 {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+
+    let mut pixels = Vec::with_capacity(sample_count * 4);
+    for rgb in image.pixels.chunks_exact(3) {
+        pixels.extend_from_slice(rgb);
+        pixels.push(255);
+    }
+    Ok(RgbaImage {
+        width: image.width,
+        height: image.height,
         pixels,
     })
 }
@@ -1034,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_var_dct_for_now() {
+    fn rejects_unreconstructed_var_dct_fixture() {
         let bytes = std::fs::read(workspace_path(
             "reference/libjxl/testdata/jxl/boxes/square-extended-size-container.jxl",
         ))
@@ -1045,16 +1117,24 @@ mod tests {
             info.first_frame_vardct.as_ref().unwrap().sections[0].section_kind,
             FrameSectionKind::Combined
         );
+
         let roi_decoder = Decoder::new().roi(Rect {
             x: 0,
             y: 0,
             width: 4,
             height: 4,
         });
-
         assert_eq!(
             decode(&bytes),
             Err(Error::Unsupported("VarDCT image decode"))
+        );
+        assert_eq!(
+            decode_channels(&bytes),
+            Err(Error::Unsupported("VarDCT image decode"))
+        );
+        assert_eq!(
+            decode_rgba8(&bytes),
+            Err(Error::Unsupported("VarDCT image reconstruction"))
         );
         assert_eq!(
             roi_decoder.decode_channels(&bytes),
@@ -1067,6 +1147,49 @@ mod tests {
         assert_eq!(
             roi_decoder.decode_rgba8(&bytes),
             Err(Error::Unsupported("VarDCT image decode"))
+        );
+        assert_eq!(
+            decode_rgba16(&bytes),
+            Err(Error::Unsupported("VarDCT image decode"))
+        );
+    }
+
+    #[test]
+    fn decode_rgba8_supports_generated_var_dct_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping public VarDCT rgba8 decode; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-rgba8-vardct-source", "ppm");
+        let encoded = unique_temp_path("jxl-rgba8-vardct", "jxl");
+        write_split_vardct_source_ppm(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let rgba = decode_rgba8(&encoded_bytes).unwrap();
+
+        assert_eq!(rgba.width, 320);
+        assert_eq!(rgba.height, 192);
+        assert_eq!(rgba.pixels.len(), 320 * 192 * 4);
+        assert!(rgba.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        assert!(
+            rgba.pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
         );
     }
 
@@ -1656,6 +1779,21 @@ mod tests {
         for _ in 0..width * height * 3 {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             bytes.push((state >> 24) as u8);
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn write_split_vardct_source_ppm(path: &Path) {
+        let width = 320u32;
+        let height = 192u32;
+        let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
+        for y in 0..height {
+            for x in 0..width {
+                let checker = (((x / 16) ^ (y / 16)) & 1) * 48;
+                bytes.push(((x * 255 / (width - 1)) ^ checker) as u8);
+                bytes.push(((y * 255 / (height - 1)) ^ checker) as u8);
+                bytes.push((((x + y) * 255 / (width + height - 2)) ^ checker) as u8);
+            }
         }
         std::fs::write(path, bytes).unwrap();
     }
