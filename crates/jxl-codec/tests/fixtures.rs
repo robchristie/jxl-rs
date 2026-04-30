@@ -834,15 +834,15 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(
         xyb_summary,
         vec![
-            (59525, 3148783885712997862),
-            (59547, 8179999271320941248),
-            (59554, 11189150345044084047),
+            (59701, 17175256993221451057),
+            (59731, 13193795168070979075),
+            (59744, 11034441270375163589),
         ]
     );
     assert_eq!(
         xyb_anchors,
         [
-            3082885028, 979076178, 3128274685, 940837884, 1037228049, 992849658
+            3082885028, 979023853, 3128313927, 942663329, 1037195995, 991994853
         ]
     );
     let rgb_image = assemble_vardct_linear_rgb_image(plan).unwrap().unwrap();
@@ -877,15 +877,15 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(
         rgb_summary,
         vec![
-            (61440, 11220725426516025707),
-            (61440, 3408914844508450388),
-            (61440, 3579285547816920914),
+            (61440, 14340858827962243646),
+            (61440, 5147775462745379923),
+            (61440, 6578640426769975978),
         ]
     );
     assert_eq!(
         rgb_anchors,
         [
-            944126269, 952684638, 3107735916, 1015174801, 1015065925, 3159140182
+            944059739, 952652744, 3107743131, 1015160919, 1015031823, 3159131808
         ]
     );
     let srgb8_image = assemble_vardct_srgb8_image(plan).unwrap().unwrap();
@@ -902,9 +902,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     ];
     let metrics = srgb8_oracle_metrics(&srgb8_image, &reference, &anchor_indices);
     assert_eq!(metrics.max_abs_error, 255);
-    assert_eq!(metrics.sum_abs_error, 20235071);
-    assert_eq!(metrics.checksum, 3789787639564895058);
-    assert_eq!(metrics.anchors, vec![0, 0, 0, 17, 14, 0, 34, 34, 0]);
+    assert_eq!(metrics.sum_abs_error, 20235184);
+    assert_eq!(metrics.checksum, 5394326051400477742);
+    assert_eq!(metrics.anchors, vec![0, 0, 0, 17, 13, 0, 34, 34, 0]);
     assert_eq!(
         metrics.reference_anchors,
         vec![0, 1, 1, 125, 128, 124, 253, 255, 255]
@@ -1805,12 +1805,12 @@ fn generated_vardct_intensity_target_scales_opsin_plan_when_available() {
     ];
     let metrics = srgb8_oracle_metrics(&srgb8_image, &reference, &anchor_indices);
     assert_eq!(metrics.max_abs_error, 255);
-    assert_eq!(metrics.sum_abs_error, 20670678);
-    assert_eq!(metrics.checksum, 13324128505421059030);
-    assert_eq!(metrics.anchors, vec![0, 0, 0, 14, 10, 0, 29, 28, 0]);
+    assert_eq!(metrics.sum_abs_error, 20670461);
+    assert_eq!(metrics.checksum, 5212441970297878788);
+    assert_eq!(metrics.anchors, [0, 0, 0, 14, 10, 0, 29, 28, 0]);
     assert_eq!(
         metrics.reference_anchors,
-        vec![0, 0, 0, 127, 126, 124, 253, 255, 255]
+        [0, 0, 0, 127, 126, 124, 253, 255, 255]
     );
 }
 
@@ -1945,9 +1945,9 @@ fn generated_vardct_no_gaborish_skips_filter_when_available() {
     assert_eq!(
         xyb_summary,
         vec![
-            (54781, 2020519470673849507),
-            (54803, 10888162461340476259),
-            (54955, 13716982194859290094),
+            (54834, 10301878029696825944),
+            (54858, 6378479737245890198),
+            (55014, 14481877522691215894),
         ]
     );
     assert_eq!(
@@ -1959,9 +1959,9 @@ fn generated_vardct_no_gaborish_skips_filter_when_available() {
     assert_eq!(
         rgb_summary,
         vec![
-            (61440, 3171998921660256096),
-            (61440, 11927304132132683606),
-            (61440, 16709797738514973326),
+            (61440, 1563765400672408309),
+            (61440, 3552990510452338008),
+            (61440, 16426996040106745470),
         ]
     );
     assert_eq!(
@@ -1971,8 +1971,8 @@ fn generated_vardct_no_gaborish_skips_filter_when_available() {
         ]
     );
     assert_eq!(metrics.max_abs_error, 255);
-    assert_eq!(metrics.sum_abs_error, 20512148);
-    assert_eq!(metrics.checksum, 18332893120240527486);
+    assert_eq!(metrics.sum_abs_error, 20512152);
+    assert_eq!(metrics.checksum, 15595565513065445208);
     assert_eq!(metrics.anchors, vec![0, 0, 0, 18, 17, 0, 34, 33, 0]);
     assert_eq!(
         metrics.reference_anchors,
