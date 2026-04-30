@@ -627,6 +627,7 @@ pub struct VarDctAcGroupMetadata {
     pub channel_trace: Option<VarDctAcChannelTrace>,
     pub coefficient_summary: Option<VarDctAcCoefficientSummary>,
     pub coefficient_grid: Option<VarDctAcCoefficientGrid>,
+    pub base_dequantized_grid: Option<VarDctAcBaseDequantizedGrid>,
     pub parse_error: Option<Error>,
 }
 
@@ -752,6 +753,59 @@ impl VarDctAcCoefficientGrid {
         }
         let index = ((block_y * self.width_blocks + block_x) * DCT_BLOCK_SIZE) + coeff;
         self.per_channel[channel].coefficients.get(index).copied()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcBaseDequantizedGrid {
+    pub group: usize,
+    pub pass: usize,
+    pub width_blocks: usize,
+    pub height_blocks: usize,
+    /// Raw `f32::to_bits()` for the global inverse scale used by this base pass.
+    pub inv_global_scale_bits: u32,
+    pub per_channel: [VarDctAcBaseDequantizedChannelGrid; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcBaseDequantizedChannelGrid {
+    /// Base-dequantized coefficients as `f32::to_bits()` for deterministic metadata equality.
+    pub coefficients: Vec<u32>,
+    pub nonzero_coefficients: usize,
+    pub coefficient_checksum: u64,
+}
+
+impl VarDctAcBaseDequantizedChannelGrid {
+    fn new(len: usize) -> Self {
+        Self {
+            coefficients: vec![0; len],
+            nonzero_coefficients: 0,
+            coefficient_checksum: 0,
+        }
+    }
+}
+
+impl VarDctAcBaseDequantizedGrid {
+    pub fn coefficient(
+        &self,
+        channel: usize,
+        block_x: usize,
+        block_y: usize,
+        coeff: usize,
+    ) -> Option<f32> {
+        if channel >= self.per_channel.len()
+            || block_x >= self.width_blocks
+            || block_y >= self.height_blocks
+            || coeff >= DCT_BLOCK_SIZE
+        {
+            return None;
+        }
+        let index = ((block_y * self.width_blocks + block_x) * DCT_BLOCK_SIZE) + coeff;
+        self.per_channel[channel]
+            .coefficients
+            .get(index)
+            .copied()
+            .map(f32::from_bits)
     }
 }
 
@@ -1322,6 +1376,7 @@ fn read_vardct_ac_group_metadata(
         channel_trace: None,
         coefficient_summary: None,
         coefficient_grid: None,
+        base_dequantized_grid: None,
         parse_error: None,
     };
 
@@ -1369,9 +1424,14 @@ fn read_vardct_ac_group_metadata(
                                 dc_groups,
                             ) {
                                 Ok((probe, trace, summary, grid)) => {
+                                    let base_dequantized_grid = base_dequantize_vardct_ac_grid(
+                                        &grid, global, &metadata, dc_groups,
+                                    )
+                                    .ok();
                                     metadata.channel_trace = Some(trace);
                                     metadata.coefficient_summary = Some(summary);
                                     metadata.coefficient_grid = Some(grid);
+                                    metadata.base_dequantized_grid = base_dequantized_grid;
                                     Ok(probe)
                                 }
                                 Err(error) => Err(error),
@@ -2031,6 +2091,153 @@ fn write_vardct_ac_coefficient(
     Ok(())
 }
 
+fn base_dequantize_vardct_ac_grid(
+    grid: &VarDctAcCoefficientGrid,
+    global: Option<&VarDctGlobalMetadata>,
+    metadata: &VarDctAcGroupMetadata,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<VarDctAcBaseDequantizedGrid> {
+    let global = global.ok_or(Error::Unsupported("VarDCT global metadata"))?;
+    let quant_field = vardct_quant_field_for_group(metadata, dc_groups)?;
+    let coefficient_len = grid
+        .width_blocks
+        .checked_mul(grid.height_blocks)
+        .and_then(|blocks| blocks.checked_mul(DCT_BLOCK_SIZE))
+        .ok_or(Error::InvalidCodestream(
+            "AC group coefficient grid is too large",
+        ))?;
+    let mut dequantized = VarDctAcBaseDequantizedGrid {
+        group: grid.group,
+        pass: grid.pass,
+        width_blocks: grid.width_blocks,
+        height_blocks: grid.height_blocks,
+        inv_global_scale_bits: global.quantizer.inv_global_scale.to_bits(),
+        per_channel: [
+            VarDctAcBaseDequantizedChannelGrid::new(coefficient_len),
+            VarDctAcBaseDequantizedChannelGrid::new(coefficient_len),
+            VarDctAcBaseDequantizedChannelGrid::new(coefficient_len),
+        ],
+    };
+
+    for channel in 0..3 {
+        for block_y in 0..grid.height_blocks {
+            for block_x in 0..grid.width_blocks {
+                let quant = *quant_field
+                    .get(block_y * grid.width_blocks + block_x)
+                    .ok_or(Error::InvalidCodestream("invalid AC quant field"))?;
+                if quant <= 0 {
+                    return Err(Error::InvalidCodestream("invalid AC quant field"));
+                }
+                let scale = global.quantizer.inv_global_scale / quant as f32;
+                for coeff in 0..DCT_BLOCK_SIZE {
+                    let index = ((block_y * grid.width_blocks + block_x) * DCT_BLOCK_SIZE) + coeff;
+                    let quantized = grid.per_channel[channel].coefficients[index];
+                    if quantized == 0 {
+                        continue;
+                    }
+                    let value = quantized as f32 * scale;
+                    let channel_grid = &mut dequantized.per_channel[channel];
+                    channel_grid.coefficients[index] = value.to_bits();
+                    channel_grid.nonzero_coefficients += 1;
+                    channel_grid.coefficient_checksum = checksum_dequantized_coefficient(
+                        channel_grid.coefficient_checksum,
+                        index,
+                        value,
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(dequantized)
+}
+
+fn vardct_quant_field_for_group(
+    metadata: &VarDctAcGroupMetadata,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<Vec<i32>> {
+    let dc_group = dc_groups
+        .iter()
+        .find(|dc_group| {
+            let group = &dc_group.payload.group;
+            metadata.payload.group.x >= group.x
+                && metadata.payload.group.y >= group.y
+                && metadata.payload.group.x < group.x + group.width
+                && metadata.payload.group.y < group.y + group.height
+        })
+        .ok_or(Error::Unsupported("VarDCT AC quant field"))?;
+    let ac_metadata = dc_group
+        .ac_metadata
+        .as_ref()
+        .ok_or(Error::Unsupported("VarDCT AC quant field"))?;
+    let strategy_channel = ac_metadata
+        .channels
+        .iter()
+        .find(|channel| channel.channel_index == 2)
+        .ok_or(Error::Unsupported("VarDCT AC quant field"))?;
+    let dc_width_blocks = dc_group.payload.group.width.div_ceil(8) as usize;
+    let dc_height_blocks = dc_group.payload.group.height.div_ceil(8) as usize;
+    let group_width_blocks = metadata.payload.group.width.div_ceil(8).min(256 / 8) as usize;
+    let group_height_blocks = metadata.payload.group.height.div_ceil(8).min(256 / 8) as usize;
+    let group_min_x = ((metadata.payload.group.x - dc_group.payload.group.x) / 8) as usize;
+    let group_min_y = ((metadata.payload.group.y - dc_group.payload.group.y) / 8) as usize;
+    let count = strategy_channel.width as usize;
+    if strategy_channel.height != 2 || strategy_channel.samples.len() < count * 2 {
+        return Err(Error::Unsupported("VarDCT AC quant field"));
+    }
+    let mut quant_field = vec![0; group_width_blocks * group_height_blocks];
+    let mut valid = vec![false; dc_width_blocks * dc_height_blocks];
+    let mut cursor = 0usize;
+    for y in 0..dc_height_blocks {
+        for x in 0..dc_width_blocks {
+            let index = y * dc_width_blocks + x;
+            if valid[index] {
+                continue;
+            }
+            let raw_strategy = *strategy_channel
+                .samples
+                .get(cursor)
+                .ok_or(Error::InvalidCodestream("invalid AC metadata stream"))?
+                as usize;
+            let block_x = *STRATEGY_BLOCKS_X
+                .get(raw_strategy)
+                .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+            let block_y = *STRATEGY_BLOCKS_Y
+                .get(raw_strategy)
+                .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+            let quant = 1
+                + (*strategy_channel
+                    .samples
+                    .get(count + cursor)
+                    .ok_or(Error::InvalidCodestream("invalid AC quant field"))?)
+                .clamp(0, 32_767);
+            for dy in 0..block_y {
+                for dx in 0..block_x {
+                    let covered_x = x + dx;
+                    let covered_y = y + dy;
+                    if covered_x < dc_width_blocks && covered_y < dc_height_blocks {
+                        valid[covered_y * dc_width_blocks + covered_x] = true;
+                    }
+                    if covered_x >= group_min_x
+                        && covered_x < group_min_x + group_width_blocks
+                        && covered_y >= group_min_y
+                        && covered_y < group_min_y + group_height_blocks
+                    {
+                        let local_x = covered_x - group_min_x;
+                        let local_y = covered_y - group_min_y;
+                        quant_field[local_y * group_width_blocks + local_x] = quant;
+                    }
+                }
+            }
+            cursor += 1;
+            if cursor > count {
+                return Err(Error::InvalidCodestream("invalid AC metadata stream"));
+            }
+        }
+    }
+    Ok(quant_field)
+}
+
 fn natural_coeff_order(raw_strategy: usize) -> Result<Vec<usize>> {
     let mut cx = *STRATEGY_BLOCKS_X
         .get(raw_strategy)
@@ -2146,6 +2353,14 @@ fn checksum_i32_slice(values: &[i32]) -> u64 {
 
 fn checksum_placed_coefficient(hash: u64, position: usize, coefficient: i32) -> u64 {
     [position as u64, i64::from(coefficient) as u64]
+        .into_iter()
+        .fold(hash, |hash, value| {
+            (hash ^ value).wrapping_mul(0x100000001b3)
+        })
+}
+
+fn checksum_dequantized_coefficient(hash: u64, position: usize, coefficient: f32) -> u64 {
+    [position as u64, coefficient.to_bits() as u64]
         .into_iter()
         .fold(hash, |hash, value| {
             (hash ^ value).wrapping_mul(0x100000001b3)

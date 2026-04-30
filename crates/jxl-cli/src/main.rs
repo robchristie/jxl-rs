@@ -621,6 +621,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             grid.per_channel[2].coefficient_checksum
                         );
                     }
+                    if let Some(grid) = &metadata.base_dequantized_grid {
+                        println!(
+                            "First frame VarDCT AC base dequantized grid: pass={} group={} size={}x{} inv_global_scale_bits={} ch0=({},{}) ch1=({},{}) ch2=({},{})",
+                            grid.pass,
+                            grid.group,
+                            grid.width_blocks,
+                            grid.height_blocks,
+                            grid.inv_global_scale_bits,
+                            grid.per_channel[0].nonzero_coefficients,
+                            grid.per_channel[0].coefficient_checksum,
+                            grid.per_channel[1].nonzero_coefficients,
+                            grid.per_channel[1].coefficient_checksum,
+                            grid.per_channel[2].nonzero_coefficients,
+                            grid.per_channel[2].coefficient_checksum
+                        );
+                    }
                 }
             }
             for group in &vardct.dc_groups {

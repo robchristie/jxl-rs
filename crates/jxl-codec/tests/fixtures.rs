@@ -614,6 +614,58 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         ]
     );
     let coefficient_grid = plan.ac_group_metadata[0].coefficient_grid.as_ref().unwrap();
+    let base_dequantized_grid = plan.ac_group_metadata[0]
+        .base_dequantized_grid
+        .as_ref()
+        .unwrap();
+    assert_eq!(base_dequantized_grid.group, 0);
+    assert_eq!(base_dequantized_grid.pass, 0);
+    assert_eq!(base_dequantized_grid.width_blocks, 32);
+    assert_eq!(base_dequantized_grid.height_blocks, 24);
+    assert_eq!(base_dequantized_grid.inv_global_scale_bits, 1095575839);
+    assert_eq!(
+        base_dequantized_grid
+            .per_channel
+            .iter()
+            .map(|channel| (channel.nonzero_coefficients, channel.coefficient_checksum))
+            .collect::<Vec<_>>(),
+        vec![
+            (1754, 7421052046372908028),
+            (5649, 16759939757032862422),
+            (1868, 1782002988502924811),
+        ]
+    );
+    assert_eq!(
+        (0..3)
+            .map(|channel| {
+                (0..64)
+                    .filter_map(|coeff| {
+                        base_dequantized_grid
+                            .coefficient(channel, 0, 0, coeff)
+                            .filter(|value| *value != 0.0)
+                            .map(|value| (channel, coeff, value.to_bits()))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            vec![],
+            vec![
+                (1, 2, 3228203043),
+                (1, 4, 3228203043),
+                (1, 5, 1072330787),
+                (1, 6, 3219814435),
+                (1, 7, 1072330787),
+                (1, 16, 3236591651),
+                (1, 24, 1085266458),
+                (1, 32, 3232750106),
+                (1, 40, 1080719395),
+                (1, 48, 3228203043),
+                (1, 56, 1080719395),
+            ],
+            vec![],
+        ]
+    );
     assert_eq!(coefficient_grid.group, 0);
     assert_eq!(coefficient_grid.pass, 0);
     assert_eq!(coefficient_grid.width_blocks, 32);
@@ -664,6 +716,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert!(plan.ac_group_metadata[1].channel_trace.is_none());
     assert!(plan.ac_group_metadata[1].coefficient_summary.is_none());
     assert!(plan.ac_group_metadata[1].coefficient_grid.is_none());
+    assert!(plan.ac_group_metadata[1].base_dequantized_grid.is_none());
     assert_eq!(plan.modular_global_tree_payload_start_bits, Some(192));
     assert_eq!(plan.modular_global_tree_payload_end_bits, Some(1232));
     assert_eq!(plan.modular_global_tree_payload_len_bits, Some(1040));
