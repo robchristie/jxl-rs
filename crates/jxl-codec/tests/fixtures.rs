@@ -613,8 +613,57 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             (477, 2866, 1868, 3247447943926418888),
         ]
     );
+    let coefficient_grid = plan.ac_group_metadata[0].coefficient_grid.as_ref().unwrap();
+    assert_eq!(coefficient_grid.group, 0);
+    assert_eq!(coefficient_grid.pass, 0);
+    assert_eq!(coefficient_grid.width_blocks, 32);
+    assert_eq!(coefficient_grid.height_blocks, 24);
+    assert_eq!(
+        coefficient_grid
+            .per_channel
+            .iter()
+            .map(|channel| (channel.nonzero_coefficients, channel.coefficient_checksum))
+            .collect::<Vec<_>>(),
+        vec![
+            (1754, 17786621051074088898),
+            (5649, 16235058981752676428),
+            (1868, 1498562649293644123),
+        ]
+    );
+    assert_eq!(
+        (0..3)
+            .map(|channel| {
+                (0..64)
+                    .filter_map(|coeff| {
+                        coefficient_grid
+                            .coefficient(channel, 0, 0, coeff)
+                            .filter(|value| *value != 0)
+                            .map(|value| (channel, coeff, value))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            vec![],
+            vec![
+                (1, 2, -2),
+                (1, 4, -2),
+                (1, 5, 1),
+                (1, 6, -1),
+                (1, 7, 1),
+                (1, 16, -4),
+                (1, 24, 3),
+                (1, 32, -3),
+                (1, 40, 2),
+                (1, 48, -2),
+                (1, 56, 2),
+            ],
+            vec![],
+        ]
+    );
     assert!(plan.ac_group_metadata[1].channel_trace.is_none());
     assert!(plan.ac_group_metadata[1].coefficient_summary.is_none());
+    assert!(plan.ac_group_metadata[1].coefficient_grid.is_none());
     assert_eq!(plan.modular_global_tree_payload_start_bits, Some(192));
     assert_eq!(plan.modular_global_tree_payload_end_bits, Some(1232));
     assert_eq!(plan.modular_global_tree_payload_len_bits, Some(1040));

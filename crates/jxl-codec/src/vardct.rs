@@ -626,6 +626,7 @@ pub struct VarDctAcGroupMetadata {
     pub coefficient_probe: Option<VarDctAcCoefficientProbe>,
     pub channel_trace: Option<VarDctAcChannelTrace>,
     pub coefficient_summary: Option<VarDctAcCoefficientSummary>,
+    pub coefficient_grid: Option<VarDctAcCoefficientGrid>,
     pub parse_error: Option<Error>,
 }
 
@@ -706,6 +707,52 @@ pub struct VarDctAcChannelCoefficientSummary {
     pub coefficients_written: usize,
     pub nonzero_coefficients: usize,
     pub coefficient_checksum: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcCoefficientGrid {
+    pub group: usize,
+    pub pass: usize,
+    pub width_blocks: usize,
+    pub height_blocks: usize,
+    pub per_channel: [VarDctAcChannelCoefficientGrid; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcChannelCoefficientGrid {
+    pub coefficients: Vec<i32>,
+    pub nonzero_coefficients: usize,
+    pub coefficient_checksum: u64,
+}
+
+impl VarDctAcChannelCoefficientGrid {
+    fn new(len: usize) -> Self {
+        Self {
+            coefficients: vec![0; len],
+            nonzero_coefficients: 0,
+            coefficient_checksum: 0,
+        }
+    }
+}
+
+impl VarDctAcCoefficientGrid {
+    pub fn coefficient(
+        &self,
+        channel: usize,
+        block_x: usize,
+        block_y: usize,
+        coeff: usize,
+    ) -> Option<i32> {
+        if channel >= self.per_channel.len()
+            || block_x >= self.width_blocks
+            || block_y >= self.height_blocks
+            || coeff >= DCT_BLOCK_SIZE
+        {
+            return None;
+        }
+        let index = ((block_y * self.width_blocks + block_x) * DCT_BLOCK_SIZE) + coeff;
+        self.per_channel[channel].coefficients.get(index).copied()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1274,6 +1321,7 @@ fn read_vardct_ac_group_metadata(
         coefficient_probe: None,
         channel_trace: None,
         coefficient_summary: None,
+        coefficient_grid: None,
         parse_error: None,
     };
 
@@ -1320,9 +1368,10 @@ fn read_vardct_ac_group_metadata(
                                 ac_global,
                                 dc_groups,
                             ) {
-                                Ok((probe, trace, summary)) => {
+                                Ok((probe, trace, summary, grid)) => {
                                     metadata.channel_trace = Some(trace);
                                     metadata.coefficient_summary = Some(summary);
+                                    metadata.coefficient_grid = Some(grid);
                                     Ok(probe)
                                 }
                                 Err(error) => Err(error),
@@ -1443,6 +1492,7 @@ fn probe_first_vardct_ac_coefficient(
         FIRST_AC_BLOCK_EVENT_LIMIT,
         &mut natural_coeff_orders,
         None,
+        None,
         true,
     )
 }
@@ -1459,6 +1509,7 @@ fn trace_vardct_ac_group_channel(
     VarDctAcCoefficientProbe,
     VarDctAcChannelTrace,
     VarDctAcCoefficientSummary,
+    VarDctAcCoefficientGrid,
 )> {
     const TRACE_CHANNEL: usize = 1;
     const CHANNEL_ORDER: [usize; 3] = [1, 0, 2];
@@ -1479,11 +1530,27 @@ fn trace_vardct_ac_group_channel(
     let row_len = width_blocks
         .checked_mul(height_blocks)
         .ok_or(Error::InvalidCodestream("AC group is too large"))?;
+    let coefficient_len = row_len
+        .checked_mul(DCT_BLOCK_SIZE)
+        .ok_or(Error::InvalidCodestream(
+            "AC group coefficient grid is too large",
+        ))?;
     let mut row_nzeros = [
         vec![0i32; row_len],
         vec![0i32; row_len],
         vec![0i32; row_len],
     ];
+    let mut coefficient_grid = VarDctAcCoefficientGrid {
+        group: metadata.payload.group.group,
+        pass: metadata.payload.pass,
+        width_blocks,
+        height_blocks,
+        per_channel: [
+            VarDctAcChannelCoefficientGrid::new(coefficient_len),
+            VarDctAcChannelCoefficientGrid::new(coefficient_len),
+            VarDctAcChannelCoefficientGrid::new(coefficient_len),
+        ],
+    };
     let mut first_probe = None;
     let mut blocks_decoded = 0usize;
     let mut coefficient_events_decoded = 0usize;
@@ -1523,6 +1590,7 @@ fn trace_vardct_ac_group_channel(
                 width_blocks,
                 &mut natural_coeff_orders,
                 coeff_orders,
+                Some(&mut coefficient_grid.per_channel[channel]),
                 capture_events,
             )?;
             coefficient_summary.blocks_decoded += 1;
@@ -1575,7 +1643,7 @@ fn trace_vardct_ac_group_channel(
         block_summaries,
     };
     let first_probe = first_probe.ok_or(Error::Unsupported("VarDCT AC metadata grid"))?;
-    Ok((first_probe, trace, coefficient_summary))
+    Ok((first_probe, trace, coefficient_summary, coefficient_grid))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1592,6 +1660,7 @@ fn decode_vardct_ac_block_probe(
     nzeros_stride: usize,
     natural_coeff_orders: &mut [Option<Vec<usize>>],
     coeff_orders: Option<&[VarDctCoeffOrderMetadata]>,
+    coefficient_grid: Option<&mut VarDctAcChannelCoefficientGrid>,
     capture_events: bool,
 ) -> Result<VarDctAcCoefficientProbe> {
     let _ = row_nzeros_top;
@@ -1647,6 +1716,7 @@ fn decode_vardct_ac_block_probe(
     let mut event_count = 0usize;
     let mut placed_nonzero_coefficients = 0usize;
     let mut placed_coefficient_checksum = 0xcbf29ce484222325;
+    let mut coefficient_grid = coefficient_grid;
     for k in covered_blocks..block_size {
         if remaining_nzeros == 0 {
             break;
@@ -1683,6 +1753,15 @@ fn decode_vardct_ac_block_probe(
                 coefficient_position,
                 coeff,
             );
+            if let Some(grid) = coefficient_grid.as_deref_mut() {
+                write_vardct_ac_coefficient(
+                    grid,
+                    block,
+                    nzeros_stride,
+                    coefficient_position,
+                    coeff,
+                )?;
+            }
         }
         prev = usize::from(u_coeff != 0);
         remaining_nzeros = remaining_nzeros.saturating_sub(prev);
@@ -1908,6 +1987,48 @@ fn coefficient_order_position(
         .get(k)
         .copied()
         .ok_or(Error::InvalidCodestream("invalid coefficient order index"))
+}
+
+fn write_vardct_ac_coefficient(
+    grid: &mut VarDctAcChannelCoefficientGrid,
+    block: VarDctFirstAcBlock,
+    width_blocks: usize,
+    coefficient_position: usize,
+    coefficient: i32,
+) -> Result<()> {
+    let strategy_width = STRATEGY_BLOCKS_X
+        .get(block.raw_strategy)
+        .copied()
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+    let strategy_height = STRATEGY_BLOCKS_Y
+        .get(block.raw_strategy)
+        .copied()
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+    let local_width = strategy_width * 8;
+    let local_x = coefficient_position % local_width;
+    let local_y = coefficient_position / local_width;
+    if local_y >= strategy_height * 8 {
+        return Err(Error::InvalidCodestream("invalid AC coefficient position"));
+    }
+    let block_x = block.block_x + local_x / 8;
+    let block_y = block.block_y + local_y / 8;
+    let coeff_x = local_x % 8;
+    let coeff_y = local_y % 8;
+    let coeff_index = coeff_y * 8 + coeff_x;
+    let index = ((block_y * width_blocks + block_x) * DCT_BLOCK_SIZE) + coeff_index;
+    let slot = grid
+        .coefficients
+        .get_mut(index)
+        .ok_or(Error::InvalidCodestream(
+            "AC coefficient outside group grid",
+        ))?;
+    if *slot == 0 {
+        grid.nonzero_coefficients += 1;
+    }
+    *slot = coefficient;
+    grid.coefficient_checksum =
+        checksum_placed_coefficient(grid.coefficient_checksum, index, coefficient);
+    Ok(())
 }
 
 fn natural_coeff_order(raw_strategy: usize) -> Result<Vec<usize>> {

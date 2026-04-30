@@ -606,6 +606,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             summary.per_channel[2].coefficient_checksum
                         );
                     }
+                    if let Some(grid) = &metadata.coefficient_grid {
+                        println!(
+                            "First frame VarDCT AC coefficient grid: pass={} group={} size={}x{} ch0=({},{}) ch1=({},{}) ch2=({},{})",
+                            grid.pass,
+                            grid.group,
+                            grid.width_blocks,
+                            grid.height_blocks,
+                            grid.per_channel[0].nonzero_coefficients,
+                            grid.per_channel[0].coefficient_checksum,
+                            grid.per_channel[1].nonzero_coefficients,
+                            grid.per_channel[1].coefficient_checksum,
+                            grid.per_channel[2].nonzero_coefficients,
+                            grid.per_channel[2].coefficient_checksum
+                        );
+                    }
                 }
             }
             for group in &vardct.dc_groups {
