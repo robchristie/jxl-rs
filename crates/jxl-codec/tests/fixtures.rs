@@ -570,7 +570,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .collect::<Vec<_>>(),
         vec![
             "0:0:0:1:4:2:4:256:2:302:11:32:34:18:33:Some(114):Some(0):1755776318511458984",
-            "1:32:0:1:4:2:4:256:2:302:11:32:34:17:23:Some(98):Some(0):2461791933791546484",
+            "1:0:0:1:4:2:4:256:2:302:11:32:34:17:23:Some(98):Some(0):2461791933791546484",
         ]
     );
     let channel_trace = plan.ac_group_metadata[0].channel_trace.as_ref().unwrap();
@@ -778,8 +778,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     let xyb_image = assemble_vardct_xyb_image(plan).unwrap().unwrap();
     assert_eq!(xyb_image.width, 320);
     assert_eq!(xyb_image.height, 192);
-    assert_eq!(xyb_image.groups_assembled, 1);
-    assert_eq!(xyb_image.groups_missing, 1);
+    assert_eq!(xyb_image.groups_assembled, 2);
+    assert_eq!(xyb_image.groups_missing, 0);
     assert_eq!(
         xyb_image
             .channels
@@ -800,9 +800,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             })
             .collect::<Vec<_>>(),
         vec![
-            (46514, 9056940738741842762),
-            (46533, 7369214336153034040),
-            (46533, 17864900113199536420),
+            (57962, 3833757523722157445),
+            (57980, 14440416603916395238),
+            (57982, 8893978260896325090),
         ]
     );
     assert_eq!(
@@ -814,7 +814,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             xyb_image.sample(1, 319, 191).unwrap().to_bits(),
             xyb_image.sample(2, 319, 191).unwrap().to_bits(),
         ],
-        [3082885028, 979252264, 3128142621, 0, 0, 0]
+        [
+            3082885028, 979252264, 3128142621, 939077272, 1037259029, 993675808
+        ]
     );
     assert_eq!(dequantized_grid.group, 0);
     assert_eq!(dequantized_grid.pass, 0);
@@ -970,13 +972,21 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             vec![],
         ]
     );
-    assert!(plan.ac_group_metadata[1].channel_trace.is_none());
-    assert!(plan.ac_group_metadata[1].coefficient_summary.is_none());
-    assert!(plan.ac_group_metadata[1].coefficient_grid.is_none());
-    assert!(plan.ac_group_metadata[1].base_dequantized_grid.is_none());
-    assert!(plan.ac_group_metadata[1].dequantized_grid.is_none());
-    assert!(plan.ac_group_metadata[1].spatial_grid.is_none());
-    assert!(plan.ac_group_metadata[1].spatial_with_dc_grid.is_none());
+    assert!(plan.ac_group_metadata[1].channel_trace.is_some());
+    assert!(plan.ac_group_metadata[1].coefficient_summary.is_some());
+    assert!(plan.ac_group_metadata[1].coefficient_grid.is_some());
+    assert!(plan.ac_group_metadata[1].base_dequantized_grid.is_some());
+    assert!(plan.ac_group_metadata[1].dequantized_grid.is_some());
+    let group1_spatial = plan.ac_group_metadata[1]
+        .spatial_with_dc_grid
+        .as_ref()
+        .unwrap();
+    assert_eq!(group1_spatial.group, 1);
+    assert_eq!(group1_spatial.width_blocks, 8);
+    assert_eq!(group1_spatial.height_blocks, 24);
+    assert_eq!(group1_spatial.blocks_attempted, 120);
+    assert_eq!(group1_spatial.blocks_transformed, 120);
+    assert_eq!(group1_spatial.blocks_skipped, 0);
     assert_eq!(plan.modular_global_tree_payload_start_bits, Some(192));
     assert_eq!(plan.modular_global_tree_payload_end_bits, Some(1232));
     assert_eq!(plan.modular_global_tree_payload_len_bits, Some(1040));

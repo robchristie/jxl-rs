@@ -1633,71 +1633,60 @@ fn read_vardct_ac_group_metadata(
                         metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
                         metadata.cursor.coefficient_stream_start_bits =
                             Some(reader.bits_consumed());
-                        let probe_result = if metadata.payload.group.group == 0 {
-                            match trace_vardct_ac_group_channel(
-                                &mut reader,
-                                &mut symbol_reader,
-                                &entropy.context_map,
-                                &metadata,
-                                global,
-                                ac_global,
-                                dc_groups,
-                            ) {
-                                Ok((probe, trace, summary, grid)) => {
-                                    let base_dequantized_grid = base_dequantize_vardct_ac_grid(
-                                        &grid, global, &metadata, dc_groups,
-                                    )
-                                    .ok();
-                                    let dequantized_grid = dequantize_vardct_ac_grid(
-                                        &grid,
-                                        global,
-                                        &metadata,
-                                        frame_header,
-                                        dc_groups,
-                                    )
-                                    .ok();
-                                    let spatial_grid =
-                                        dequantized_grid.as_ref().and_then(|dequantized| {
+                        let probe_result = match trace_vardct_ac_group_channel(
+                            &mut reader,
+                            &mut symbol_reader,
+                            &entropy.context_map,
+                            &metadata,
+                            global,
+                            ac_global,
+                            dc_groups,
+                        ) {
+                            Ok((probe, trace, summary, grid)) => {
+                                let base_dequantized_grid = base_dequantize_vardct_ac_grid(
+                                    &grid, global, &metadata, dc_groups,
+                                )
+                                .ok();
+                                let dequantized_grid = dequantize_vardct_ac_grid(
+                                    &grid,
+                                    global,
+                                    &metadata,
+                                    frame_header,
+                                    dc_groups,
+                                )
+                                .ok();
+                                let spatial_grid =
+                                    dequantized_grid.as_ref().and_then(|dequantized| {
+                                        spatialize_vardct_ac_grid(
+                                            dequantized,
+                                            None,
+                                            &metadata,
+                                            dc_groups,
+                                        )
+                                        .ok()
+                                    });
+                                let spatial_with_dc_grid =
+                                    dequantized_grid.as_ref().and_then(|dequantized| {
+                                        global.and_then(|global| {
                                             spatialize_vardct_ac_grid(
                                                 dequantized,
-                                                None,
+                                                Some(global),
                                                 &metadata,
                                                 dc_groups,
                                             )
                                             .ok()
-                                        });
-                                    let spatial_with_dc_grid =
-                                        dequantized_grid.as_ref().and_then(|dequantized| {
-                                            global.and_then(|global| {
-                                                spatialize_vardct_ac_grid(
-                                                    dequantized,
-                                                    Some(global),
-                                                    &metadata,
-                                                    dc_groups,
-                                                )
-                                                .ok()
-                                            })
-                                        });
-                                    metadata.channel_trace = Some(trace);
-                                    metadata.coefficient_summary = Some(summary);
-                                    metadata.coefficient_grid = Some(grid);
-                                    metadata.base_dequantized_grid = base_dequantized_grid;
-                                    metadata.dequantized_grid = dequantized_grid;
-                                    metadata.spatial_grid = spatial_grid;
-                                    metadata.spatial_with_dc_grid = spatial_with_dc_grid;
-                                    Ok(probe)
-                                }
-                                Err(error) => Err(error),
+                                        })
+                                    });
+                                metadata.channel_trace = Some(trace);
+                                metadata.coefficient_summary = Some(summary);
+                                metadata.coefficient_grid = Some(grid);
+                                metadata.base_dequantized_grid = base_dequantized_grid;
+                                metadata.dequantized_grid = dequantized_grid;
+                                metadata.spatial_grid = spatial_grid;
+                                metadata.spatial_with_dc_grid = spatial_with_dc_grid;
+                                Ok(probe)
                             }
-                        } else {
-                            probe_first_vardct_ac_coefficient(
-                                &mut reader,
-                                &mut symbol_reader,
-                                &entropy.context_map,
-                                &metadata,
-                                global,
-                                dc_groups,
-                            )
+                            Err(error) => Err(error),
                         };
                         match probe_result {
                             Ok(probe) => {
@@ -1777,37 +1766,6 @@ fn read_vardct_ac_global_entropy_tables(
         passes.push(Some(VarDctAcPassEntropy { code, context_map }));
     }
     Ok(passes)
-}
-
-fn probe_first_vardct_ac_coefficient(
-    reader: &mut BitReader<'_>,
-    symbol_reader: &mut AnsSymbolReader,
-    context_map: &[u8],
-    metadata: &VarDctAcGroupMetadata,
-    global: Option<&VarDctGlobalMetadata>,
-    dc_groups: &[VarDctDcGroupMetadata],
-) -> Result<VarDctAcCoefficientProbe> {
-    let global = global.ok_or(Error::Unsupported("VarDCT AC global metadata"))?;
-    let first_block = first_vardct_ac_block(metadata, dc_groups)
-        .ok_or(Error::Unsupported("VarDCT AC metadata grid"))?;
-    let mut row_nzeros = vec![0i32; FIRST_AC_BLOCK_EVENT_LIMIT];
-    let mut natural_coeff_orders = vec![None; STRATEGY_BLOCKS_X.len()];
-    decode_vardct_ac_block_probe(
-        reader,
-        symbol_reader,
-        context_map,
-        global,
-        first_block,
-        1,
-        32,
-        &mut row_nzeros,
-        None,
-        FIRST_AC_BLOCK_EVENT_LIMIT,
-        &mut natural_coeff_orders,
-        None,
-        None,
-        true,
-    )
 }
 
 fn trace_vardct_ac_group_channel(
@@ -2138,16 +2096,6 @@ struct VarDctFirstAcBlock {
     raw_strategy: usize,
 }
 
-fn first_vardct_ac_block(
-    metadata: &VarDctAcGroupMetadata,
-    dc_groups: &[VarDctDcGroupMetadata],
-) -> Option<VarDctFirstAcBlock> {
-    vardct_ac_blocks_for_group(metadata, dc_groups)
-        .ok()?
-        .into_iter()
-        .next()
-}
-
 fn vardct_ac_blocks_for_group(
     metadata: &VarDctAcGroupMetadata,
     dc_groups: &[VarDctDcGroupMetadata],
@@ -2204,8 +2152,8 @@ fn vardct_ac_blocks_for_group(
                 .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
             if x >= group_min_x && x < group_max_x && y >= group_min_y && y < group_max_y {
                 blocks.push(VarDctFirstAcBlock {
-                    block_x: x,
-                    block_y: y,
+                    block_x: x - group_min_x,
+                    block_y: y - group_min_y,
                     raw_strategy,
                 });
             }
