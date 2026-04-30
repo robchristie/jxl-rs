@@ -629,8 +629,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(spatial_with_dc_grid.width_blocks, 32);
     assert_eq!(spatial_with_dc_grid.height_blocks, 24);
     assert_eq!(spatial_with_dc_grid.blocks_attempted, 477);
-    assert_eq!(spatial_with_dc_grid.blocks_transformed, 375);
-    assert_eq!(spatial_with_dc_grid.blocks_skipped, 102);
+    assert_eq!(spatial_with_dc_grid.blocks_transformed, 476);
+    assert_eq!(spatial_with_dc_grid.blocks_skipped, 1);
     assert_eq!(
         spatial_with_dc_grid
             .per_channel
@@ -638,9 +638,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .map(|channel| (channel.nonzero_samples, channel.sample_checksum))
             .collect::<Vec<_>>(),
         vec![
-            (21362, 11367346107968913705),
-            (21381, 6840764390638629815),
-            (21381, 14698911317220594327),
+            (46450, 2188733357515999145),
+            (46469, 897084047106577424),
+            (46469, 11161825985852848457),
         ]
     );
     assert_eq!(
@@ -668,38 +668,38 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
                     .then_some((block_x, block_y, samples))
             }),
         Some((
-            2,
+            0,
             0,
             vec![
                 vec![
-                    (0, 0, 3082451896),
-                    (0, 1, 3087639404),
-                    (0, 2, 3093015612),
-                    (0, 3, 3097718162),
-                    (0, 4, 3101519714),
-                    (0, 5, 3104408427),
-                    (0, 6, 3105752479),
-                    (0, 7, 3106479874),
+                    (0, 0, 3082885028),
+                    (0, 1, 3082885028),
+                    (0, 2, 3082885028),
+                    (0, 3, 3082885028),
+                    (0, 4, 3082885028),
+                    (0, 5, 3082885028),
+                    (0, 6, 3082885028),
+                    (0, 7, 3082885028),
                 ],
                 vec![
-                    (1, 0, 1029897145),
-                    (1, 1, 1029955996),
-                    (1, 2, 1030064737),
-                    (1, 3, 1030206815),
-                    (1, 4, 1030360599),
-                    (1, 5, 1030502677),
-                    (1, 6, 1030611418),
-                    (1, 7, 1030670269),
+                    (1, 0, 979252264),
+                    (1, 1, 977235548),
+                    (1, 2, 985019156),
+                    (1, 3, 990344945),
+                    (1, 4, 989189456),
+                    (1, 5, 988410608),
+                    (1, 6, 990218499),
+                    (1, 7, 986072042),
                 ],
                 vec![
-                    (2, 0, 1007527462),
-                    (2, 1, 1007704014),
-                    (2, 2, 1008030238),
-                    (2, 3, 1008456472),
-                    (2, 4, 1008917823),
-                    (2, 5, 1009344056),
-                    (2, 6, 1009670281),
-                    (2, 7, 1009846832),
+                    (2, 0, 3128142621),
+                    (2, 1, 3129302972),
+                    (2, 2, 3121153438),
+                    (2, 3, 3078314688),
+                    (2, 4, 3106294038),
+                    (2, 5, 3110967121),
+                    (2, 6, 3088806776),
+                    (2, 7, 3118586040),
                 ],
             ],
         ))
@@ -709,8 +709,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(spatial_grid.width_blocks, 32);
     assert_eq!(spatial_grid.height_blocks, 24);
     assert_eq!(spatial_grid.blocks_attempted, 477);
-    assert_eq!(spatial_grid.blocks_transformed, 375);
-    assert_eq!(spatial_grid.blocks_skipped, 102);
+    assert_eq!(spatial_grid.blocks_transformed, 476);
+    assert_eq!(spatial_grid.blocks_skipped, 1);
     assert_eq!(
         spatial_grid
             .per_channel
@@ -718,9 +718,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .map(|channel| (channel.nonzero_samples, channel.sample_checksum))
             .collect::<Vec<_>>(),
         vec![
-            (19161, 17286732264132352059),
-            (21312, 9562226811198937756),
-            (21380, 15469070632775235976),
+            (37201, 16143144572303817138),
+            (46400, 4948578542667245229),
+            (46468, 8068310314647532232),
         ]
     );
     assert_eq!(
@@ -748,38 +748,29 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
                     .then_some((block_x, block_y, samples))
             }),
         Some((
-            2,
+            0,
             0,
             vec![
+                vec![],
                 vec![
-                    (0, 0, 3082451896),
-                    (0, 1, 3087639404),
-                    (0, 2, 3093015612),
-                    (0, 3, 3097718162),
-                    (0, 4, 3101519714),
-                    (0, 5, 3104408427),
-                    (0, 6, 3105752479),
-                    (0, 7, 3106479874),
+                    (1, 0, 3129099130),
+                    (1, 1, 3130107486),
+                    (1, 2, 3119294945),
+                    (1, 3, 963412650),
+                    (1, 4, 940505192),
+                    (1, 5, 3094172584),
+                    (1, 6, 961389490),
+                    (1, 7, 3115083405),
                 ],
                 vec![
-                    (1, 0, 1006930935),
-                    (1, 1, 1007166337),
-                    (1, 2, 1007601304),
-                    (1, 3, 1008169615),
-                    (1, 4, 1008784749),
-                    (1, 5, 1009353060),
-                    (1, 6, 1009788026),
-                    (1, 7, 1010023428),
-                ],
-                vec![
-                    (2, 0, 1002885618),
-                    (2, 1, 1003238722),
-                    (2, 2, 1003891170),
-                    (2, 3, 1004743638),
-                    (2, 4, 1005666340),
-                    (2, 5, 1006518806),
-                    (2, 6, 1006902108),
-                    (2, 7, 1007078660),
+                    (2, 0, 3124978992),
+                    (2, 1, 3126491532),
+                    (2, 2, 3115417450),
+                    (2, 3, 959537658),
+                    (2, 4, 936801376),
+                    (2, 5, 3090284240),
+                    (2, 6, 958020294),
+                    (2, 7, 3112258790),
                 ],
             ],
         ))

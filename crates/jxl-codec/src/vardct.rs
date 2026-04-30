@@ -1551,7 +1551,7 @@ fn read_vardct_ac_group_metadata(
                                     .ok();
                                     let spatial_grid =
                                         dequantized_grid.as_ref().and_then(|dequantized| {
-                                            spatialize_vardct_ac_dct8_grid(
+                                            spatialize_vardct_ac_grid(
                                                 dequantized,
                                                 None,
                                                 &metadata,
@@ -1562,7 +1562,7 @@ fn read_vardct_ac_group_metadata(
                                     let spatial_with_dc_grid =
                                         dequantized_grid.as_ref().and_then(|dequantized| {
                                             global.and_then(|global| {
-                                                spatialize_vardct_ac_dct8_grid(
+                                                spatialize_vardct_ac_grid(
                                                     dequantized,
                                                     Some(global),
                                                     &metadata,
@@ -2403,7 +2403,7 @@ fn write_dequantized_coefficient(
         checksum_dequantized_coefficient(grid.coefficient_checksum, index, value);
 }
 
-fn spatialize_vardct_ac_dct8_grid(
+fn spatialize_vardct_ac_grid(
     grid: &VarDctAcDequantizedGrid,
     global: Option<&VarDctGlobalMetadata>,
     metadata: &VarDctAcGroupMetadata,
@@ -2444,11 +2444,8 @@ fn spatialize_vardct_ac_dct8_grid(
             let mut coefficients = vec![0.0f32; transform.width * transform.height];
             for y in 0..transform.height {
                 for x in 0..transform.width {
-                    coefficients[y * transform.width + x] = grid
-                        .coefficient(channel, block.block_x, block.block_y, y * 8 + x)
-                        .ok_or(Error::InvalidCodestream(
-                            "invalid dequantized coefficient grid",
-                        ))?;
+                    coefficients[y * transform.width + x] =
+                        dequantized_coefficient_for_transform_position(grid, channel, block, x, y)?;
                 }
             }
             if let Some(dc_grid) = &dc_grid {
@@ -2468,15 +2465,14 @@ fn spatialize_vardct_ac_dct8_grid(
             };
             for y in 0..transform.height {
                 for x in 0..transform.width {
-                    let index = ((block.block_y * grid.width_blocks + block.block_x)
-                        * DCT_BLOCK_SIZE)
-                        + y * 8
-                        + x;
-                    write_spatial_sample(
+                    write_spatial_sample_for_transform_position(
                         &mut spatial.per_channel[channel],
-                        index,
+                        grid.width_blocks,
+                        block,
+                        x,
+                        y,
                         samples[y * transform.width + x],
-                    );
+                    )?;
                 }
             }
         }
@@ -2503,6 +2499,9 @@ fn spatial_transform_for_strategy(raw_strategy: usize) -> Option<SpatialTransfor
         0 => (8, 8, SpatialTransformKind::Dct),
         1 => (8, 8, SpatialTransformKind::Identity),
         2 => (2, 2, SpatialTransformKind::Dct),
+        4 => (16, 16, SpatialTransformKind::Dct),
+        6 => (8, 16, SpatialTransformKind::Dct),
+        7 => (16, 8, SpatialTransformKind::Dct),
         12 => (4, 8, SpatialTransformKind::Dct),
         13 => (8, 4, SpatialTransformKind::Dct),
         _ => return None,
@@ -2512,6 +2511,64 @@ fn spatial_transform_for_strategy(raw_strategy: usize) -> Option<SpatialTransfor
         height,
         kind,
     })
+}
+
+fn dequantized_coefficient_for_transform_position(
+    grid: &VarDctAcDequantizedGrid,
+    channel: usize,
+    block: VarDctFirstAcBlock,
+    local_x: usize,
+    local_y: usize,
+) -> Result<f32> {
+    let local_width = STRATEGY_BLOCKS_X
+        .get(block.raw_strategy)
+        .copied()
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?
+        * 8;
+    let coefficient_position = local_y
+        .checked_mul(local_width)
+        .and_then(|offset| offset.checked_add(local_x))
+        .ok_or(Error::InvalidCodestream("invalid AC coefficient position"))?;
+    let index =
+        coefficient_grid_index_for_local_position(grid.width_blocks, block, coefficient_position)?;
+    grid.per_channel
+        .get(channel)
+        .and_then(|channel| channel.coefficients.get(index))
+        .copied()
+        .map(f32::from_bits)
+        .ok_or(Error::InvalidCodestream(
+            "invalid dequantized coefficient grid",
+        ))
+}
+
+fn write_spatial_sample_for_transform_position(
+    grid: &mut VarDctAcSpatialChannelGrid,
+    width_blocks: usize,
+    block: VarDctFirstAcBlock,
+    local_x: usize,
+    local_y: usize,
+    value: f32,
+) -> Result<()> {
+    let block_x = block
+        .block_x
+        .checked_add(local_x / 8)
+        .ok_or(Error::InvalidCodestream("invalid spatial sample position"))?;
+    let block_y = block
+        .block_y
+        .checked_add(local_y / 8)
+        .ok_or(Error::InvalidCodestream("invalid spatial sample position"))?;
+    let sample = (local_y % 8) * 8 + (local_x % 8);
+    let index = block_y
+        .checked_mul(width_blocks)
+        .and_then(|offset| offset.checked_add(block_x))
+        .and_then(|block_index| block_index.checked_mul(DCT_BLOCK_SIZE))
+        .and_then(|offset| offset.checked_add(sample))
+        .ok_or(Error::InvalidCodestream("invalid spatial sample position"))?;
+    if index >= grid.samples.len() {
+        return Err(Error::InvalidCodestream("invalid spatial sample position"));
+    }
+    write_spatial_sample(grid, index, value);
+    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -4858,6 +4915,49 @@ mod tests {
         for sample in samples {
             assert!((sample - 1.0).abs() < 1.0e-6);
         }
+    }
+
+    #[test]
+    fn large_transform_coefficient_lookup_crosses_block_grid() {
+        let mut grid = VarDctAcDequantizedGrid {
+            group: 0,
+            pass: 0,
+            width_blocks: 4,
+            height_blocks: 3,
+            per_channel: [
+                VarDctAcDequantizedChannelGrid::new(4 * 3 * DCT_BLOCK_SIZE),
+                VarDctAcDequantizedChannelGrid::new(4 * 3 * DCT_BLOCK_SIZE),
+                VarDctAcDequantizedChannelGrid::new(4 * 3 * DCT_BLOCK_SIZE),
+            ],
+        };
+        let block = VarDctFirstAcBlock {
+            block_x: 1,
+            block_y: 1,
+            raw_strategy: 4,
+        };
+        let target_index = ((2 * grid.width_blocks + 2) * DCT_BLOCK_SIZE) + 3 * 8 + 4;
+        grid.per_channel[0].coefficients[target_index] = 2.5f32.to_bits();
+
+        let value =
+            dequantized_coefficient_for_transform_position(&grid, 0, block, 12, 11).unwrap();
+
+        assert_eq!(value, 2.5);
+    }
+
+    #[test]
+    fn large_transform_spatial_write_crosses_block_grid() {
+        let mut grid = VarDctAcSpatialChannelGrid::new(4 * 3 * DCT_BLOCK_SIZE);
+        let block = VarDctFirstAcBlock {
+            block_x: 1,
+            block_y: 1,
+            raw_strategy: 4,
+        };
+
+        write_spatial_sample_for_transform_position(&mut grid, 4, block, 12, 11, 3.25).unwrap();
+
+        let target_index = ((2 * 4 + 2) * DCT_BLOCK_SIZE) + 3 * 8 + 4;
+        assert_eq!(grid.samples[target_index], 3.25f32.to_bits());
+        assert_eq!(grid.nonzero_samples, 1);
     }
 
     #[test]
