@@ -598,7 +598,7 @@ pub fn assemble_vardct_xyb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDc
         apply_vardct_gaborish(image, &plan.loop_filter);
         if plan.loop_filter.epf_iters >= 1 {
             if let Some(epf) = plan.epf_metadata.as_ref() {
-                apply_vardct_epf_stage1(image, &plan.loop_filter, epf);
+                apply_vardct_epf(image, &plan.loop_filter, epf);
             }
         }
     }
@@ -1157,11 +1157,7 @@ fn mirror_coordinate(mut coordinate: isize, size: usize) -> usize {
     coordinate as usize
 }
 
-fn apply_vardct_epf_stage1(
-    image: &mut VarDctXybImage,
-    loop_filter: &LoopFilter,
-    epf: &VarDctEpfMetadata,
-) {
+fn apply_vardct_epf(image: &mut VarDctXybImage, loop_filter: &LoopFilter, epf: &VarDctEpfMetadata) {
     if image.width == 0
         || image.height == 0
         || epf.width_blocks == 0
@@ -1173,78 +1169,181 @@ fn apply_vardct_epf_stage1(
 
     let width = image.width as usize;
     let height = image.height as usize;
-    let input = image.channels.clone();
-    let channel_scale = effective_epf_channel_scale(loop_filter);
-    let border_sad_mul = loop_filter.epf_border_sad_mul.unwrap_or(2.0 / 3.0);
-    for y in 0..height {
-        let block_y = (y / 8).min(epf.height_blocks - 1);
-        let sad_mul = if y % 8 == 0 || y % 8 == 7 {
-            1.65 * border_sad_mul
-        } else {
-            1.65
-        };
-        for x in 0..width {
-            let block_x = (x / 8).min(epf.width_blocks - 1);
-            let inv_sigma = f32::from_bits(epf.inv_sigma[block_y * epf.width_blocks + block_x]);
-            if inv_sigma < EPF_MIN_SIGMA {
-                continue;
-            }
-            let x_sad_mul = if x % 8 == 0 || x % 8 == 7 {
-                1.65 * border_sad_mul
-            } else {
-                sad_mul
-            };
-            let inv_sigma = inv_sigma * x_sad_mul;
-            let sad_top = epf_stage1_sad(&input, width, height, x, y, 0, -1, channel_scale);
-            let sad_left = epf_stage1_sad(&input, width, height, x, y, -1, 0, channel_scale);
-            let sad_right = epf_stage1_sad(&input, width, height, x, y, 1, 0, channel_scale);
-            let sad_bottom = epf_stage1_sad(&input, width, height, x, y, 0, 1, channel_scale);
+    let pixels = width * height;
+    let mut input = image.channels.clone();
+    let mut output = [vec![0.0; pixels], vec![0.0; pixels], vec![0.0; pixels]];
+    let pipeline = EpfPipeline {
+        width,
+        height,
+        loop_filter,
+        epf,
+        channel_scale: effective_epf_channel_scale(loop_filter),
+        border_sad_mul: loop_filter.epf_border_sad_mul.unwrap_or(2.0 / 3.0),
+    };
 
-            let weights = [
-                epf_weight(sad_top, inv_sigma),
-                epf_weight(sad_left, inv_sigma),
-                epf_weight(sad_right, inv_sigma),
-                epf_weight(sad_bottom, inv_sigma),
-            ];
-            let neighbor_offsets = [(0, -1), (-1, 0), (1, 0), (0, 1)];
-            let weight_sum = 1.0 + weights.iter().sum::<f32>();
-            let output_index = y * width + x;
-            for channel in 0..3 {
-                let mut sample_sum = input[channel][output_index];
-                for (weight, (dx, dy)) in weights.iter().zip(neighbor_offsets) {
-                    let nx = mirror_coordinate(x as isize + dx, width);
-                    let ny = mirror_coordinate(y as isize + dy, height);
-                    sample_sum += *weight * input[channel][ny * width + nx];
-                }
-                image.channels[channel][output_index] = sample_sum / weight_sum;
-            }
+    if loop_filter.epf_iters >= 3 {
+        pipeline.apply_pass(&input, &mut output, EpfPass::Zero);
+        std::mem::swap(&mut input, &mut output);
+    }
+    if loop_filter.epf_iters >= 1 {
+        pipeline.apply_pass(&input, &mut output, EpfPass::One);
+        std::mem::swap(&mut input, &mut output);
+    }
+    if loop_filter.epf_iters >= 2 {
+        pipeline.apply_pass(&input, &mut output, EpfPass::Two);
+        std::mem::swap(&mut input, &mut output);
+    }
+
+    image.channels = input;
+}
+
+#[derive(Clone, Copy)]
+enum EpfPass {
+    Zero,
+    One,
+    Two,
+}
+
+impl EpfPass {
+    fn neighbor_offsets(self) -> &'static [(isize, isize)] {
+        match self {
+            Self::Zero => &[
+                (-2, 0),
+                (-1, -1),
+                (-1, 0),
+                (-1, 1),
+                (0, -2),
+                (0, -1),
+                (0, 1),
+                (0, 2),
+                (1, -1),
+                (1, 0),
+                (1, 1),
+                (2, 0),
+            ],
+            Self::One | Self::Two => &[(0, -1), (-1, 0), (1, 0), (0, 1)],
+        }
+    }
+
+    fn sigma_scale(self, loop_filter: &LoopFilter) -> f32 {
+        match self {
+            Self::Zero => loop_filter.epf_pass0_sigma_scale.unwrap_or(0.9),
+            Self::One => 1.0,
+            Self::Two => loop_filter.epf_pass2_sigma_scale.unwrap_or(6.5),
+        }
+    }
+
+    fn sad(self, input: &[Vec<f32>; 3], ctx: EpfSampleContext, dx: isize, dy: isize) -> f32 {
+        match self {
+            Self::Zero | Self::One => epf_plus_sad(input, ctx, dx, dy),
+            Self::Two => epf_pixel_sad(input, ctx, dx, dy),
         }
     }
 }
 
-fn epf_stage1_sad(
-    channels: &[Vec<f32>; 3],
+struct EpfPipeline<'a> {
+    width: usize,
+    height: usize,
+    loop_filter: &'a LoopFilter,
+    epf: &'a VarDctEpfMetadata,
+    channel_scale: [f32; 3],
+    border_sad_mul: f32,
+}
+
+#[derive(Clone, Copy)]
+struct EpfSampleContext {
     width: usize,
     height: usize,
     x: usize,
     y: usize,
-    dx: isize,
-    dy: isize,
     channel_scale: [f32; 3],
-) -> f32 {
+}
+
+impl EpfPipeline<'_> {
+    fn apply_pass(&self, input: &[Vec<f32>; 3], output: &mut [Vec<f32>; 3], pass: EpfPass) {
+        let pass_sigma_scale = pass.sigma_scale(self.loop_filter);
+        let offsets = pass.neighbor_offsets();
+        for y in 0..self.height {
+            let block_y = (y / 8).min(self.epf.height_blocks - 1);
+            for x in 0..self.width {
+                let output_index = y * self.width + x;
+                let block_x = (x / 8).min(self.epf.width_blocks - 1);
+                let inv_sigma =
+                    f32::from_bits(self.epf.inv_sigma[block_y * self.epf.width_blocks + block_x]);
+                if inv_sigma < EPF_MIN_SIGMA {
+                    for channel in 0..3 {
+                        output[channel][output_index] = input[channel][output_index];
+                    }
+                    continue;
+                }
+
+                let inv_sigma = inv_sigma * self.sad_multiplier(x, y, pass_sigma_scale);
+                let ctx = EpfSampleContext {
+                    width: self.width,
+                    height: self.height,
+                    x,
+                    y,
+                    channel_scale: self.channel_scale,
+                };
+                let mut weights = [0.0f32; 12];
+                let mut neighbor_weight_sum = 0.0;
+                for (index, &(dx, dy)) in offsets.iter().enumerate() {
+                    let weight = epf_weight(pass.sad(input, ctx, dx, dy), inv_sigma);
+                    weights[index] = weight;
+                    neighbor_weight_sum += weight;
+                }
+                let weight_sum = 1.0 + neighbor_weight_sum;
+                for channel in 0..3 {
+                    let mut sample_sum = input[channel][output_index];
+                    for (weight, &(dx, dy)) in weights.iter().zip(offsets) {
+                        let nx = mirror_coordinate(x as isize + dx, self.width);
+                        let ny = mirror_coordinate(y as isize + dy, self.height);
+                        sample_sum += *weight * input[channel][ny * self.width + nx];
+                    }
+                    output[channel][output_index] = sample_sum / weight_sum;
+                }
+            }
+        }
+    }
+
+    fn sad_multiplier(&self, x: usize, y: usize, pass_sigma_scale: f32) -> f32 {
+        let base = 1.65 * pass_sigma_scale;
+        if x % 8 == 0 || x % 8 == 7 || y % 8 == 0 || y % 8 == 7 {
+            base * self.border_sad_mul
+        } else {
+            base
+        }
+    }
+}
+
+fn epf_plus_sad(channels: &[Vec<f32>; 3], ctx: EpfSampleContext, dx: isize, dy: isize) -> f32 {
     const PLUS_OFFSETS: [(isize, isize); 5] = [(0, 0), (-1, 0), (0, -1), (1, 0), (0, 1)];
     let mut sad = 0.0;
     for channel in 0..3 {
         let mut channel_sad = 0.0;
         for (px, py) in PLUS_OFFSETS {
-            let ax = mirror_coordinate(x as isize + px, width);
-            let ay = mirror_coordinate(y as isize + py, height);
-            let bx = mirror_coordinate(x as isize + dx + px, width);
-            let by = mirror_coordinate(y as isize + dy + py, height);
-            channel_sad +=
-                (channels[channel][ay * width + ax] - channels[channel][by * width + bx]).abs();
+            let ax = mirror_coordinate(ctx.x as isize + px, ctx.width);
+            let ay = mirror_coordinate(ctx.y as isize + py, ctx.height);
+            let bx = mirror_coordinate(ctx.x as isize + dx + px, ctx.width);
+            let by = mirror_coordinate(ctx.y as isize + dy + py, ctx.height);
+            channel_sad += (channels[channel][ay * ctx.width + ax]
+                - channels[channel][by * ctx.width + bx])
+                .abs();
         }
-        sad += channel_sad * channel_scale[channel];
+        sad += channel_sad * ctx.channel_scale[channel];
+    }
+    sad
+}
+
+fn epf_pixel_sad(channels: &[Vec<f32>; 3], ctx: EpfSampleContext, dx: isize, dy: isize) -> f32 {
+    let center_index = ctx.y * ctx.width + ctx.x;
+    let neighbor_x = mirror_coordinate(ctx.x as isize + dx, ctx.width);
+    let neighbor_y = mirror_coordinate(ctx.y as isize + dy, ctx.height);
+    let neighbor_index = neighbor_y * ctx.width + neighbor_x;
+    let mut sad = 0.0;
+    for channel in 0..3 {
+        sad += (channels[channel][center_index] - channels[channel][neighbor_index]).abs()
+            * ctx.channel_scale[channel];
     }
     sad
 }
@@ -6182,7 +6281,11 @@ mod tests {
             parse_error: None,
         };
 
-        apply_vardct_epf_stage1(&mut image, &LoopFilter::default(), &epf);
+        let loop_filter = LoopFilter {
+            epf_iters: 1,
+            ..LoopFilter::default()
+        };
+        apply_vardct_epf(&mut image, &loop_filter, &epf);
 
         assert_eq!(image.channels, original);
     }
@@ -6213,13 +6316,111 @@ mod tests {
             parse_error: None,
         };
 
-        apply_vardct_epf_stage1(&mut image, &LoopFilter::default(), &epf);
+        let loop_filter = LoopFilter {
+            epf_iters: 1,
+            ..LoopFilter::default()
+        };
+        apply_vardct_epf(&mut image, &loop_filter, &epf);
 
         assert!(image.channels[0][4] < 1.0);
         assert!(image.channels[0][1] > 0.0);
         assert!(image.channels[0][3] > 0.0);
         assert_eq!(image.channels[1], vec![0.0; 9]);
         assert_eq!(image.channels[2], vec![0.0; 9]);
+    }
+
+    #[test]
+    fn epf_stage2_runs_after_stage1_when_enabled() {
+        let mut one_pass = VarDctXybImage {
+            width: 5,
+            height: 5,
+            groups_assembled: 1,
+            groups_missing: 0,
+            channels: [
+                vec![
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4, 0.0, 0.0, 0.0, 0.4, 1.0, 0.4, 0.0, 0.0,
+                    0.0, 0.4, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                ],
+                vec![0.0; 25],
+                vec![0.0; 25],
+            ],
+        };
+        let mut two_pass = one_pass.clone();
+        let epf = VarDctEpfMetadata {
+            width_blocks: 1,
+            height_blocks: 1,
+            raw_quant_field: vec![1],
+            epf_sharpness: vec![7],
+            inv_sigma: vec![(-0.0001f32).to_bits()],
+            first_block_count: 1,
+            raw_quant_checksum: 0,
+            epf_sharpness_checksum: 0,
+            inv_sigma_checksum: 0,
+            parse_error: None,
+        };
+        let one_pass_filter = LoopFilter {
+            epf_iters: 1,
+            ..LoopFilter::default()
+        };
+        let two_pass_filter = LoopFilter {
+            epf_iters: 2,
+            ..LoopFilter::default()
+        };
+
+        apply_vardct_epf(&mut one_pass, &one_pass_filter, &epf);
+        apply_vardct_epf(&mut two_pass, &two_pass_filter, &epf);
+
+        assert_ne!(two_pass.channels[0], one_pass.channels[0]);
+        assert!(two_pass.channels[0][12] < one_pass.channels[0][12]);
+        assert_eq!(two_pass.channels[1], vec![0.0; 25]);
+        assert_eq!(two_pass.channels[2], vec![0.0; 25]);
+    }
+
+    #[test]
+    fn epf_stage0_runs_before_stage1_for_three_iterations() {
+        let mut one_pass = VarDctXybImage {
+            width: 5,
+            height: 5,
+            groups_assembled: 1,
+            groups_missing: 0,
+            channels: [
+                vec![
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0,
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+                ],
+                vec![0.0; 25],
+                vec![0.0; 25],
+            ],
+        };
+        let mut three_pass = one_pass.clone();
+        let epf = VarDctEpfMetadata {
+            width_blocks: 1,
+            height_blocks: 1,
+            raw_quant_field: vec![1],
+            epf_sharpness: vec![7],
+            inv_sigma: vec![(-0.0001f32).to_bits()],
+            first_block_count: 1,
+            raw_quant_checksum: 0,
+            epf_sharpness_checksum: 0,
+            inv_sigma_checksum: 0,
+            parse_error: None,
+        };
+        let one_pass_filter = LoopFilter {
+            epf_iters: 1,
+            ..LoopFilter::default()
+        };
+        let three_pass_filter = LoopFilter {
+            epf_iters: 3,
+            ..LoopFilter::default()
+        };
+
+        apply_vardct_epf(&mut one_pass, &one_pass_filter, &epf);
+        apply_vardct_epf(&mut three_pass, &three_pass_filter, &epf);
+
+        assert_ne!(three_pass.channels[0], one_pass.channels[0]);
+        assert!(three_pass.channels[0][12] < one_pass.channels[0][12]);
+        assert_eq!(three_pass.channels[1], vec![0.0; 25]);
+        assert_eq!(three_pass.channels[2], vec![0.0; 25]);
     }
 
     #[test]
