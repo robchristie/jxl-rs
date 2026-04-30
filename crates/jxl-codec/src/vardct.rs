@@ -628,6 +628,7 @@ pub struct VarDctAcGroupMetadata {
     pub coefficient_summary: Option<VarDctAcCoefficientSummary>,
     pub coefficient_grid: Option<VarDctAcCoefficientGrid>,
     pub base_dequantized_grid: Option<VarDctAcBaseDequantizedGrid>,
+    pub dequantized_grid: Option<VarDctAcDequantizedGrid>,
     pub parse_error: Option<Error>,
 }
 
@@ -786,6 +787,57 @@ impl VarDctAcBaseDequantizedChannelGrid {
 }
 
 impl VarDctAcBaseDequantizedGrid {
+    pub fn coefficient(
+        &self,
+        channel: usize,
+        block_x: usize,
+        block_y: usize,
+        coeff: usize,
+    ) -> Option<f32> {
+        if channel >= self.per_channel.len()
+            || block_x >= self.width_blocks
+            || block_y >= self.height_blocks
+            || coeff >= DCT_BLOCK_SIZE
+        {
+            return None;
+        }
+        let index = ((block_y * self.width_blocks + block_x) * DCT_BLOCK_SIZE) + coeff;
+        self.per_channel[channel]
+            .coefficients
+            .get(index)
+            .copied()
+            .map(f32::from_bits)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcDequantizedGrid {
+    pub group: usize,
+    pub pass: usize,
+    pub width_blocks: usize,
+    pub height_blocks: usize,
+    pub per_channel: [VarDctAcDequantizedChannelGrid; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctAcDequantizedChannelGrid {
+    /// Dequantized coefficients as `f32::to_bits()` for deterministic metadata equality.
+    pub coefficients: Vec<u32>,
+    pub nonzero_coefficients: usize,
+    pub coefficient_checksum: u64,
+}
+
+impl VarDctAcDequantizedChannelGrid {
+    fn new(len: usize) -> Self {
+        Self {
+            coefficients: vec![0; len],
+            nonzero_coefficients: 0,
+            coefficient_checksum: 0,
+        }
+    }
+}
+
+impl VarDctAcDequantizedGrid {
     pub fn coefficient(
         &self,
         channel: usize,
@@ -1242,6 +1294,7 @@ pub fn read_vardct_decode_plan(
         .map(|payload| {
             read_vardct_ac_group_metadata(
                 codestream,
+                frame_header,
                 payload,
                 global.as_ref(),
                 ac_global_metadata.as_ref(),
@@ -1336,6 +1389,7 @@ pub fn read_vardct_decode_plan(
 
 fn read_vardct_ac_group_metadata(
     codestream: &[u8],
+    frame_header: &FrameHeader,
     payload: VarDctPassGroupPayloadMetadata,
     global: Option<&VarDctGlobalMetadata>,
     ac_global: Option<&VarDctAcGlobalMetadata>,
@@ -1377,6 +1431,7 @@ fn read_vardct_ac_group_metadata(
         coefficient_summary: None,
         coefficient_grid: None,
         base_dequantized_grid: None,
+        dequantized_grid: None,
         parse_error: None,
     };
 
@@ -1428,10 +1483,19 @@ fn read_vardct_ac_group_metadata(
                                         &grid, global, &metadata, dc_groups,
                                     )
                                     .ok();
+                                    let dequantized_grid = dequantize_vardct_ac_grid(
+                                        &grid,
+                                        global,
+                                        &metadata,
+                                        frame_header,
+                                        dc_groups,
+                                    )
+                                    .ok();
                                     metadata.channel_trace = Some(trace);
                                     metadata.coefficient_summary = Some(summary);
                                     metadata.coefficient_grid = Some(grid);
                                     metadata.base_dequantized_grid = base_dequantized_grid;
+                                    metadata.dequantized_grid = dequantized_grid;
                                     Ok(probe)
                                 }
                                 Err(error) => Err(error),
@@ -2152,11 +2216,202 @@ fn base_dequantize_vardct_ac_grid(
     Ok(dequantized)
 }
 
-fn vardct_quant_field_for_group(
+fn dequantize_vardct_ac_grid(
+    grid: &VarDctAcCoefficientGrid,
+    global: Option<&VarDctGlobalMetadata>,
     metadata: &VarDctAcGroupMetadata,
+    frame_header: &FrameHeader,
     dc_groups: &[VarDctDcGroupMetadata],
-) -> Result<Vec<i32>> {
-    let dc_group = dc_groups
+) -> Result<VarDctAcDequantizedGrid> {
+    let global = global.ok_or(Error::Unsupported("VarDCT global metadata"))?;
+    let quant_field = vardct_quant_field_for_group(metadata, dc_groups)?;
+    let color_correlation = vardct_color_correlation_for_group(metadata, global, dc_groups)?;
+    let blocks = vardct_ac_blocks_for_group(metadata, dc_groups)?;
+    let coefficient_len = grid
+        .width_blocks
+        .checked_mul(grid.height_blocks)
+        .and_then(|blocks| blocks.checked_mul(DCT_BLOCK_SIZE))
+        .ok_or(Error::InvalidCodestream(
+            "AC group coefficient grid is too large",
+        ))?;
+    let mut dequantized = VarDctAcDequantizedGrid {
+        group: grid.group,
+        pass: grid.pass,
+        width_blocks: grid.width_blocks,
+        height_blocks: grid.height_blocks,
+        per_channel: [
+            VarDctAcDequantizedChannelGrid::new(coefficient_len),
+            VarDctAcDequantizedChannelGrid::new(coefficient_len),
+            VarDctAcDequantizedChannelGrid::new(coefficient_len),
+        ],
+    };
+    let x_dm_multiplier = (1.0f32 / 1.25f32).powf(frame_header.x_qm_scale as f32 - 2.0);
+    let b_dm_multiplier = (1.0f32 / 1.25f32).powf(frame_header.b_qm_scale as f32 - 2.0);
+
+    for block in blocks {
+        let quant = *quant_field
+            .get(block.block_y * grid.width_blocks + block.block_x)
+            .ok_or(Error::InvalidCodestream("invalid AC quant field"))?;
+        if quant <= 0 {
+            return Err(Error::InvalidCodestream("invalid AC quant field"));
+        }
+        let y_scale = global.quantizer.inv_global_scale / quant as f32;
+        let x_scale = y_scale * x_dm_multiplier;
+        let b_scale = y_scale * b_dm_multiplier;
+        let x_cc_mul = color_correlation
+            .x
+            .get((block.block_y / 8) * color_correlation.width_tiles + (block.block_x / 8))
+            .copied()
+            .ok_or(Error::InvalidCodestream("invalid AC color correlation map"))?;
+        let b_cc_mul = color_correlation
+            .b
+            .get((block.block_y / 8) * color_correlation.width_tiles + (block.block_x / 8))
+            .copied()
+            .ok_or(Error::InvalidCodestream("invalid AC color correlation map"))?;
+        let strategy_width = STRATEGY_BLOCKS_X[block.raw_strategy];
+        let strategy_height = STRATEGY_BLOCKS_Y[block.raw_strategy];
+        let size = strategy_width * strategy_height * DCT_BLOCK_SIZE;
+        let x_matrix = default_dequant_matrix(block.raw_strategy, 0)?;
+        let y_matrix = default_dequant_matrix(block.raw_strategy, 1)?;
+        let b_matrix = default_dequant_matrix(block.raw_strategy, 2)?;
+        if x_matrix.len() != size || y_matrix.len() != size || b_matrix.len() != size {
+            return Err(Error::InvalidCodestream("invalid dequant matrix size"));
+        }
+        for local_position in 0..size {
+            let index = coefficient_grid_index_for_local_position(
+                grid.width_blocks,
+                block,
+                local_position,
+            )?;
+            let quantized_x = grid.per_channel[0].coefficients[index];
+            let quantized_y = grid.per_channel[1].coefficients[index];
+            let quantized_b = grid.per_channel[2].coefficients[index];
+            let dequant_y = adjust_quant_bias(1, quantized_y) * y_matrix[local_position] * y_scale;
+            let dequant_x_cc =
+                adjust_quant_bias(0, quantized_x) * x_matrix[local_position] * x_scale;
+            let dequant_b_cc =
+                adjust_quant_bias(2, quantized_b) * b_matrix[local_position] * b_scale;
+            write_dequantized_coefficient(&mut dequantized.per_channel[1], index, dequant_y);
+            write_dequantized_coefficient(
+                &mut dequantized.per_channel[0],
+                index,
+                dequant_x_cc + x_cc_mul * dequant_y,
+            );
+            write_dequantized_coefficient(
+                &mut dequantized.per_channel[2],
+                index,
+                dequant_b_cc + b_cc_mul * dequant_y,
+            );
+        }
+    }
+    Ok(dequantized)
+}
+
+fn write_dequantized_coefficient(
+    grid: &mut VarDctAcDequantizedChannelGrid,
+    index: usize,
+    value: f32,
+) {
+    if value == 0.0 {
+        return;
+    }
+    grid.coefficients[index] = value.to_bits();
+    grid.nonzero_coefficients += 1;
+    grid.coefficient_checksum =
+        checksum_dequantized_coefficient(grid.coefficient_checksum, index, value);
+}
+
+fn coefficient_grid_index_for_local_position(
+    width_blocks: usize,
+    block: VarDctFirstAcBlock,
+    coefficient_position: usize,
+) -> Result<usize> {
+    let strategy_width = STRATEGY_BLOCKS_X
+        .get(block.raw_strategy)
+        .copied()
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+    let strategy_height = STRATEGY_BLOCKS_Y
+        .get(block.raw_strategy)
+        .copied()
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+    let local_width = strategy_width * 8;
+    let local_x = coefficient_position % local_width;
+    let local_y = coefficient_position / local_width;
+    if local_y >= strategy_height * 8 {
+        return Err(Error::InvalidCodestream("invalid AC coefficient position"));
+    }
+    let block_x = block.block_x + local_x / 8;
+    let block_y = block.block_y + local_y / 8;
+    let coeff_x = local_x % 8;
+    let coeff_y = local_y % 8;
+    Ok(((block_y * width_blocks + block_x) * DCT_BLOCK_SIZE) + coeff_y * 8 + coeff_x)
+}
+
+#[derive(Debug, Clone)]
+struct VarDctColorCorrelationGrid {
+    width_tiles: usize,
+    x: Vec<f32>,
+    b: Vec<f32>,
+}
+
+fn vardct_color_correlation_for_group(
+    metadata: &VarDctAcGroupMetadata,
+    global: &VarDctGlobalMetadata,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<VarDctColorCorrelationGrid> {
+    let dc_group = vardct_dc_group_for_ac_group(metadata, dc_groups)?;
+    let ac_metadata = dc_group
+        .ac_metadata
+        .as_ref()
+        .ok_or(Error::Unsupported("VarDCT AC color correlation"))?;
+    let x_channel = ac_metadata
+        .channels
+        .iter()
+        .find(|channel| channel.channel_index == 0)
+        .ok_or(Error::Unsupported("VarDCT AC color correlation"))?;
+    let b_channel = ac_metadata
+        .channels
+        .iter()
+        .find(|channel| channel.channel_index == 1)
+        .ok_or(Error::Unsupported("VarDCT AC color correlation"))?;
+    let width_tiles = (metadata.payload.group.width.div_ceil(8).min(256 / 8) as usize).div_ceil(8);
+    let height_tiles =
+        (metadata.payload.group.height.div_ceil(8).min(256 / 8) as usize).div_ceil(8);
+    let dc_width_tiles = dc_group.payload.group.width.div_ceil(8).div_ceil(8) as usize;
+    let group_min_tile_x = ((metadata.payload.group.x - dc_group.payload.group.x) / 64) as usize;
+    let group_min_tile_y = ((metadata.payload.group.y - dc_group.payload.group.y) / 64) as usize;
+    let mut x = Vec::with_capacity(width_tiles * height_tiles);
+    let mut b = Vec::with_capacity(width_tiles * height_tiles);
+    for tile_y in 0..height_tiles {
+        for tile_x in 0..width_tiles {
+            let source_index =
+                (group_min_tile_y + tile_y) * dc_width_tiles + group_min_tile_x + tile_x;
+            let x_factor = *x_channel
+                .samples
+                .get(source_index)
+                .ok_or(Error::InvalidCodestream("invalid AC color correlation map"))?;
+            let b_factor = *b_channel
+                .samples
+                .get(source_index)
+                .ok_or(Error::InvalidCodestream("invalid AC color correlation map"))?;
+            x.push(
+                global.color_correlation.base_correlation_x
+                    + x_factor as f32 / global.color_correlation.color_factor as f32,
+            );
+            b.push(
+                global.color_correlation.base_correlation_b
+                    + b_factor as f32 / global.color_correlation.color_factor as f32,
+            );
+        }
+    }
+    Ok(VarDctColorCorrelationGrid { width_tiles, x, b })
+}
+
+fn vardct_dc_group_for_ac_group<'a>(
+    metadata: &VarDctAcGroupMetadata,
+    dc_groups: &'a [VarDctDcGroupMetadata],
+) -> Result<&'a VarDctDcGroupMetadata> {
+    dc_groups
         .iter()
         .find(|dc_group| {
             let group = &dc_group.payload.group;
@@ -2165,7 +2420,14 @@ fn vardct_quant_field_for_group(
                 && metadata.payload.group.x < group.x + group.width
                 && metadata.payload.group.y < group.y + group.height
         })
-        .ok_or(Error::Unsupported("VarDCT AC quant field"))?;
+        .ok_or(Error::Unsupported("VarDCT DC group"))
+}
+
+fn vardct_quant_field_for_group(
+    metadata: &VarDctAcGroupMetadata,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<Vec<i32>> {
+    let dc_group = vardct_dc_group_for_ac_group(metadata, dc_groups)?;
     let ac_metadata = dc_group
         .ac_metadata
         .as_ref()
@@ -2237,6 +2499,308 @@ fn vardct_quant_field_for_group(
     }
     Ok(quant_field)
 }
+
+fn adjust_quant_bias(channel: usize, quantized: i32) -> f32 {
+    const BIASES: [f32; 4] = [
+        1.0 - 0.05465007330715401,
+        1.0 - 0.07005449891748593,
+        1.0 - 0.049935103337343655,
+        0.145,
+    ];
+    match quantized {
+        0 => 0.0,
+        1 => BIASES[channel],
+        -1 => -BIASES[channel],
+        value => value as f32 - BIASES[3] / value as f32,
+    }
+}
+
+fn default_dequant_matrix(raw_strategy: usize, channel: usize) -> Result<Vec<f32>> {
+    let width = *STRATEGY_BLOCKS_X
+        .get(raw_strategy)
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?
+        * 8;
+    let height = *STRATEGY_BLOCKS_Y
+        .get(raw_strategy)
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?
+        * 8;
+    let weights = match raw_strategy {
+        0 => default_dct_quant_weights(width, height, DCT8_QUANT_BANDS, 6, channel)?,
+        1 => default_identity_quant_weights(channel),
+        2 => default_dct2_quant_weights(channel),
+        4 => default_dct_quant_weights(width, height, DCT16_QUANT_BANDS, 7, channel)?,
+        6 | 7 => default_dct_quant_weights(width, height, DCT8X16_QUANT_BANDS, 7, channel)?,
+        12 | 13 => default_dct4x8_quant_weights(width, height, channel)?,
+        14..=17 => default_afv_quant_weights(channel)?,
+        _ => {
+            return Err(Error::Unsupported(
+                "default dequant matrix for VarDCT AC strategy",
+            ));
+        }
+    };
+    Ok(weights.into_iter().map(|weight| 1.0 / weight).collect())
+}
+
+fn default_dct_quant_weights(
+    width: usize,
+    height: usize,
+    bands: [[[f32; 8]; 3]; 1],
+    num_bands: usize,
+    channel: usize,
+) -> Result<Vec<f32>> {
+    let channel_bands = &bands[0][channel][..num_bands];
+    quant_weights_from_bands(width, height, channel_bands)
+}
+
+fn quant_weights_from_bands(
+    width: usize,
+    height: usize,
+    encoded_bands: &[f32],
+) -> Result<Vec<f32>> {
+    if width == 0 || height == 0 || encoded_bands.is_empty() {
+        return Err(Error::InvalidCodestream("invalid dequant matrix size"));
+    }
+    let mut bands = Vec::with_capacity(encoded_bands.len());
+    bands.push(encoded_bands[0]);
+    if bands[0] <= 0.0 {
+        return Err(Error::InvalidCodestream("invalid dequant matrix"));
+    }
+    for &encoded in &encoded_bands[1..] {
+        let previous = *bands.last().unwrap();
+        let multiplier = if encoded > 0.0 {
+            1.0 + encoded
+        } else {
+            1.0 / (1.0 - encoded)
+        };
+        bands.push(previous * multiplier);
+    }
+    let scale = (bands.len() - 1) as f32 / (std::f32::consts::SQRT_2 + 1.0e-6);
+    let rcp_col = if width > 1 {
+        scale / (width - 1) as f32
+    } else {
+        0.0
+    };
+    let rcp_row = if height > 1 {
+        scale / (height - 1) as f32
+    } else {
+        0.0
+    };
+    let mut weights = vec![0.0; width * height];
+    for y in 0..height {
+        let dy = y as f32 * rcp_row;
+        for x in 0..width {
+            let dx = x as f32 * rcp_col;
+            let pos = (dx * dx + dy * dy).sqrt();
+            weights[y * width + x] = interpolate_bands(pos, &bands)?;
+        }
+    }
+    Ok(weights)
+}
+
+fn interpolate_bands(pos: f32, bands: &[f32]) -> Result<f32> {
+    if bands.len() == 1 {
+        return Ok(bands[0]);
+    }
+    let max = std::f32::consts::SQRT_2 + 1.0e-6;
+    let scaled_pos = pos * (bands.len() - 1) as f32 / max;
+    let idx = scaled_pos.floor() as usize;
+    if idx + 1 >= bands.len() {
+        return Ok(*bands.last().unwrap());
+    }
+    let a = bands[idx];
+    let b = bands[idx + 1];
+    Ok(a * (b / a).powf(scaled_pos - idx as f32))
+}
+
+fn default_identity_quant_weights(channel: usize) -> Vec<f32> {
+    const IDENTITY: [[f32; 3]; 3] = [
+        [280.0, 3160.0, 3160.0],
+        [60.0, 864.0, 864.0],
+        [18.0, 200.0, 200.0],
+    ];
+    let mut weights = vec![IDENTITY[channel][0]; DCT_BLOCK_SIZE];
+    weights[1] = IDENTITY[channel][1];
+    weights[8] = IDENTITY[channel][1];
+    weights[9] = IDENTITY[channel][2];
+    weights
+}
+
+fn default_dct2_quant_weights(channel: usize) -> Vec<f32> {
+    const DCT2: [[f32; 6]; 3] = [
+        [3840.0, 2560.0, 1280.0, 640.0, 480.0, 300.0],
+        [960.0, 640.0, 320.0, 180.0, 140.0, 120.0],
+        [640.0, 320.0, 128.0, 64.0, 32.0, 16.0],
+    ];
+    let d = DCT2[channel];
+    let mut weights = vec![0.0; DCT_BLOCK_SIZE];
+    weights[1] = d[0];
+    weights[8] = d[0];
+    weights[9] = d[1];
+    for y in 0..2 {
+        for x in 0..2 {
+            weights[y * 8 + x + 2] = d[2];
+            weights[(y + 2) * 8 + x] = d[2];
+            weights[(y + 2) * 8 + x + 2] = d[3];
+        }
+    }
+    for y in 0..4 {
+        for x in 0..4 {
+            weights[y * 8 + x + 4] = d[4];
+            weights[(y + 4) * 8 + x] = d[4];
+            weights[(y + 4) * 8 + x + 4] = d[5];
+        }
+    }
+    weights[0] = d[0];
+    weights
+}
+
+fn default_dct4x8_quant_weights(width: usize, height: usize, channel: usize) -> Result<Vec<f32>> {
+    let base = quant_weights_from_bands(
+        width.min(8),
+        height.min(8),
+        &DCT4X8_QUANT_BANDS[0][channel][..4],
+    )?;
+    let mut weights = vec![0.0; width * height];
+    for y in 0..height {
+        for x in 0..width {
+            let source_x = x.min(width.min(8) - 1);
+            let source_y = y.min(height.min(8) - 1);
+            weights[y * width + x] = base[source_y * width.min(8) + source_x];
+        }
+    }
+    Ok(weights)
+}
+
+fn default_afv_quant_weights(channel: usize) -> Result<Vec<f32>> {
+    let mut weights = vec![0.0; DCT_BLOCK_SIZE];
+    let weights4x8 = quant_weights_from_bands(8, 4, &DCT4X8_QUANT_BANDS[0][channel][..4])?;
+    let weights4x4 = quant_weights_from_bands(4, 4, &DCT4_QUANT_BANDS[0][channel][..4])?;
+    let afv = AFV_WEIGHTS[channel];
+    weights[0] = 1.0;
+    weights[8] = afv[0];
+    weights[1] = afv[1];
+    weights[16] = afv[2];
+    weights[2] = afv[3];
+    weights[18] = afv[4];
+    let mut bands = [0.0; 4];
+    bands[0] = afv[5];
+    for i in 1..4 {
+        let encoded = afv[i + 5];
+        bands[i] = bands[i - 1]
+            * if encoded > 0.0 {
+                1.0 + encoded
+            } else {
+                1.0 / (1.0 - encoded)
+            };
+    }
+    const FREQS: [f32; 16] = [
+        0.0, 0.0, 0.8517779, 5.3777843, 0.0, 0.0, 4.734748, 5.4492455, 1.659827, 4.0, 7.275749,
+        10.423228, 2.6629324, 7.6306577, 8.962389, 12.971662,
+    ];
+    let lo = 0.8517779;
+    let hi = 12.971662 - lo + 1.0e-6;
+    for y in 0..4 {
+        for x in 0..4 {
+            if x < 2 && y < 2 {
+                continue;
+            }
+            let pos = FREQS[y * 4 + x] - lo;
+            weights[(2 * y) * 8 + 2 * x] = interpolate_custom(pos, hi, &bands)?;
+        }
+    }
+    for y in 0..4 {
+        for x in 0..8 {
+            if x == 0 && y == 0 {
+                continue;
+            }
+            weights[(2 * y + 1) * 8 + x] = weights4x8[y * 8 + x];
+        }
+    }
+    for y in 0..4 {
+        for x in 0..4 {
+            if x == 0 && y == 0 {
+                continue;
+            }
+            weights[(2 * y) * 8 + 2 * x + 1] = weights4x4[y * 4 + x];
+        }
+    }
+    Ok(weights)
+}
+
+fn interpolate_custom(pos: f32, max: f32, bands: &[f32]) -> Result<f32> {
+    let scaled_pos = pos * (bands.len() - 1) as f32 / max;
+    let idx = scaled_pos.floor().max(0.0) as usize;
+    if idx + 1 >= bands.len() {
+        return Ok(*bands.last().unwrap());
+    }
+    let a = bands[idx];
+    let b = bands[idx + 1];
+    Ok(a * (b / a).powf(scaled_pos - idx as f32))
+}
+
+const DCT8_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [3150.0, 0.0, -0.4, -0.4, -0.4, -2.0, 0.0, 0.0],
+    [560.0, 0.0, -0.3, -0.3, -0.3, -0.3, 0.0, 0.0],
+    [512.0, -2.0, -1.0, 0.0, -1.0, -2.0, 0.0, 0.0],
+]];
+const DCT4_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [2200.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [392.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    [112.0, -0.25, -0.25, -0.5, 0.0, 0.0, 0.0, 0.0],
+]];
+const DCT16_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [
+        8996.872,
+        -1.3000777,
+        -0.4942453,
+        -0.43909377,
+        -0.6350102,
+        -0.9017726,
+        -1.6162099,
+        0.0,
+    ],
+    [
+        3191.4836,
+        -0.67424583,
+        -0.80745816,
+        -0.44925836,
+        -0.3586544,
+        -0.3132239,
+        -0.37615025,
+        0.0,
+    ],
+    [
+        1157.504, -2.0531423, -1.4, -0.5068713, -0.4270873, -1.4856834, -4.920914, 0.0,
+    ],
+]];
+const DCT8X16_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [7240.7734, -0.7, -0.7, -0.2, -0.2, -0.2, -0.5, 0.0],
+    [1448.1547, -0.5, -0.5, -0.5, -0.2, -0.2, -0.2, 0.0],
+    [506.85413, -1.4, -0.2, -0.5, -0.5, -1.5, -3.6, 0.0],
+]];
+const DCT4X8_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [
+        2198.0505,
+        -0.96269625,
+        -0.7619425,
+        -0.65511405,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    ],
+    [
+        764.36554, -0.926302, -0.9675229, -0.2784529, 0.0, 0.0, 0.0, 0.0,
+    ],
+    [
+        527.10754, -1.4594386, -1.4500821, -1.5843723, 0.0, 0.0, 0.0, 0.0,
+    ],
+]];
+const AFV_WEIGHTS: [[f32; 9]; 3] = [
+    [3072.0, 3072.0, 256.0, 256.0, 256.0, 414.0, 0.0, 0.0, 0.0],
+    [1024.0, 1024.0, 50.0, 50.0, 50.0, 58.0, 0.0, 0.0, 0.0],
+    [384.0, 384.0, 12.0, 12.0, 12.0, 22.0, -0.25, -0.25, -0.25],
+];
 
 fn natural_coeff_order(raw_strategy: usize) -> Result<Vec<usize>> {
     let mut cx = *STRATEGY_BLOCKS_X

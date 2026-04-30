@@ -618,6 +618,66 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         .base_dequantized_grid
         .as_ref()
         .unwrap();
+    let dequantized_grid = plan.ac_group_metadata[0].dequantized_grid.as_ref().unwrap();
+    assert_eq!(dequantized_grid.group, 0);
+    assert_eq!(dequantized_grid.pass, 0);
+    assert_eq!(dequantized_grid.width_blocks, 32);
+    assert_eq!(dequantized_grid.height_blocks, 24);
+    assert_eq!(
+        dequantized_grid
+            .per_channel
+            .iter()
+            .map(|channel| (channel.nonzero_coefficients, channel.coefficient_checksum))
+            .collect::<Vec<_>>(),
+        vec![
+            (1754, 7928736388124340981),
+            (5649, 3488116285163030744),
+            (6259, 12462676879008589506),
+        ]
+    );
+    assert_eq!(
+        (0..3)
+            .map(|channel| {
+                (0..64)
+                    .filter_map(|coeff| {
+                        dequantized_grid
+                            .coefficient(channel, 0, 0, coeff)
+                            .filter(|value| *value != 0.0)
+                            .map(|value| (channel, coeff, value.to_bits()))
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            vec![],
+            vec![
+                (1, 2, 3145630282),
+                (1, 4, 3154530179),
+                (1, 5, 1002198626),
+                (1, 6, 3149682305),
+                (1, 7, 1002198657),
+                (1, 16, 3154303014),
+                (1, 24, 1007832808),
+                (1, 32, 3159207169),
+                (1, 40, 1011035911),
+                (1, 48, 3158519591),
+                (1, 56, 1011035943),
+            ],
+            vec![
+                (2, 2, 3141460408),
+                (2, 4, 3150542660),
+                (2, 5, 999112906),
+                (2, 6, 3146596577),
+                (2, 7, 999112929),
+                (2, 16, 3150201913),
+                (2, 24, 1004238428),
+                (2, 32, 3155837377),
+                (2, 40, 1007838021),
+                (2, 48, 3155321693),
+                (2, 56, 1007838045),
+            ],
+        ]
+    );
     assert_eq!(base_dequantized_grid.group, 0);
     assert_eq!(base_dequantized_grid.pass, 0);
     assert_eq!(base_dequantized_grid.width_blocks, 32);
@@ -717,6 +777,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert!(plan.ac_group_metadata[1].coefficient_summary.is_none());
     assert!(plan.ac_group_metadata[1].coefficient_grid.is_none());
     assert!(plan.ac_group_metadata[1].base_dequantized_grid.is_none());
+    assert!(plan.ac_group_metadata[1].dequantized_grid.is_none());
     assert_eq!(plan.modular_global_tree_payload_start_bits, Some(192));
     assert_eq!(plan.modular_global_tree_payload_end_bits, Some(1232));
     assert_eq!(plan.modular_global_tree_payload_len_bits, Some(1040));
