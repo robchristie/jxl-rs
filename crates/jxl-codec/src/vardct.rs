@@ -1287,10 +1287,21 @@ impl EpfPipeline<'_> {
                 };
                 let mut weights = [0.0f32; 12];
                 let mut neighbor_weight_sum = 0.0;
-                for (index, &(dx, dy)) in offsets.iter().enumerate() {
-                    let weight = epf_weight(pass.sad(input, ctx, dx, dy), inv_sigma);
-                    weights[index] = weight;
-                    neighbor_weight_sum += weight;
+                if matches!(pass, EpfPass::One) {
+                    for (index, sad) in epf_stage1_directional_sads(input, ctx)
+                        .into_iter()
+                        .enumerate()
+                    {
+                        let weight = epf_weight(sad, inv_sigma);
+                        weights[index] = weight;
+                        neighbor_weight_sum += weight;
+                    }
+                } else {
+                    for (index, &(dx, dy)) in offsets.iter().enumerate() {
+                        let weight = epf_weight(pass.sad(input, ctx, dx, dy), inv_sigma);
+                        weights[index] = weight;
+                        neighbor_weight_sum += weight;
+                    }
                 }
                 let weight_sum = 1.0 + neighbor_weight_sum;
                 for channel in 0..3 {
@@ -1316,6 +1327,52 @@ impl EpfPipeline<'_> {
     }
 }
 
+fn epf_stage1_directional_sads(channels: &[Vec<f32>; 3], ctx: EpfSampleContext) -> [f32; 4] {
+    let mut sads = [0.0; 4];
+    for channel in 0..3 {
+        let p20 = epf_sample(channels, channel, ctx, 0, -2);
+        let p21 = epf_sample(channels, channel, ctx, 0, -1);
+        let p11 = epf_sample(channels, channel, ctx, -1, -1);
+        let p31 = epf_sample(channels, channel, ctx, 1, -1);
+        let p02 = epf_sample(channels, channel, ctx, -2, 0);
+        let p12 = epf_sample(channels, channel, ctx, -1, 0);
+        let p22 = epf_sample(channels, channel, ctx, 0, 0);
+        let p32 = epf_sample(channels, channel, ctx, 1, 0);
+        let p42 = epf_sample(channels, channel, ctx, 2, 0);
+        let p13 = epf_sample(channels, channel, ctx, -1, 1);
+        let p23 = epf_sample(channels, channel, ctx, 0, 1);
+        let p33 = epf_sample(channels, channel, ctx, 1, 1);
+        let p24 = epf_sample(channels, channel, ctx, 0, 2);
+        let scale = ctx.channel_scale[channel];
+
+        sads[0] += scale
+            * ((p20 - p21).abs()
+                + (p11 - p12).abs()
+                + (p22 - p21).abs()
+                + (p31 - p32).abs()
+                + (p22 - p23).abs());
+        sads[1] += scale
+            * ((p11 - p21).abs()
+                + (p02 - p12).abs()
+                + (p12 - p22).abs()
+                + (p22 - p32).abs()
+                + (p13 - p23).abs());
+        sads[2] += scale
+            * ((p31 - p21).abs()
+                + (p12 - p22).abs()
+                + (p22 - p32).abs()
+                + (p42 - p32).abs()
+                + (p33 - p23).abs());
+        sads[3] += scale
+            * ((p22 - p21).abs()
+                + (p13 - p12).abs()
+                + (p22 - p23).abs()
+                + (p33 - p32).abs()
+                + (p24 - p23).abs());
+    }
+    sads
+}
+
 fn epf_plus_sad(channels: &[Vec<f32>; 3], ctx: EpfSampleContext, dx: isize, dy: isize) -> f32 {
     const PLUS_OFFSETS: [(isize, isize); 5] = [(0, 0), (-1, 0), (0, -1), (1, 0), (0, 1)];
     let mut sad = 0.0;
@@ -1333,6 +1390,18 @@ fn epf_plus_sad(channels: &[Vec<f32>; 3], ctx: EpfSampleContext, dx: isize, dy: 
         sad += channel_sad * ctx.channel_scale[channel];
     }
     sad
+}
+
+fn epf_sample(
+    channels: &[Vec<f32>; 3],
+    channel: usize,
+    ctx: EpfSampleContext,
+    dx: isize,
+    dy: isize,
+) -> f32 {
+    let x = mirror_coordinate(ctx.x as isize + dx, ctx.width);
+    let y = mirror_coordinate(ctx.y as isize + dy, ctx.height);
+    channels[channel][y * ctx.width + x]
 }
 
 fn epf_pixel_sad(channels: &[Vec<f32>; 3], ctx: EpfSampleContext, dx: isize, dy: isize) -> f32 {
@@ -6327,6 +6396,26 @@ mod tests {
         assert!(image.channels[0][3] > 0.0);
         assert_eq!(image.channels[1], vec![0.0; 9]);
         assert_eq!(image.channels[2], vec![0.0; 9]);
+    }
+
+    #[test]
+    fn epf_stage1_directional_sads_match_reference_kernel() {
+        let channels = [
+            (0..25).map(|sample| sample as f32).collect::<Vec<_>>(),
+            vec![0.0; 25],
+            vec![0.0; 25],
+        ];
+        let ctx = EpfSampleContext {
+            width: 5,
+            height: 5,
+            x: 2,
+            y: 2,
+            channel_scale: [1.0, 0.0, 0.0],
+        };
+
+        let sads = epf_stage1_directional_sads(&channels, ctx);
+
+        assert_eq!(sads, [25.0, 5.0, 5.0, 25.0]);
     }
 
     #[test]
