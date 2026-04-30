@@ -587,13 +587,41 @@ impl VarDctXybImage {
     }
 }
 
-/// Assembles available pass-0 VarDCT spatial+DC group grids into full-frame XYB channels.
+/// Assembles available final VarDCT spatial+DC group grids into full-frame XYB channels.
 ///
-/// Returns `Ok(None)` when no pass-0 group has spatial+DC samples yet. Groups
+/// For progressive AC frames this uses the latest available AC pass for each
+/// group. Returns `Ok(None)` when no selected group has spatial+DC samples. Groups
 /// without spatial+DC samples are counted in `VarDctXybImage::groups_missing`
 /// and left as zeroes in the output buffers.
 pub fn assemble_vardct_xyb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
     let mut image = assemble_vardct_xyb_image_from_groups(&plan.frame, &plan.ac_group_metadata)?;
+    if let Some(image) = image.as_mut() {
+        apply_vardct_gaborish(image, &plan.loop_filter);
+        if plan.loop_filter.epf_iters >= 1 {
+            if let Some(epf) = plan.epf_metadata.as_ref() {
+                apply_vardct_epf(image, &plan.loop_filter, epf);
+            }
+        }
+    }
+    Ok(image)
+}
+
+/// Assembles available VarDCT XYB data for exactly one AC pass.
+///
+/// This is a low-level progressive reconstruction helper. It selects only group
+/// metadata whose AC pass equals `pass`; it does not merge data from earlier or
+/// later passes and is therefore not yet a complete progressive preview
+/// compositor. Returns `Ok(None)` when no group for the requested pass has a
+/// spatial+DC grid.
+pub fn assemble_vardct_xyb_image_for_pass(
+    plan: &VarDctDecodePlan,
+    pass: usize,
+) -> Result<Option<VarDctXybImage>> {
+    let mut image = assemble_vardct_xyb_image_from_groups_with_mode(
+        &plan.frame,
+        &plan.ac_group_metadata,
+        VarDctAssemblyMode::Pass { pass },
+    )?;
     if let Some(image) = image.as_mut() {
         apply_vardct_gaborish(image, &plan.loop_filter);
         if plan.loop_filter.epf_iters >= 1 {
@@ -1069,7 +1097,6 @@ fn assemble_vardct_xyb_image_from_groups_with_mode(
 }
 
 #[derive(Clone, Copy)]
-#[allow(dead_code)]
 enum VarDctAssemblyMode {
     Final,
     Pass { pass: usize },
@@ -6440,6 +6467,103 @@ mod tests {
         .unwrap();
 
         assert!(image.is_none());
+    }
+
+    #[test]
+    fn vardct_xyb_image_for_pass_uses_requested_progressive_ac_pass() {
+        let mut pass0_spatial = VarDctAcSpatialGrid {
+            group: 0,
+            pass: 0,
+            width_blocks: 1,
+            height_blocks: 1,
+            blocks_attempted: 1,
+            blocks_transformed: 1,
+            blocks_skipped: 0,
+            per_channel: [
+                VarDctAcSpatialChannelGrid::new(DCT_BLOCK_SIZE),
+                VarDctAcSpatialChannelGrid::new(DCT_BLOCK_SIZE),
+                VarDctAcSpatialChannelGrid::new(DCT_BLOCK_SIZE),
+            ],
+        };
+        let mut pass1_spatial = pass0_spatial.clone();
+        pass1_spatial.pass = 1;
+        for channel in 0..3 {
+            pass0_spatial.per_channel[channel].samples[0] = (30.0 + channel as f32).to_bits();
+            pass1_spatial.per_channel[channel].samples[0] = (40.0 + channel as f32).to_bits();
+        }
+        let group = group(0, 0, 0, 8, 8);
+        let plan = VarDctDecodePlan {
+            frame: vardct_frame_metadata(8, 8),
+            loop_filter: LoopFilter {
+                gab: false,
+                epf_iters: 0,
+                ..LoopFilter::default()
+            },
+            opsin_params: default_vardct_opsin_params(),
+            epf_metadata: None,
+            global: None,
+            modular_global_tree_payload_start_bits: None,
+            modular_global_tree_payload_end_bits: None,
+            modular_global_tree_payload_len_bits: None,
+            modular_global_tree_direct_start_bits: None,
+            modular_global_tree_direct_start_absolute_bits: None,
+            modular_global_tree_direct_start_remaining_bits: None,
+            modular_global_tree_direct_tree_end_bits: None,
+            modular_global_tree_direct_tree_end_absolute_bits: None,
+            modular_global_tree_direct_tree_end_remaining_bits: None,
+            modular_global_tree_direct_tree_node_count: None,
+            modular_global_tree_direct_tree_leaf_count: None,
+            modular_global_tree_direct_tree_leaves: Vec::new(),
+            modular_global_tree_direct_error_bits: None,
+            modular_global_tree_direct_error_absolute_bits: None,
+            modular_global_tree_direct_error_remaining_bits: None,
+            modular_global_tree_direct_residual_context_count: None,
+            modular_global_tree_direct_residual_histogram_count: None,
+            modular_global_tree_direct_residual_context_map_entries: Vec::new(),
+            modular_global_tree_direct_residual_context_map_raw_entries: Vec::new(),
+            modular_global_tree_direct_residual_context_map_distinct_entries: Vec::new(),
+            modular_global_tree_direct_residual_context_map_histogram_usage_counts: Vec::new(),
+            modular_global_tree_direct_residual_context_map_max_entry: None,
+            modular_global_tree_direct_residual_context_map_symbol_entries: Vec::new(),
+            modular_global_tree_direct_residual_lz77_end_bits: None,
+            modular_global_tree_direct_residual_context_map_end_bits: None,
+            modular_global_tree_direct_residual_entropy_mode_end_bits: None,
+            modular_global_tree_direct_residual_log_alpha_size_end_bits: None,
+            modular_global_tree_direct_residual_uint_config_end_bits_by_histogram: Vec::new(),
+            modular_global_tree_direct_residual_uint_config_end_bits: None,
+            modular_global_tree_direct_residual_use_prefix_code: None,
+            modular_global_tree_direct_residual_log_alpha_size: None,
+            modular_global_tree_direct_residual_failed_histogram_index: None,
+            modular_global_tree_direct_residual_error_stage: None,
+            modular_global_tree_direct_residual_ans_histograms: Vec::new(),
+            modular_global_tree_start_bits: None,
+            modular_global_tree_start_absolute_bits: None,
+            modular_global_tree_start_remaining_bits: None,
+            modular_global_tree_direct_error: None,
+            modular_global_tree_error: None,
+            global_payload: None,
+            ac_global_payload: None,
+            ac_global_metadata: None,
+            ac_group_payloads: Vec::new(),
+            ac_group_metadata: vec![
+                ac_group_metadata_for_pass(1, group, Some(pass1_spatial)),
+                ac_group_metadata_for_pass(0, group, Some(pass0_spatial)),
+            ],
+            dc_group_payloads: Vec::new(),
+            dc_group_metadata: Vec::new(),
+        };
+
+        let image = assemble_vardct_xyb_image_for_pass(&plan, 0)
+            .unwrap()
+            .unwrap();
+        let final_image = assemble_vardct_xyb_image(&plan).unwrap().unwrap();
+        let missing = assemble_vardct_xyb_image_for_pass(&plan, 2).unwrap();
+
+        assert_eq!(image.sample(0, 0, 0), Some(30.0));
+        assert_eq!(image.sample(1, 0, 0), Some(31.0));
+        assert_eq!(image.sample(2, 0, 0), Some(32.0));
+        assert_eq!(final_image.sample(0, 0, 0), Some(40.0));
+        assert!(missing.is_none());
     }
 
     #[test]
