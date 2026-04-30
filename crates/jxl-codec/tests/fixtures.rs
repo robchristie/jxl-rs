@@ -629,8 +629,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(spatial_with_dc_grid.width_blocks, 32);
     assert_eq!(spatial_with_dc_grid.height_blocks, 24);
     assert_eq!(spatial_with_dc_grid.blocks_attempted, 477);
-    assert_eq!(spatial_with_dc_grid.blocks_transformed, 325);
-    assert_eq!(spatial_with_dc_grid.blocks_skipped, 152);
+    assert_eq!(spatial_with_dc_grid.blocks_transformed, 375);
+    assert_eq!(spatial_with_dc_grid.blocks_skipped, 102);
     assert_eq!(
         spatial_with_dc_grid
             .per_channel
@@ -638,9 +638,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .map(|channel| (channel.nonzero_samples, channel.sample_checksum))
             .collect::<Vec<_>>(),
         vec![
-            (20800, 1672132728476003188),
-            (20800, 667801018979819796),
-            (20800, 6904762356536387308),
+            (21362, 11367346107968913705),
+            (21381, 6840764390638629815),
+            (21381, 14698911317220594327),
         ]
     );
     assert_eq!(
@@ -709,8 +709,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(spatial_grid.width_blocks, 32);
     assert_eq!(spatial_grid.height_blocks, 24);
     assert_eq!(spatial_grid.blocks_attempted, 477);
-    assert_eq!(spatial_grid.blocks_transformed, 325);
-    assert_eq!(spatial_grid.blocks_skipped, 152);
+    assert_eq!(spatial_grid.blocks_transformed, 375);
+    assert_eq!(spatial_grid.blocks_skipped, 102);
     assert_eq!(
         spatial_grid
             .per_channel
@@ -718,9 +718,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .map(|channel| (channel.nonzero_samples, channel.sample_checksum))
             .collect::<Vec<_>>(),
         vec![
-            (18630, 6501391360360730637),
-            (20736, 14301705538478083478),
-            (20800, 14073632302109356825),
+            (19161, 17286732264132352059),
+            (21312, 9562226811198937756),
+            (21380, 15469070632775235976),
         ]
     );
     assert_eq!(

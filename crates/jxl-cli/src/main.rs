@@ -654,7 +654,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if let Some(grid) = &metadata.spatial_grid {
                         println!(
-                            "First frame VarDCT AC DCT8 spatial grid: pass={} group={} size={}x{} blocks=({},{},{}) ch0=({},{}) ch1=({},{}) ch2=({},{})",
+                            "First frame VarDCT AC partial spatial grid: pass={} group={} size={}x{} blocks=({},{},{}) ch0=({},{}) ch1=({},{}) ch2=({},{})",
                             grid.pass,
                             grid.group,
                             grid.width_blocks,
@@ -672,7 +672,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     if let Some(grid) = &metadata.spatial_with_dc_grid {
                         println!(
-                            "First frame VarDCT AC DCT8 spatial+DC grid: pass={} group={} size={}x{} blocks=({},{},{}) ch0=({},{}) ch1=({},{}) ch2=({},{})",
+                            "First frame VarDCT AC partial spatial+DC grid: pass={} group={} size={}x{} blocks=({},{},{}) ch0=({},{}) ch1=({},{}) ch2=({},{})",
                             grid.pass,
                             grid.group,
                             grid.width_blocks,

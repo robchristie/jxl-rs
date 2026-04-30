@@ -2436,32 +2436,82 @@ fn spatialize_vardct_ac_dct8_grid(
     };
 
     for block in blocks {
-        if block.raw_strategy != 0 {
+        let Some(transform) = spatial_transform_for_strategy(block.raw_strategy) else {
             spatial.blocks_skipped += 1;
             continue;
-        }
-        spatial.blocks_transformed += 1;
+        };
         for channel in 0..3 {
-            let mut coefficients = [0.0f32; DCT_BLOCK_SIZE];
-            for coeff in 0..DCT_BLOCK_SIZE {
-                coefficients[coeff] = grid
-                    .coefficient(channel, block.block_x, block.block_y, coeff)
-                    .ok_or(Error::InvalidCodestream(
-                        "invalid dequantized coefficient grid",
-                    ))?;
+            let mut coefficients = vec![0.0f32; transform.width * transform.height];
+            for y in 0..transform.height {
+                for x in 0..transform.width {
+                    coefficients[y * transform.width + x] = grid
+                        .coefficient(channel, block.block_x, block.block_y, y * 8 + x)
+                        .ok_or(Error::InvalidCodestream(
+                            "invalid dequantized coefficient grid",
+                        ))?;
+                }
             }
             if let Some(dc_grid) = &dc_grid {
                 coefficients[0] = dc_grid.coefficient(channel, block.block_x, block.block_y)?;
             }
-            let samples = inverse_dct_8x8(&coefficients);
-            for (sample, value) in samples.into_iter().enumerate() {
-                let index =
-                    ((block.block_y * grid.width_blocks + block.block_x) * DCT_BLOCK_SIZE) + sample;
-                write_spatial_sample(&mut spatial.per_channel[channel], index, value);
+            let samples = match transform.kind {
+                SpatialTransformKind::Identity => coefficients,
+                SpatialTransformKind::Dct => {
+                    if transform.width == 8 && transform.height == 8 {
+                        let mut block = [0.0f32; DCT_BLOCK_SIZE];
+                        block.copy_from_slice(&coefficients);
+                        inverse_dct_8x8(&block).to_vec()
+                    } else {
+                        inverse_dct_rect(transform.width, transform.height, &coefficients)?
+                    }
+                }
+            };
+            for y in 0..transform.height {
+                for x in 0..transform.width {
+                    let index = ((block.block_y * grid.width_blocks + block.block_x)
+                        * DCT_BLOCK_SIZE)
+                        + y * 8
+                        + x;
+                    write_spatial_sample(
+                        &mut spatial.per_channel[channel],
+                        index,
+                        samples[y * transform.width + x],
+                    );
+                }
             }
         }
+        spatial.blocks_transformed += 1;
     }
     Ok(spatial)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SpatialTransform {
+    width: usize,
+    height: usize,
+    kind: SpatialTransformKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SpatialTransformKind {
+    Dct,
+    Identity,
+}
+
+fn spatial_transform_for_strategy(raw_strategy: usize) -> Option<SpatialTransform> {
+    let (width, height, kind) = match raw_strategy {
+        0 => (8, 8, SpatialTransformKind::Dct),
+        1 => (8, 8, SpatialTransformKind::Identity),
+        2 => (2, 2, SpatialTransformKind::Dct),
+        12 => (4, 8, SpatialTransformKind::Dct),
+        13 => (8, 4, SpatialTransformKind::Dct),
+        _ => return None,
+    };
+    Some(SpatialTransform {
+        width,
+        height,
+        kind,
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -2548,25 +2598,38 @@ fn write_spatial_sample(grid: &mut VarDctAcSpatialChannelGrid, index: usize, val
 }
 
 fn inverse_dct_8x8(coefficients: &[f32; DCT_BLOCK_SIZE]) -> [f32; DCT_BLOCK_SIZE] {
-    let mut samples = [0.0f32; DCT_BLOCK_SIZE];
+    let samples = inverse_dct_rect(8, 8, coefficients).expect("valid DCT8 dimensions");
+    let mut block = [0.0f32; DCT_BLOCK_SIZE];
+    block.copy_from_slice(&samples);
+    block
+}
+
+fn inverse_dct_rect(width: usize, height: usize, coefficients: &[f32]) -> Result<Vec<f32>> {
+    if width == 0 || height == 0 || coefficients.len() != width * height {
+        return Err(Error::InvalidCodestream("invalid DCT dimensions"));
+    }
+    let mut output = vec![0.0f32; width * height];
     let inv_sqrt_2 = std::f32::consts::FRAC_1_SQRT_2;
-    for y in 0..8 {
-        for x in 0..8 {
+    for y in 0..height {
+        for x in 0..width {
             let mut sum = 0.0f32;
-            for v in 0..8 {
+            for v in 0..height {
                 let cv = if v == 0 { inv_sqrt_2 } else { 1.0 };
-                let cos_y = (((2 * y + 1) as f32 * v as f32 * std::f32::consts::PI) / 16.0).cos();
-                for u in 0..8 {
+                let cos_y = (((2 * y + 1) as f32 * v as f32 * std::f32::consts::PI)
+                    / (2 * height) as f32)
+                    .cos();
+                for u in 0..width {
                     let cu = if u == 0 { inv_sqrt_2 } else { 1.0 };
-                    let cos_x =
-                        (((2 * x + 1) as f32 * u as f32 * std::f32::consts::PI) / 16.0).cos();
-                    sum += cu * cv * coefficients[v * 8 + u] * cos_x * cos_y;
+                    let cos_x = (((2 * x + 1) as f32 * u as f32 * std::f32::consts::PI)
+                        / (2 * width) as f32)
+                        .cos();
+                    sum += cu * cv * coefficients[v * width + u] * cos_x * cos_y;
                 }
             }
-            samples[y * 8 + x] = 0.25 * sum;
+            output[y * width + x] = 2.0 / ((width * height) as f32).sqrt() * sum;
         }
     }
-    samples
+    Ok(output)
 }
 
 fn coefficient_grid_index_for_local_position(
@@ -4763,6 +4826,38 @@ mod tests {
         assert!((samples[0] - 0.17337999).abs() < 1.0e-6);
         assert!((samples[7] + 0.17337997).abs() < 1.0e-6);
         assert!((samples[8] - samples[0]).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn inverse_dct_rect_2x2_zero_block_stays_zero() {
+        let coefficients = [0.0f32; 4];
+        let samples = inverse_dct_rect(2, 2, &coefficients).unwrap();
+
+        assert_eq!(samples.len(), 4);
+        assert!(samples.iter().all(|sample| *sample == 0.0));
+    }
+
+    #[test]
+    fn inverse_dct_rect_2x2_dc_only_is_constant() {
+        let mut coefficients = [0.0f32; 4];
+        coefficients[0] = 2.0;
+        let samples = inverse_dct_rect(2, 2, &coefficients).unwrap();
+
+        for sample in samples {
+            assert!((sample - 1.0).abs() < 1.0e-6);
+        }
+    }
+
+    #[test]
+    fn inverse_dct_rect_4x8_dc_only_is_constant() {
+        let mut coefficients = [0.0f32; 32];
+        coefficients[0] = (32.0f32).sqrt();
+        let samples = inverse_dct_rect(4, 8, &coefficients).unwrap();
+
+        assert_eq!(samples.len(), 32);
+        for sample in samples {
+            assert!((sample - 1.0).abs() < 1.0e-6);
+        }
     }
 
     #[test]
