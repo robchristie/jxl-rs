@@ -66,5 +66,5 @@ pub use vardct::{
     VarDctGlobalCursorMetadata, VarDctGlobalMetadata, VarDctGroupMetadata,
     VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata, VarDctHistogramProbeStage,
     VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata, VarDctQuantizerMetadata,
-    VarDctSectionMetadata, VarDctSectionPayloadMetadata,
+    VarDctSectionMetadata, VarDctSectionPayloadMetadata, VarDctXybImage, assemble_vardct_xyb_image,
 };

@@ -7,7 +7,7 @@ use std::{
 use jxl_codec::{
     BlendMode, ColorSpace, ColorTransform, DecodeConfig, ExtraChannelType, FileFormat,
     FrameEncoding, FrameSectionKind, FrameType, ImageRegion, ModularGroupExecution,
-    TransferFunction, TransformId, parse_file, parse_file_with_config,
+    TransferFunction, TransformId, assemble_vardct_xyb_image, parse_file, parse_file_with_config,
 };
 
 #[test]
@@ -774,6 +774,47 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
                 ],
             ],
         ))
+    );
+    let xyb_image = assemble_vardct_xyb_image(plan).unwrap().unwrap();
+    assert_eq!(xyb_image.width, 320);
+    assert_eq!(xyb_image.height, 192);
+    assert_eq!(xyb_image.groups_assembled, 1);
+    assert_eq!(xyb_image.groups_missing, 1);
+    assert_eq!(
+        xyb_image
+            .channels
+            .iter()
+            .map(|channel| {
+                channel
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, sample)| **sample != 0.0)
+                    .fold((0usize, 0u64), |(count, checksum), (index, sample)| {
+                        let checksum = checksum
+                            .wrapping_mul(1_099_511_628_211)
+                            .wrapping_add(index as u64)
+                            .rotate_left(11)
+                            ^ sample.to_bits() as u64;
+                        (count + 1, checksum)
+                    })
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            (46514, 9056940738741842762),
+            (46533, 7369214336153034040),
+            (46533, 17864900113199536420),
+        ]
+    );
+    assert_eq!(
+        [
+            xyb_image.sample(0, 0, 0).unwrap().to_bits(),
+            xyb_image.sample(1, 0, 0).unwrap().to_bits(),
+            xyb_image.sample(2, 0, 0).unwrap().to_bits(),
+            xyb_image.sample(0, 319, 191).unwrap().to_bits(),
+            xyb_image.sample(1, 319, 191).unwrap().to_bits(),
+            xyb_image.sample(2, 319, 191).unwrap().to_bits(),
+        ],
+        [3082885028, 979252264, 3128142621, 0, 0, 0]
     );
     assert_eq!(dequantized_grid.group, 0);
     assert_eq!(dequantized_grid.pass, 0);

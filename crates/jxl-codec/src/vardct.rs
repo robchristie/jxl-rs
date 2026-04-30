@@ -519,6 +519,41 @@ pub struct VarDctDecodePlan {
     pub dc_group_metadata: Vec<VarDctDcGroupMetadata>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct VarDctXybImage {
+    pub width: u32,
+    pub height: u32,
+    /// Number of pass-0 AC groups copied into this image.
+    pub groups_assembled: usize,
+    /// Number of pass-0 AC groups that did not yet have spatial+DC samples.
+    ///
+    /// Missing groups are left as zeroes in `channels`. This keeps the
+    /// assembly step useful while VarDCT group reconstruction is still being
+    /// expanded to every AC group.
+    pub groups_missing: usize,
+    pub channels: [Vec<f32>; 3],
+}
+
+impl VarDctXybImage {
+    pub fn sample(&self, channel: usize, x: u32, y: u32) -> Option<f32> {
+        if channel >= self.channels.len() || x >= self.width || y >= self.height {
+            return None;
+        }
+        self.channels[channel]
+            .get((y as usize) * self.width as usize + x as usize)
+            .copied()
+    }
+}
+
+/// Assembles available pass-0 VarDCT spatial+DC group grids into full-frame XYB channels.
+///
+/// Returns `Ok(None)` when no pass-0 group has spatial+DC samples yet. Groups
+/// without spatial+DC samples are counted in `VarDctXybImage::groups_missing`
+/// and left as zeroes in the output buffers.
+pub fn assemble_vardct_xyb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
+    assemble_vardct_xyb_image_from_groups(&plan.frame, &plan.ac_group_metadata)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarDctAcGlobalMetadata {
     pub section: VarDctSectionPayloadMetadata,
@@ -915,6 +950,78 @@ impl VarDctAcSpatialGrid {
             .copied()
             .map(f32::from_bits)
     }
+}
+
+fn assemble_vardct_xyb_image_from_groups(
+    frame: &VarDctFrameMetadata,
+    groups: &[VarDctAcGroupMetadata],
+) -> Result<Option<VarDctXybImage>> {
+    let sample_len = (frame.width as usize)
+        .checked_mul(frame.height as usize)
+        .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
+    let mut image = VarDctXybImage {
+        width: frame.width,
+        height: frame.height,
+        groups_assembled: 0,
+        groups_missing: 0,
+        channels: [
+            vec![0.0; sample_len],
+            vec![0.0; sample_len],
+            vec![0.0; sample_len],
+        ],
+    };
+
+    for metadata in groups.iter().filter(|metadata| metadata.payload.pass == 0) {
+        let Some(grid) = metadata.spatial_with_dc_grid.as_ref() else {
+            image.groups_missing += 1;
+            continue;
+        };
+        if grid.group != metadata.payload.group.group
+            || grid.width_blocks != metadata.payload.group.width.div_ceil(8) as usize
+            || grid.height_blocks != metadata.payload.group.height.div_ceil(8) as usize
+        {
+            return Err(Error::InvalidCodestream("invalid VarDCT spatial grid"));
+        }
+        copy_vardct_spatial_group_to_image(grid, metadata.payload.group, &mut image)?;
+        image.groups_assembled += 1;
+    }
+
+    Ok((image.groups_assembled > 0).then_some(image))
+}
+
+fn copy_vardct_spatial_group_to_image(
+    grid: &VarDctAcSpatialGrid,
+    group: VarDctGroupMetadata,
+    image: &mut VarDctXybImage,
+) -> Result<()> {
+    let image_width = image.width as usize;
+    let image_height = image.height as usize;
+    for block_y in 0..grid.height_blocks {
+        for block_x in 0..grid.width_blocks {
+            for sample_y in 0..8 {
+                for sample_x in 0..8 {
+                    let local_x = block_x * 8 + sample_x;
+                    let local_y = block_y * 8 + sample_y;
+                    if local_x >= group.width as usize || local_y >= group.height as usize {
+                        continue;
+                    }
+                    let image_x = group.x as usize + local_x;
+                    let image_y = group.y as usize + local_y;
+                    if image_x >= image_width || image_y >= image_height {
+                        continue;
+                    }
+                    let output_index = image_y * image_width + image_x;
+                    let sample = sample_y * 8 + sample_x;
+                    for channel in 0..3 {
+                        image.channels[channel][output_index] = grid
+                            .sample(channel, block_x, block_y, sample)
+                            .ok_or(Error::InvalidCodestream("invalid VarDCT spatial sample"))?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5320,6 +5427,70 @@ mod tests {
     }
 
     #[test]
+    fn assembles_vardct_xyb_image_with_edge_clipping() {
+        let group = group(0, 0, 0, 10, 9);
+        let mut spatial = VarDctAcSpatialGrid {
+            group: 0,
+            pass: 0,
+            width_blocks: 2,
+            height_blocks: 2,
+            blocks_attempted: 4,
+            blocks_transformed: 4,
+            blocks_skipped: 0,
+            per_channel: [
+                VarDctAcSpatialChannelGrid::new(2 * 2 * DCT_BLOCK_SIZE),
+                VarDctAcSpatialChannelGrid::new(2 * 2 * DCT_BLOCK_SIZE),
+                VarDctAcSpatialChannelGrid::new(2 * 2 * DCT_BLOCK_SIZE),
+            ],
+        };
+        for block_y in 0..2 {
+            for block_x in 0..2 {
+                for sample_y in 0..8 {
+                    for sample_x in 0..8 {
+                        let local_x = block_x * 8 + sample_x;
+                        let local_y = block_y * 8 + sample_y;
+                        let sample = sample_y * 8 + sample_x;
+                        let index = ((block_y * 2 + block_x) * DCT_BLOCK_SIZE) + sample;
+                        for channel in 0..3 {
+                            spatial.per_channel[channel].samples[index] = (1.0
+                                + channel as f32 * 1000.0
+                                + local_y as f32 * 10.0
+                                + local_x as f32)
+                                .to_bits();
+                        }
+                    }
+                }
+            }
+        }
+        let frame = vardct_frame_metadata(10, 9);
+        let metadata = ac_group_metadata(group, Some(spatial));
+
+        let image = assemble_vardct_xyb_image_from_groups(&frame, &[metadata])
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(image.width, 10);
+        assert_eq!(image.height, 9);
+        assert_eq!(image.channels[0].len(), 90);
+        assert_eq!(image.sample(0, 0, 0), Some(1.0));
+        assert_eq!(image.sample(0, 9, 8), Some(90.0));
+        assert_eq!(image.sample(1, 9, 8), Some(1090.0));
+        assert_eq!(image.sample(2, 9, 8), Some(2090.0));
+        assert_eq!(image.sample(0, 10, 8), None);
+        assert_eq!(image.sample(0, 9, 9), None);
+    }
+
+    #[test]
+    fn vardct_xyb_image_assembly_returns_none_without_spatial_dc_grid() {
+        let frame = vardct_frame_metadata(8, 8);
+        let metadata = ac_group_metadata(group(0, 0, 0, 8, 8), None);
+
+        let image = assemble_vardct_xyb_image_from_groups(&frame, &[metadata]).unwrap();
+
+        assert!(image.is_none());
+    }
+
+    #[test]
     fn rejects_vardct_section_payload_outside_codestream() {
         let frame_header = vardct_header(8, 8);
         let frame_data = frame_data(vec![frame_section(0, 0, FrameSectionKind::Combined, 8, 8)]);
@@ -5398,6 +5569,71 @@ mod tests {
             y,
             width,
             height,
+        }
+    }
+
+    fn vardct_frame_metadata(width: u32, height: u32) -> VarDctFrameMetadata {
+        VarDctFrameMetadata {
+            width,
+            height,
+            group_dim: 256,
+            groups_x: width.div_ceil(256),
+            groups_y: height.div_ceil(256),
+            dc_groups_x: width.div_ceil(2048),
+            dc_groups_y: height.div_ceil(2048),
+            is_combined: false,
+            global_section: None,
+            ac_global_section: None,
+            sections: Vec::new(),
+            ac_groups: Vec::new(),
+            dc_groups: Vec::new(),
+            ac_group_sections: Vec::new(),
+            dc_group_sections: Vec::new(),
+        }
+    }
+
+    fn ac_group_metadata(
+        group: VarDctGroupMetadata,
+        spatial_with_dc_grid: Option<VarDctAcSpatialGrid>,
+    ) -> VarDctAcGroupMetadata {
+        VarDctAcGroupMetadata {
+            payload: VarDctPassGroupPayloadMetadata {
+                section: VarDctSectionPayloadMetadata {
+                    section: section(
+                        0,
+                        0,
+                        FrameSectionKind::AcGroup {
+                            pass: 0,
+                            group: group.group,
+                        },
+                    ),
+                    payload_range: 0..0,
+                },
+                pass: 0,
+                group,
+            },
+            cursor: VarDctAcGroupCursorMetadata {
+                payload_start_bits: 0,
+                payload_end_bits: 0,
+                histogram_selector_start_bits: 0,
+                histogram_selector_end_bits: Some(0),
+                ans_state_start_bits: None,
+                ans_state_end_bits: None,
+                coefficient_stream_start_bits: None,
+                modular_ac_start_bits: None,
+            },
+            histogram_selector_bits: 0,
+            histogram_selector: Some(0),
+            entropy_uses_prefix_code: None,
+            coefficient_probe: None,
+            channel_trace: None,
+            coefficient_summary: None,
+            coefficient_grid: None,
+            base_dequantized_grid: None,
+            dequantized_grid: None,
+            spatial_grid: None,
+            spatial_with_dc_grid,
+            parse_error: None,
         }
     }
 
