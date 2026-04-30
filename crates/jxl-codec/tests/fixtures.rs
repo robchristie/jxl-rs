@@ -793,83 +793,87 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(xyb_image.height, 192);
     assert_eq!(xyb_image.groups_assembled, 2);
     assert_eq!(xyb_image.groups_missing, 0);
+    let xyb_summary = xyb_image
+        .channels
+        .iter()
+        .map(|channel| {
+            channel
+                .iter()
+                .enumerate()
+                .filter(|(_, sample)| **sample != 0.0)
+                .fold((0usize, 0u64), |(count, checksum), (index, sample)| {
+                    let checksum = checksum
+                        .wrapping_mul(1_099_511_628_211)
+                        .wrapping_add(index as u64)
+                        .rotate_left(11)
+                        ^ sample.to_bits() as u64;
+                    (count + 1, checksum)
+                })
+        })
+        .collect::<Vec<_>>();
+    let xyb_anchors = [
+        xyb_image.sample(0, 0, 0).unwrap().to_bits(),
+        xyb_image.sample(1, 0, 0).unwrap().to_bits(),
+        xyb_image.sample(2, 0, 0).unwrap().to_bits(),
+        xyb_image.sample(0, 319, 191).unwrap().to_bits(),
+        xyb_image.sample(1, 319, 191).unwrap().to_bits(),
+        xyb_image.sample(2, 319, 191).unwrap().to_bits(),
+    ];
     assert_eq!(
-        xyb_image
-            .channels
-            .iter()
-            .map(|channel| {
-                channel
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, sample)| **sample != 0.0)
-                    .fold((0usize, 0u64), |(count, checksum), (index, sample)| {
-                        let checksum = checksum
-                            .wrapping_mul(1_099_511_628_211)
-                            .wrapping_add(index as u64)
-                            .rotate_left(11)
-                            ^ sample.to_bits() as u64;
-                        (count + 1, checksum)
-                    })
-            })
-            .collect::<Vec<_>>(),
+        xyb_summary,
         vec![
-            (57962, 3833757523722157445),
-            (57980, 14440416603916395238),
-            (57982, 8893978260896325090),
+            (59525, 3148783885712997862),
+            (59547, 8179999271320941248),
+            (59554, 11189150345044084047),
         ]
     );
     assert_eq!(
+        xyb_anchors,
         [
-            xyb_image.sample(0, 0, 0).unwrap().to_bits(),
-            xyb_image.sample(1, 0, 0).unwrap().to_bits(),
-            xyb_image.sample(2, 0, 0).unwrap().to_bits(),
-            xyb_image.sample(0, 319, 191).unwrap().to_bits(),
-            xyb_image.sample(1, 319, 191).unwrap().to_bits(),
-            xyb_image.sample(2, 319, 191).unwrap().to_bits(),
-        ],
-        [
-            3082885028, 979252264, 3128142621, 939077272, 1037259029, 993675808
+            3082885028, 979076178, 3128274685, 940837884, 1037228049, 992849658
         ]
     );
     let rgb_image = assemble_vardct_linear_rgb_image(plan).unwrap().unwrap();
     assert_eq!(rgb_image.width, 320);
     assert_eq!(rgb_image.height, 192);
+    let rgb_summary = rgb_image
+        .channels
+        .iter()
+        .map(|channel| {
+            channel
+                .iter()
+                .enumerate()
+                .filter(|(_, sample)| **sample != 0.0)
+                .fold((0usize, 0u64), |(count, checksum), (index, sample)| {
+                    let checksum = checksum
+                        .wrapping_mul(1_099_511_628_211)
+                        .wrapping_add(index as u64)
+                        .rotate_left(11)
+                        ^ sample.to_bits() as u64;
+                    (count + 1, checksum)
+                })
+        })
+        .collect::<Vec<_>>();
+    let rgb_anchors = [
+        rgb_image.channels[0][0].to_bits(),
+        rgb_image.channels[1][0].to_bits(),
+        rgb_image.channels[2][0].to_bits(),
+        rgb_image.channels[0][(191 * 320 + 319) as usize].to_bits(),
+        rgb_image.channels[1][(191 * 320 + 319) as usize].to_bits(),
+        rgb_image.channels[2][(191 * 320 + 319) as usize].to_bits(),
+    ];
     assert_eq!(
-        rgb_image
-            .channels
-            .iter()
-            .map(|channel| {
-                channel
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, sample)| **sample != 0.0)
-                    .fold((0usize, 0u64), |(count, checksum), (index, sample)| {
-                        let checksum = checksum
-                            .wrapping_mul(1_099_511_628_211)
-                            .wrapping_add(index as u64)
-                            .rotate_left(11)
-                            ^ sample.to_bits() as u64;
-                        (count + 1, checksum)
-                    })
-            })
-            .collect::<Vec<_>>(),
+        rgb_summary,
         vec![
-            (61440, 15064254349359623470),
-            (61440, 12335775192485236224),
-            (61440, 17103813569572295799),
+            (61440, 11220725426516025707),
+            (61440, 3408914844508450388),
+            (61440, 3579285547816920914),
         ]
     );
     assert_eq!(
+        rgb_anchors,
         [
-            rgb_image.channels[0][0].to_bits(),
-            rgb_image.channels[1][0].to_bits(),
-            rgb_image.channels[2][0].to_bits(),
-            rgb_image.channels[0][(191 * 320 + 319) as usize].to_bits(),
-            rgb_image.channels[1][(191 * 320 + 319) as usize].to_bits(),
-            rgb_image.channels[2][(191 * 320 + 319) as usize].to_bits(),
-        ],
-        [
-            944338351, 952793869, 3107710532, 1015190061, 1015098281, 3159149374
+            944126269, 952684638, 3107735916, 1015174801, 1015065925, 3159140182
         ]
     );
     let srgb8_image = assemble_vardct_srgb8_image(plan).unwrap().unwrap();
@@ -886,9 +890,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     ];
     let metrics = srgb8_oracle_metrics(&srgb8_image, &reference, &anchor_indices);
     assert_eq!(metrics.max_abs_error, 255);
-    assert_eq!(metrics.sum_abs_error, 20254198);
-    assert_eq!(metrics.checksum, 6608536069640658384);
-    assert_eq!(metrics.anchors, vec![0, 0, 0, 22, 17, 0, 34, 34, 0]);
+    assert_eq!(metrics.sum_abs_error, 20235071);
+    assert_eq!(metrics.checksum, 3789787639564895058);
+    assert_eq!(metrics.anchors, vec![0, 0, 0, 17, 14, 0, 34, 34, 0]);
     assert_eq!(
         metrics.reference_anchors,
         vec![0, 1, 1, 125, 128, 124, 253, 255, 255]
@@ -1789,9 +1793,9 @@ fn generated_vardct_intensity_target_scales_opsin_plan_when_available() {
     ];
     let metrics = srgb8_oracle_metrics(&srgb8_image, &reference, &anchor_indices);
     assert_eq!(metrics.max_abs_error, 255);
-    assert_eq!(metrics.sum_abs_error, 20686120);
-    assert_eq!(metrics.checksum, 6815371859480925080);
-    assert_eq!(metrics.anchors, vec![0, 0, 0, 19, 13, 0, 29, 29, 0]);
+    assert_eq!(metrics.sum_abs_error, 20670678);
+    assert_eq!(metrics.checksum, 13324128505421059030);
+    assert_eq!(metrics.anchors, vec![0, 0, 0, 14, 10, 0, 29, 28, 0]);
     assert_eq!(
         metrics.reference_anchors,
         vec![0, 0, 0, 127, 126, 124, 253, 255, 255]

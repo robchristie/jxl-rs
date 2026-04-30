@@ -8,7 +8,7 @@ use crate::entropy::{
     probe_decode_histograms,
 };
 use crate::error::{Error, Result};
-use crate::frame::{FrameEncoding, FrameHeader};
+use crate::frame::{FrameEncoding, FrameHeader, LoopFilter};
 use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_payload_range};
 use crate::metadata::ImageMetadata;
 use crate::metadata::unpack_signed;
@@ -470,6 +470,7 @@ impl From<HistogramCodingProbeStage> for VarDctHistogramProbeStage {
 #[derive(Debug, Clone, PartialEq)]
 pub struct VarDctDecodePlan {
     pub frame: VarDctFrameMetadata,
+    pub loop_filter: LoopFilter,
     pub opsin_params: VarDctOpsinParams,
     pub global: Option<VarDctGlobalMetadata>,
     pub modular_global_tree_payload_start_bits: Option<usize>,
@@ -576,7 +577,11 @@ impl VarDctXybImage {
 /// without spatial+DC samples are counted in `VarDctXybImage::groups_missing`
 /// and left as zeroes in the output buffers.
 pub fn assemble_vardct_xyb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
-    assemble_vardct_xyb_image_from_groups(&plan.frame, &plan.ac_group_metadata)
+    let mut image = assemble_vardct_xyb_image_from_groups(&plan.frame, &plan.ac_group_metadata)?;
+    if let Some(image) = image.as_mut() {
+        apply_vardct_gaborish(image, &plan.loop_filter);
+    }
+    Ok(image)
 }
 
 /// Assembles available VarDCT XYB data and converts it to linear RGB.
@@ -1067,6 +1072,68 @@ fn copy_vardct_spatial_group_to_image(
         }
     }
     Ok(())
+}
+
+fn apply_vardct_gaborish(image: &mut VarDctXybImage, loop_filter: &LoopFilter) {
+    if !loop_filter.gab || image.width == 0 || image.height == 0 {
+        return;
+    }
+
+    let weights = vardct_gaborish_weights(loop_filter);
+    let width = image.width as usize;
+    let height = image.height as usize;
+    for (channel, [center_weight, cardinal_weight, diagonal_weight]) in
+        weights.into_iter().enumerate()
+    {
+        let input = image.channels[channel].clone();
+        for y in 0..height {
+            let row = y * width;
+            let top = mirror_coordinate(y as isize - 1, height) * width;
+            let bottom = mirror_coordinate(y as isize + 1, height) * width;
+            for x in 0..width {
+                let left = mirror_coordinate(x as isize - 1, width);
+                let right = mirror_coordinate(x as isize + 1, width);
+                let sum0 = input[row + x];
+                let sum1 =
+                    input[row + left] + input[row + right] + input[top + x] + input[bottom + x];
+                let sum2 = input[top + left]
+                    + input[top + right]
+                    + input[bottom + left]
+                    + input[bottom + right];
+                image.channels[channel][row + x] =
+                    center_weight * sum0 + cardinal_weight * sum1 + diagonal_weight * sum2;
+            }
+        }
+    }
+}
+
+fn vardct_gaborish_weights(loop_filter: &LoopFilter) -> [[f32; 3]; 3] {
+    let weights = loop_filter.gab_weights.unwrap_or(DEFAULT_GABORISH_WEIGHTS);
+    let mut per_channel = [
+        [1.0, weights[0], weights[1]],
+        [1.0, weights[2], weights[3]],
+        [1.0, weights[4], weights[5]],
+    ];
+    for weights in &mut per_channel {
+        let div = weights[0] + 4.0 * (weights[1] + weights[2]);
+        let normalize = 1.0 / div;
+        weights[0] *= normalize;
+        weights[1] *= normalize;
+        weights[2] *= normalize;
+    }
+    per_channel
+}
+
+fn mirror_coordinate(mut coordinate: isize, size: usize) -> usize {
+    let size = size as isize;
+    while coordinate < 0 || coordinate >= size {
+        if coordinate < 0 {
+            coordinate = -coordinate - 1;
+        } else {
+            coordinate = 2 * size - 1 - coordinate;
+        }
+    }
+    coordinate as usize
 }
 
 fn vardct_opsin_params(
@@ -1645,6 +1712,7 @@ pub fn read_vardct_decode_plan(
 
     Ok(Some(VarDctDecodePlan {
         frame,
+        loop_filter: frame_header.loop_filter.clone(),
         opsin_params: vardct_opsin_params(metadata, transform_data),
         global,
         modular_global_tree_payload_start_bits,
@@ -3471,6 +3539,14 @@ const AFV_WEIGHTS: [[f32; 9]; 3] = [
     [3072.0, 3072.0, 256.0, 256.0, 256.0, 414.0, 0.0, 0.0, 0.0],
     [1024.0, 1024.0, 50.0, 50.0, 50.0, 58.0, 0.0, 0.0, 0.0],
     [384.0, 384.0, 12.0, 12.0, 12.0, 22.0, -0.25, -0.25, -0.25],
+];
+const DEFAULT_GABORISH_WEIGHTS: [f32; 6] = [
+    1.1 * 0.104699568,
+    1.1 * 0.055680538,
+    1.1 * 0.104699568,
+    1.1 * 0.055680538,
+    1.1 * 0.104699568,
+    1.1 * 0.055680538,
 ];
 const DEFAULT_OPSIN_BIASES: [f32; 3] = [-0.0037930732, -0.0037930732, -0.0037930732];
 const DEFAULT_INVERSE_OPSIN_MATRIX: [[f32; 3]; 3] = [
@@ -5644,6 +5720,58 @@ mod tests {
         assert!((rgb.channels[0][0] - 0.860836).abs() < 1.0e-6);
         assert!((rgb.channels[1][0] + 0.25376424).abs() < 1.0e-6);
         assert!((rgb.channels[2][0] + 0.12067059).abs() < 1.0e-6);
+    }
+
+    #[test]
+    fn gaborish_leaves_flat_xyb_image_unchanged() {
+        let mut image = VarDctXybImage {
+            width: 3,
+            height: 2,
+            groups_assembled: 1,
+            groups_missing: 0,
+            channels: [vec![1.5; 6], vec![-2.0; 6], vec![0.25; 6]],
+        };
+
+        apply_vardct_gaborish(&mut image, &LoopFilter::default());
+
+        assert!(
+            image.channels[0]
+                .iter()
+                .all(|sample| (*sample - 1.5).abs() < 1.0e-6)
+        );
+        assert!(
+            image.channels[1]
+                .iter()
+                .all(|sample| (*sample + 2.0).abs() < 1.0e-6)
+        );
+        assert!(
+            image.channels[2]
+                .iter()
+                .all(|sample| (*sample - 0.25).abs() < 1.0e-6)
+        );
+    }
+
+    #[test]
+    fn gaborish_uses_custom_weights_and_mirrored_borders() {
+        let mut image = VarDctXybImage {
+            width: 2,
+            height: 2,
+            groups_assembled: 1,
+            groups_missing: 0,
+            channels: [vec![1.0, 0.0, 0.0, 0.0], vec![0.0; 4], vec![0.0; 4]],
+        };
+        let loop_filter = LoopFilter {
+            gab: true,
+            gab_custom: true,
+            gab_weights: Some([0.5, 0.25, 0.0, 0.0, 0.0, 0.0]),
+            ..LoopFilter::default()
+        };
+
+        apply_vardct_gaborish(&mut image, &loop_filter);
+
+        assert_eq!(image.channels[0], vec![0.5625, 0.1875, 0.1875, 0.0625]);
+        assert_eq!(image.channels[1], vec![0.0; 4]);
+        assert_eq!(image.channels[2], vec![0.0; 4]);
     }
 
     #[test]
