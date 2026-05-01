@@ -576,6 +576,15 @@ pub struct VarDctSrgb8Image {
     pub pixels: Vec<u8>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctSrgb16Image {
+    pub width: u32,
+    pub height: u32,
+    /// Interleaved RGB pixels after clamping linear samples to [0, 1] and
+    /// applying the sRGB electro-optical transfer function.
+    pub pixels: Vec<u16>,
+}
+
 impl VarDctXybImage {
     pub fn sample(&self, channel: usize, x: u32, y: u32) -> Option<f32> {
         if channel >= self.channels.len() || x >= self.width || y >= self.height {
@@ -651,6 +660,15 @@ pub fn assemble_vardct_linear_rgb_image(plan: &VarDctDecodePlan) -> Result<Optio
 pub fn assemble_vardct_srgb8_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctSrgb8Image>> {
     assemble_vardct_linear_rgb_image(plan)
         .map(|image| image.map(|image| vardct_linear_rgb_to_srgb8(&image)))
+}
+
+/// Assembles available VarDCT XYB data and converts it to interleaved sRGB16.
+///
+/// Like `assemble_vardct_srgb8_image`, this is a debugging and fixture-oracle
+/// convenience layer rather than full JPEG XL output color management.
+pub fn assemble_vardct_srgb16_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctSrgb16Image>> {
+    assemble_vardct_linear_rgb_image(plan)
+        .map(|image| image.map(|image| vardct_linear_rgb_to_srgb16(&image)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1616,13 +1634,37 @@ fn vardct_linear_rgb_to_srgb8(rgb: &VarDctRgbImage) -> VarDctSrgb8Image {
 }
 
 fn linear_sample_to_srgb8(sample: f32) -> u8 {
+    linear_sample_to_srgb(sample, u8::MAX as f32) as u8
+}
+
+fn vardct_linear_rgb_to_srgb16(rgb: &VarDctRgbImage) -> VarDctSrgb16Image {
+    let sample_count = rgb.channels[0].len();
+    let mut pixels = Vec::with_capacity(sample_count * 3);
+    for index in 0..sample_count {
+        pixels.push(linear_sample_to_srgb16(rgb.channels[0][index]));
+        pixels.push(linear_sample_to_srgb16(rgb.channels[1][index]));
+        pixels.push(linear_sample_to_srgb16(rgb.channels[2][index]));
+    }
+
+    VarDctSrgb16Image {
+        width: rgb.width,
+        height: rgb.height,
+        pixels,
+    }
+}
+
+fn linear_sample_to_srgb16(sample: f32) -> u16 {
+    linear_sample_to_srgb(sample, u16::MAX as f32) as u16
+}
+
+fn linear_sample_to_srgb(sample: f32, max: f32) -> u32 {
     let sample = sample.clamp(0.0, 1.0);
     let encoded = if sample <= 0.003_130_8 {
         12.92 * sample
     } else {
         1.055 * sample.powf(1.0 / 2.4) - 0.055
     };
-    (encoded * 255.0).round().clamp(0.0, 255.0) as u8
+    encoded.mul_add(max, 0.0).round().clamp(0.0, max) as u32
 }
 
 fn xyb_sample_to_linear_rgb(x: f32, y: f32, b: f32, opsin: &VarDctOpsinParams) -> [f32; 3] {
@@ -6907,6 +6949,17 @@ mod tests {
     }
 
     #[test]
+    fn converts_linear_sample_to_srgb16() {
+        assert_eq!(linear_sample_to_srgb16(-1.0), 0);
+        assert_eq!(linear_sample_to_srgb16(0.0), 0);
+        assert_eq!(linear_sample_to_srgb16(0.003_130_8), 2651);
+        assert_eq!(linear_sample_to_srgb16(0.25), 35199);
+        assert_eq!(linear_sample_to_srgb16(0.5), 48192);
+        assert_eq!(linear_sample_to_srgb16(1.0), 65535);
+        assert_eq!(linear_sample_to_srgb16(2.0), 65535);
+    }
+
+    #[test]
     fn converts_linear_rgb_image_to_srgb8() {
         let rgb = VarDctRgbImage {
             width: 2,
@@ -6919,6 +6972,21 @@ mod tests {
         assert_eq!(image.width, 2);
         assert_eq!(image.height, 1);
         assert_eq!(image.pixels, vec![0, 188, 255, 255, 137, 0]);
+    }
+
+    #[test]
+    fn converts_linear_rgb_image_to_srgb16() {
+        let rgb = VarDctRgbImage {
+            width: 2,
+            height: 1,
+            channels: [vec![0.0, 1.0], vec![0.5, 0.25], vec![2.0, -1.0]],
+        };
+
+        let image = vardct_linear_rgb_to_srgb16(&rgb);
+
+        assert_eq!(image.width, 2);
+        assert_eq!(image.height, 1);
+        assert_eq!(image.pixels, vec![0, 48192, 65535, 65535, 35199, 0]);
     }
 
     #[test]

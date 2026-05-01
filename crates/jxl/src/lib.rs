@@ -460,7 +460,45 @@ fn rgba8_from_vardct_srgb8(image: jxl_codec::VarDctSrgb8Image) -> Result<RgbaIma
 }
 
 fn decode_rgba16_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<Rgba16Image> {
+    if config.region.is_some() {
+        return decode_modular_rgba16_buffered(input, config);
+    }
+
+    let (_, codestream) = jxl_codec::parse_file_with_config(input, config)?;
+    if codestream.basic_info.have_animation {
+        return Err(Error::Unsupported("animated image decode"));
+    }
+    let frame = codestream
+        .first_frame
+        .as_ref()
+        .ok_or(Error::Unsupported("image has no decoded frame"))?;
+    if frame.encoding == FrameEncoding::VarDct {
+        let plan = codestream
+            .first_frame_vardct_plan
+            .as_ref()
+            .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+        let image = jxl_codec::assemble_vardct_srgb16_image(plan)?
+            .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+        return rgba16_from_vardct_srgb16(image);
+    }
+
+    rgba16_from_modular_codestream(codestream)
+}
+
+fn decode_modular_rgba16_buffered(
+    input: &[u8],
+    config: jxl_codec::DecodeConfig,
+) -> Result<Rgba16Image> {
     let decoded = decode_buffered(input, config)?;
+    rgba16_from_decoded_image(&decoded)
+}
+
+fn rgba16_from_modular_codestream(codestream: jxl_codec::Codestream) -> Result<Rgba16Image> {
+    let decoded = decode_buffered_codestream(codestream)?;
+    rgba16_from_decoded_image(&decoded)
+}
+
+fn rgba16_from_decoded_image(decoded: &DecodedImage) -> Result<Rgba16Image> {
     let pixels = match &decoded.pixels {
         PixelData::U8(samples) => rgba16_from_u8(&decoded, samples)?,
         PixelData::U16(samples) => rgba16_from_u16(&decoded, samples)?,
@@ -468,6 +506,26 @@ fn decode_rgba16_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Resu
     Ok(Rgba16Image {
         width: decoded.width,
         height: decoded.height,
+        pixels,
+    })
+}
+
+fn rgba16_from_vardct_srgb16(image: jxl_codec::VarDctSrgb16Image) -> Result<Rgba16Image> {
+    let sample_count = (image.width as usize)
+        .checked_mul(image.height as usize)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    if image.pixels.len() != sample_count * 3 {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+
+    let mut pixels = Vec::with_capacity(sample_count * 4);
+    for rgb in image.pixels.chunks_exact(3) {
+        pixels.extend_from_slice(rgb);
+        pixels.push(u16::MAX);
+    }
+    Ok(Rgba16Image {
+        width: image.width,
+        height: image.height,
         pixels,
     })
 }
@@ -1150,19 +1208,19 @@ mod tests {
         );
         assert_eq!(
             decode_rgba16(&bytes),
-            Err(Error::Unsupported("VarDCT image decode"))
+            Err(Error::Unsupported("VarDCT image reconstruction"))
         );
     }
 
     #[test]
-    fn decode_rgba8_supports_generated_var_dct_when_available() {
+    fn decode_rgba_supports_generated_var_dct_when_available() {
         let Some(cjxl) = reference_cjxl() else {
-            eprintln!("skipping public VarDCT rgba8 decode; reference cjxl is not built");
+            eprintln!("skipping public VarDCT rgba decode; reference cjxl is not built");
             return;
         };
 
-        let input = unique_temp_path("jxl-rgba8-vardct-source", "ppm");
-        let encoded = unique_temp_path("jxl-rgba8-vardct", "jxl");
+        let input = unique_temp_path("jxl-rgba-vardct-source", "ppm");
+        let encoded = unique_temp_path("jxl-rgba-vardct", "jxl");
         write_split_vardct_source_ppm(&input);
 
         let cjxl_output = Command::new(&cjxl)
@@ -1181,6 +1239,7 @@ mod tests {
         let encoded_bytes = std::fs::read(&encoded).unwrap();
         let _ = std::fs::remove_file(&encoded);
         let rgba = decode_rgba8(&encoded_bytes).unwrap();
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
 
         assert_eq!(rgba.width, 320);
         assert_eq!(rgba.height, 192);
@@ -1188,6 +1247,22 @@ mod tests {
         assert!(rgba.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
         assert!(
             rgba.pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
+        );
+
+        assert_eq!(rgba16.width, 320);
+        assert_eq!(rgba16.height, 192);
+        assert_eq!(rgba16.pixels.len(), 320 * 192 * 4);
+        assert!(
+            rgba16
+                .pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel[3] == u16::MAX)
+        );
+        assert!(
+            rgba16
+                .pixels
                 .chunks_exact(4)
                 .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
         );
