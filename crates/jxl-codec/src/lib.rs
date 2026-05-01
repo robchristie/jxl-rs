@@ -61,8 +61,9 @@ pub use vardct::{
     VarDctAnsHistogramProbe, VarDctAnsHistogramProbeKind, VarDctAnsHistogramProbeStage,
     VarDctBlockContextMapMetadata, VarDctCoeffOrderMetadata, VarDctColorCorrelationMetadata,
     VarDctContextMapProbe, VarDctContextMapProbeKind, VarDctContextMapProbeStage,
-    VarDctDcDequantMetadata, VarDctDcGroupCursorMetadata, VarDctDcGroupMetadata,
-    VarDctDcGroupPayloadMetadata, VarDctDecodePlan, VarDctEpfMetadata, VarDctFrameMetadata,
+    VarDctDcCoefficientDiagnostics, VarDctDcDequantMetadata, VarDctDcGroupCursorMetadata,
+    VarDctDcGroupMetadata, VarDctDcGroupPayloadMetadata, VarDctDcRawChannelDiagnostics,
+    VarDctDcScaledChannelDiagnostics, VarDctDecodePlan, VarDctEpfMetadata, VarDctFrameMetadata,
     VarDctGlobalCursorMetadata, VarDctGlobalMetadata, VarDctGroupMetadata,
     VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata, VarDctHistogramProbeStage,
     VarDctOpsinParams, VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata,
@@ -71,5 +72,5 @@ pub use vardct::{
     assemble_vardct_dc_xyb_image, assemble_vardct_linear_rgb_image, assemble_vardct_srgb8_image,
     assemble_vardct_srgb8_image_for_pass, assemble_vardct_srgb16_image,
     assemble_vardct_srgb16_image_for_pass, assemble_vardct_xyb_image,
-    assemble_vardct_xyb_image_for_pass,
+    assemble_vardct_xyb_image_for_pass, vardct_dc_coefficient_diagnostics,
 };

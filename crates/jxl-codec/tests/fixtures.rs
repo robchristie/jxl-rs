@@ -10,7 +10,7 @@ use jxl_codec::{
     TransferFunction, TransformId, VarDctSrgb8Image, assemble_vardct_dc_srgb8_image,
     assemble_vardct_dc_xyb_image, assemble_vardct_linear_rgb_image, assemble_vardct_srgb8_image,
     assemble_vardct_srgb8_image_for_pass, assemble_vardct_xyb_image, parse_file,
-    parse_file_with_config,
+    parse_file_with_config, vardct_dc_coefficient_diagnostics,
 };
 
 #[test]
@@ -965,6 +965,187 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             10756140538219977864,
             vec![0, 1, 0, 10, 20, 0, 34, 33, 0],
         )
+    );
+    let dc_diagnostics = vardct_dc_coefficient_diagnostics(plan).unwrap();
+    assert_eq!(
+        dc_diagnostics
+            .iter()
+            .map(|diagnostics| (
+                diagnostics.ac_group,
+                diagnostics.dc_group,
+                diagnostics.width_blocks,
+                diagnostics.height_blocks,
+                diagnostics.inv_quant_dc_bits,
+                diagnostics.dc_dequant_bits,
+                diagnostics
+                    .raw_channels
+                    .iter()
+                    .map(|channel| (
+                        channel.output_channel,
+                        channel.modular_channel,
+                        channel.width,
+                        channel.height,
+                        channel.nonzero_samples,
+                        channel.sample_min,
+                        channel.sample_max,
+                        channel.sample_sum,
+                        channel.sample_checksum,
+                        channel.anchors.clone(),
+                    ))
+                    .collect::<Vec<_>>(),
+                diagnostics
+                    .scaled_channels
+                    .iter()
+                    .map(|channel| (
+                        channel.output_channel,
+                        channel.scale_bits,
+                        channel.nonzero_coefficients,
+                        channel.coefficient_checksum,
+                        channel.anchors_bits.clone(),
+                    ))
+                    .collect::<Vec<_>>(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                0,
+                0,
+                32,
+                24,
+                1061230501,
+                [964689920, 989855744, 998244352],
+                vec![
+                    (
+                        0,
+                        1,
+                        32,
+                        24,
+                        767,
+                        -162,
+                        281,
+                        -6399,
+                        9688737263707220722,
+                        vec![-2, -102, -57],
+                    ),
+                    (
+                        1,
+                        0,
+                        32,
+                        24,
+                        768,
+                        20,
+                        1087,
+                        463966,
+                        8135397685105614973,
+                        vec![20, 530, 1072],
+                    ),
+                    (
+                        2,
+                        2,
+                        32,
+                        24,
+                        761,
+                        -162,
+                        141,
+                        -15234,
+                        7468587484695544071,
+                        vec![-1, -90, -30],
+                    ),
+                ],
+                vec![
+                    (
+                        0,
+                        960567205,
+                        767,
+                        16983345122273678040,
+                        vec![3116439461, 3164200663, 3156998415],
+                    ),
+                    (
+                        1,
+                        985733029,
+                        768,
+                        1228709548225900849,
+                        vec![1022451086, 1061675386, 1070212289],
+                    ),
+                    (
+                        2,
+                        994121637,
+                        761,
+                        15962361302287329889,
+                        vec![3141605285, 3196568736, 3182757419],
+                    ),
+                ],
+            ),
+            (
+                1,
+                0,
+                8,
+                24,
+                1061230501,
+                [964689920, 989855744, 998244352],
+                vec![
+                    (
+                        0,
+                        1,
+                        8,
+                        24,
+                        192,
+                        -45,
+                        276,
+                        23950,
+                        17764390893527886947,
+                        vec![240, 96, 2],
+                    ),
+                    (
+                        1,
+                        0,
+                        8,
+                        24,
+                        192,
+                        541,
+                        1129,
+                        154243,
+                        7869728047974623686,
+                        vec![560, 747, 1129],
+                    ),
+                    (
+                        2,
+                        2,
+                        8,
+                        24,
+                        192,
+                        -41,
+                        150,
+                        8378,
+                        7977873635546956465,
+                        vec![56, 43, 2],
+                    ),
+                ],
+                vec![
+                    (
+                        0,
+                        960567205,
+                        192,
+                        10120432274885543098,
+                        vec![1026885163, 1016123836, 968955813],
+                    ),
+                    (
+                        1,
+                        985733029,
+                        192,
+                        9608531278850527785,
+                        vec![1062416860, 1066195968, 1070916690],
+                    ),
+                    (
+                        2,
+                        994121637,
+                        192,
+                        9694798663424025394,
+                        vec![1042871472, 1040301027, 1002510245],
+                    ),
+                ],
+            ),
+        ]
     );
     assert_eq!(dequantized_grid.group, 0);
     assert_eq!(dequantized_grid.pass, 0);

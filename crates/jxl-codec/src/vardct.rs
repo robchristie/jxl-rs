@@ -705,6 +705,16 @@ pub fn assemble_vardct_dc_srgb8_image(plan: &VarDctDecodePlan) -> Result<Option<
     })
 }
 
+/// Summarizes raw and scaled VarDCT DC coefficients for each final AC group.
+pub fn vardct_dc_coefficient_diagnostics(
+    plan: &VarDctDecodePlan,
+) -> Result<Vec<VarDctDcCoefficientDiagnostics>> {
+    final_vardct_ac_passes_by_group(&plan.ac_group_metadata)
+        .into_iter()
+        .map(|metadata| vardct_dc_coefficient_diagnostics_for_group(plan, metadata))
+        .collect()
+}
+
 /// Assembles available VarDCT XYB data and converts it to interleaved sRGB16.
 ///
 /// Like `assemble_vardct_srgb8_image`, this is a debugging and fixture-oracle
@@ -818,6 +828,41 @@ pub struct VarDctDcGroupCursorMetadata {
     pub modular_dc_end_bits: Option<usize>,
     pub ac_metadata_start_bits: Option<usize>,
     pub ac_metadata_end_bits: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctDcCoefficientDiagnostics {
+    pub ac_group: usize,
+    pub dc_group: usize,
+    pub width_blocks: usize,
+    pub height_blocks: usize,
+    pub inv_quant_dc_bits: u32,
+    pub dc_dequant_bits: [u32; 3],
+    pub raw_channels: [VarDctDcRawChannelDiagnostics; 3],
+    pub scaled_channels: [VarDctDcScaledChannelDiagnostics; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctDcRawChannelDiagnostics {
+    pub output_channel: usize,
+    pub modular_channel: usize,
+    pub width: u32,
+    pub height: u32,
+    pub nonzero_samples: usize,
+    pub sample_min: i32,
+    pub sample_max: i32,
+    pub sample_sum: i64,
+    pub sample_checksum: u64,
+    pub anchors: Vec<i32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctDcScaledChannelDiagnostics {
+    pub output_channel: usize,
+    pub scale_bits: u32,
+    pub nonzero_coefficients: usize,
+    pub coefficient_checksum: u64,
+    pub anchors_bits: Vec<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3877,6 +3922,111 @@ fn vardct_dc_coefficients_for_group(
         height_blocks,
         per_channel,
     })
+}
+
+fn vardct_dc_coefficient_diagnostics_for_group(
+    plan: &VarDctDecodePlan,
+    metadata: &VarDctAcGroupMetadata,
+) -> Result<VarDctDcCoefficientDiagnostics> {
+    const DEFAULT_DC_QUANT: [f32; 3] = [1.0 / 4096.0, 1.0 / 512.0, 1.0 / 256.0];
+    const XYB_DC_CHANNELS: [usize; 3] = [1, 0, 2];
+
+    let global = plan
+        .global
+        .as_ref()
+        .ok_or(Error::Unsupported("VarDCT global metadata"))?;
+    let dc_group = vardct_dc_group_for_ac_group(metadata, &plan.dc_group_metadata)?;
+    let var_dct_dc = dc_group
+        .var_dct_dc
+        .as_ref()
+        .ok_or(Error::Unsupported("VarDCT DC coefficients"))?;
+    let coefficients = vardct_dc_coefficients_for_group(metadata, global, &plan.dc_group_metadata)?;
+    let dc_quant = global.dc_dequant.coefficients.unwrap_or(DEFAULT_DC_QUANT);
+    let width_blocks = metadata.payload.group.width.div_ceil(8).min(256 / 8) as usize;
+    let height_blocks = metadata.payload.group.height.div_ceil(8).min(256 / 8) as usize;
+    let group_min_x = ((metadata.payload.group.x - dc_group.payload.group.x) / 8) as usize;
+    let group_min_y = ((metadata.payload.group.y - dc_group.payload.group.y) / 8) as usize;
+
+    let raw_channels = std::array::from_fn(|output_channel| {
+        let modular_channel = XYB_DC_CHANNELS[output_channel];
+        let channel = var_dct_dc
+            .channels
+            .iter()
+            .find(|channel| channel.channel_index == modular_channel)
+            .expect("validated VarDCT DC channel");
+        let mut selected = Vec::with_capacity(width_blocks * height_blocks);
+        for y in 0..height_blocks {
+            for x in 0..width_blocks {
+                let source_x = group_min_x + x;
+                let source_y = group_min_y + y;
+                selected.push(channel.samples[source_y * channel.width as usize + source_x]);
+            }
+        }
+        let sample_min = selected.iter().copied().min().unwrap_or(0);
+        let sample_max = selected.iter().copied().max().unwrap_or(0);
+        VarDctDcRawChannelDiagnostics {
+            output_channel,
+            modular_channel,
+            width: width_blocks as u32,
+            height: height_blocks as u32,
+            nonzero_samples: selected.iter().filter(|sample| **sample != 0).count(),
+            sample_min,
+            sample_max,
+            sample_sum: selected.iter().map(|sample| i64::from(*sample)).sum(),
+            sample_checksum: checksum_i32_slice(&selected),
+            anchors: sample_anchors_i32(&selected),
+        }
+    });
+    let scaled_channels = std::array::from_fn(|output_channel| {
+        let channel = &coefficients.per_channel[output_channel];
+        let scale = global.quantizer.inv_quant_dc * dc_quant[output_channel];
+        let mut checksum = 0u64;
+        let mut nonzero = 0usize;
+        for (index, &value) in channel.iter().enumerate() {
+            if value != 0.0 {
+                nonzero += 1;
+                checksum = checksum_dequantized_coefficient(checksum, index, value);
+            }
+        }
+        VarDctDcScaledChannelDiagnostics {
+            output_channel,
+            scale_bits: scale.to_bits(),
+            nonzero_coefficients: nonzero,
+            coefficient_checksum: checksum,
+            anchors_bits: sample_anchors_f32_bits(channel),
+        }
+    });
+
+    Ok(VarDctDcCoefficientDiagnostics {
+        ac_group: metadata.payload.group.group,
+        dc_group: dc_group.payload.group.group,
+        width_blocks,
+        height_blocks,
+        inv_quant_dc_bits: global.quantizer.inv_quant_dc.to_bits(),
+        dc_dequant_bits: dc_quant.map(f32::to_bits),
+        raw_channels,
+        scaled_channels,
+    })
+}
+
+fn sample_anchors_i32(samples: &[i32]) -> Vec<i32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    [0usize, samples.len() / 2, samples.len() - 1]
+        .into_iter()
+        .map(|index| samples[index])
+        .collect()
+}
+
+fn sample_anchors_f32_bits(samples: &[f32]) -> Vec<u32> {
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    [0usize, samples.len() / 2, samples.len() - 1]
+        .into_iter()
+        .map(|index| samples[index].to_bits())
+        .collect()
 }
 
 fn write_spatial_sample(grid: &mut VarDctAcSpatialChannelGrid, index: usize, value: f32) {
