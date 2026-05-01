@@ -343,6 +343,32 @@ fn decode_channels_codestream(
 }
 
 fn decode_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<DecodedImage> {
+    if config.region.is_some() {
+        return decode_modular_buffered(input, config);
+    }
+
+    let (_, codestream) = jxl_codec::parse_file_with_config(input, config)?;
+    if codestream.basic_info.have_animation {
+        return Err(Error::Unsupported("animated image decode"));
+    }
+    let frame = codestream
+        .first_frame
+        .as_ref()
+        .ok_or(Error::Unsupported("image has no decoded frame"))?;
+    if frame.encoding == FrameEncoding::VarDct {
+        let plan = codestream
+            .first_frame_vardct_plan
+            .as_ref()
+            .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+        let image = jxl_codec::assemble_vardct_srgb8_image(plan)?
+            .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+        return decoded_image_from_vardct_srgb8(image);
+    }
+
+    decode_buffered_codestream(codestream)
+}
+
+fn decode_modular_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<DecodedImage> {
     let (_, codestream) = jxl_codec::parse_file_with_config(input, config)?;
     let channels = decode_channels_codestream(codestream, config.region.is_some())?;
     decode_buffered_channels(channels)
@@ -440,9 +466,7 @@ fn rgba8_from_decoded_image(decoded: &DecodedImage) -> Result<RgbaImage> {
 }
 
 fn rgba8_from_vardct_srgb8(image: jxl_codec::VarDctSrgb8Image) -> Result<RgbaImage> {
-    let sample_count = (image.width as usize)
-        .checked_mul(image.height as usize)
-        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let sample_count = vardct_srgb_sample_count(image.width, image.height)?;
     if image.pixels.len() != sample_count * 3 {
         return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
     }
@@ -456,6 +480,22 @@ fn rgba8_from_vardct_srgb8(image: jxl_codec::VarDctSrgb8Image) -> Result<RgbaIma
         width: image.width,
         height: image.height,
         pixels,
+    })
+}
+
+fn decoded_image_from_vardct_srgb8(image: jxl_codec::VarDctSrgb8Image) -> Result<DecodedImage> {
+    let sample_count = vardct_srgb_sample_count(image.width, image.height)?;
+    if image.pixels.len() != sample_count * 3 {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+
+    Ok(DecodedImage {
+        width: image.width,
+        height: image.height,
+        color_channels: 3,
+        alpha: None,
+        bit_depth: 8,
+        pixels: PixelData::U8(image.pixels),
     })
 }
 
@@ -511,9 +551,7 @@ fn rgba16_from_decoded_image(decoded: &DecodedImage) -> Result<Rgba16Image> {
 }
 
 fn rgba16_from_vardct_srgb16(image: jxl_codec::VarDctSrgb16Image) -> Result<Rgba16Image> {
-    let sample_count = (image.width as usize)
-        .checked_mul(image.height as usize)
-        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let sample_count = vardct_srgb_sample_count(image.width, image.height)?;
     if image.pixels.len() != sample_count * 3 {
         return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
     }
@@ -528,6 +566,12 @@ fn rgba16_from_vardct_srgb16(image: jxl_codec::VarDctSrgb16Image) -> Result<Rgba
         height: image.height,
         pixels,
     })
+}
+
+fn vardct_srgb_sample_count(width: u32, height: u32) -> Result<usize> {
+    (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))
 }
 
 fn raw_alpha_info(metadata: &ImageMetadata) -> Result<Option<AlphaInfo>> {
@@ -1184,7 +1228,7 @@ mod tests {
         });
         assert_eq!(
             decode(&bytes),
-            Err(Error::Unsupported("VarDCT image decode"))
+            Err(Error::Unsupported("VarDCT image reconstruction"))
         );
         assert_eq!(
             decode_channels(&bytes),
@@ -1238,8 +1282,24 @@ mod tests {
 
         let encoded_bytes = std::fs::read(&encoded).unwrap();
         let _ = std::fs::remove_file(&encoded);
+        let decoded = decode(&encoded_bytes).unwrap();
         let rgba = decode_rgba8(&encoded_bytes).unwrap();
         let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+
+        assert_eq!(decoded.width, 320);
+        assert_eq!(decoded.height, 192);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.alpha, None);
+        assert_eq!(decoded.bit_depth, 8);
+        let PixelData::U8(decoded_pixels) = decoded.pixels else {
+            panic!("expected VarDCT decode to return 8-bit RGB");
+        };
+        assert_eq!(decoded_pixels.len(), 320 * 192 * 3);
+        assert!(
+            decoded_pixels
+                .chunks_exact(3)
+                .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
+        );
 
         assert_eq!(rgba.width, 320);
         assert_eq!(rgba.height, 192);
