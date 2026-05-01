@@ -648,7 +648,7 @@ pub fn assemble_vardct_xyb_image_for_pass(
 /// group using the parsed DC coefficients and zero AC coefficients, then applies
 /// the same loop filters as `assemble_vardct_xyb_image`.
 pub fn assemble_vardct_dc_xyb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
-    let mut image = assemble_vardct_xyb_image_dc_only(plan)?;
+    let mut image = assemble_vardct_xyb_image_dc_only(plan, 1.0)?;
     if let Some(image) = image.as_mut() {
         apply_vardct_gaborish(image, &plan.loop_filter);
         if plan.loop_filter.epf_iters >= 1 {
@@ -700,6 +700,28 @@ pub fn assemble_vardct_srgb8_image_for_pass(
 pub fn assemble_vardct_dc_srgb8_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctSrgb8Image>> {
     assemble_vardct_dc_xyb_image(plan).map(|image| {
         image.map(|image| {
+            vardct_linear_rgb_to_srgb8(&vardct_xyb_to_linear_rgb(&image, &plan.opsin_params))
+        })
+    })
+}
+
+/// Evaluates DC-only reconstruction with an alternate DC coefficient multiplier.
+///
+/// This is a diagnostic helper for checking the normalization boundary between
+/// parsed VarDCT DC coefficients and inverse DCT spatialization. A multiplier of
+/// `1.0` is equivalent to `assemble_vardct_dc_srgb8_image`.
+pub fn assemble_vardct_dc_srgb8_image_with_multiplier(
+    plan: &VarDctDecodePlan,
+    dc_multiplier: f32,
+) -> Result<Option<VarDctSrgb8Image>> {
+    assemble_vardct_xyb_image_dc_only(plan, dc_multiplier).map(|image| {
+        image.map(|mut image| {
+            apply_vardct_gaborish(&mut image, &plan.loop_filter);
+            if plan.loop_filter.epf_iters >= 1 {
+                if let Some(epf) = plan.epf_metadata.as_ref() {
+                    apply_vardct_epf(&mut image, &plan.loop_filter, epf);
+                }
+            }
             vardct_linear_rgb_to_srgb8(&vardct_xyb_to_linear_rgb(&image, &plan.opsin_params))
         })
     })
@@ -1254,7 +1276,10 @@ fn assemble_vardct_xyb_image_final(plan: &VarDctDecodePlan) -> Result<Option<Var
     Ok((image.groups_assembled > 0).then_some(image))
 }
 
-fn assemble_vardct_xyb_image_dc_only(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
+fn assemble_vardct_xyb_image_dc_only(
+    plan: &VarDctDecodePlan,
+    dc_multiplier: f32,
+) -> Result<Option<VarDctXybImage>> {
     let sample_len = (plan.frame.width as usize)
         .checked_mul(plan.frame.height as usize)
         .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
@@ -1271,7 +1296,7 @@ fn assemble_vardct_xyb_image_dc_only(plan: &VarDctDecodePlan) -> Result<Option<V
     };
 
     for metadata in final_vardct_ac_passes_by_group(&plan.ac_group_metadata) {
-        let Some(grid) = dc_only_spatial_grid_for_group(plan, metadata)? else {
+        let Some(grid) = dc_only_spatial_grid_for_group(plan, metadata, dc_multiplier)? else {
             image.groups_missing += 1;
             continue;
         };
@@ -1291,6 +1316,7 @@ fn assemble_vardct_xyb_image_dc_only(plan: &VarDctDecodePlan) -> Result<Option<V
 fn dc_only_spatial_grid_for_group(
     plan: &VarDctDecodePlan,
     metadata: &VarDctAcGroupMetadata,
+    dc_multiplier: f32,
 ) -> Result<Option<VarDctAcSpatialGrid>> {
     let Some(global) = plan.global.as_ref() else {
         return Ok(None);
@@ -1314,7 +1340,14 @@ fn dc_only_spatial_grid_for_group(
             VarDctAcDequantizedChannelGrid::new(coefficient_len),
         ],
     };
-    spatialize_vardct_ac_grid(&zero_ac, Some(global), metadata, &plan.dc_group_metadata).map(Some)
+    spatialize_vardct_ac_grid_with_dc_multiplier(
+        &zero_ac,
+        Some(global),
+        metadata,
+        &plan.dc_group_metadata,
+        dc_multiplier,
+    )
+    .map(Some)
 }
 
 fn final_vardct_spatial_grid_for_group(
@@ -3685,6 +3718,16 @@ fn spatialize_vardct_ac_grid(
     metadata: &VarDctAcGroupMetadata,
     dc_groups: &[VarDctDcGroupMetadata],
 ) -> Result<VarDctAcSpatialGrid> {
+    spatialize_vardct_ac_grid_with_dc_multiplier(grid, global, metadata, dc_groups, 1.0)
+}
+
+fn spatialize_vardct_ac_grid_with_dc_multiplier(
+    grid: &VarDctAcDequantizedGrid,
+    global: Option<&VarDctGlobalMetadata>,
+    metadata: &VarDctAcGroupMetadata,
+    dc_groups: &[VarDctDcGroupMetadata],
+    dc_multiplier: f32,
+) -> Result<VarDctAcSpatialGrid> {
     let blocks = vardct_ac_blocks_for_group(metadata, dc_groups)?;
     let dc_grid = global
         .map(|global| vardct_dc_coefficients_for_group(metadata, global, dc_groups))
@@ -3725,7 +3768,8 @@ fn spatialize_vardct_ac_grid(
                 }
             }
             if let Some(dc_grid) = &dc_grid {
-                coefficients[0] = dc_grid.coefficient(channel, block.block_x, block.block_y)?;
+                coefficients[0] =
+                    dc_grid.coefficient(channel, block.block_x, block.block_y)? * dc_multiplier;
             }
             let samples = match transform.kind {
                 SpatialTransformKind::Identity => coefficients,

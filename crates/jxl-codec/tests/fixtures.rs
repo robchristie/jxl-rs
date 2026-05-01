@@ -8,7 +8,8 @@ use jxl_codec::{
     BlendMode, ColorSpace, ColorTransform, DecodeConfig, ExtraChannelType, FileFormat,
     FrameEncoding, FrameSectionKind, FrameType, ImageRegion, ModularGroupExecution,
     TransferFunction, TransformId, VarDctSrgb8Image, assemble_vardct_dc_srgb8_image,
-    assemble_vardct_dc_xyb_image, assemble_vardct_linear_rgb_image, assemble_vardct_srgb8_image,
+    assemble_vardct_dc_srgb8_image_with_multiplier, assemble_vardct_dc_xyb_image,
+    assemble_vardct_linear_rgb_image, assemble_vardct_srgb8_image,
     assemble_vardct_srgb8_image_for_pass, assemble_vardct_xyb_image, parse_file,
     parse_file_with_config, vardct_dc_coefficient_diagnostics,
 };
@@ -965,6 +966,52 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             10756140538219977864,
             vec![0, 1, 0, 10, 20, 0, 34, 33, 0],
         )
+    );
+    let dc_multiplier_metrics = [0.125f32, 1.0, 8.0]
+        .into_iter()
+        .map(|multiplier| {
+            let image = assemble_vardct_dc_srgb8_image_with_multiplier(plan, multiplier)
+                .unwrap()
+                .unwrap();
+            let metrics = srgb8_oracle_metrics(&image, &reference, &anchor_indices);
+            (
+                multiplier.to_bits(),
+                metrics.max_abs_error,
+                metrics.sum_abs_error,
+                metrics.checksum,
+                metrics.anchors,
+                metrics.reference_anchors,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        dc_multiplier_metrics,
+        vec![
+            (
+                1040187392,
+                255,
+                23036923,
+                3338135176666224680,
+                vec![0, 0, 0, 1, 1, 0, 4, 4, 0],
+                vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
+            ),
+            (
+                1065353216,
+                255,
+                20234555,
+                10756140538219977864,
+                vec![0, 1, 0, 15, 14, 0, 34, 33, 0],
+                vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
+            ),
+            (
+                1090519040,
+                255,
+                13435313,
+                15958946884259848602,
+                vec![3, 5, 0, 101, 97, 0, 255, 255, 0],
+                vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
+            ),
+        ]
     );
     let dc_diagnostics = vardct_dc_coefficient_diagnostics(plan).unwrap();
     assert_eq!(
