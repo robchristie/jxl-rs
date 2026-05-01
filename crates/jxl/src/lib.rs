@@ -191,9 +191,9 @@ impl Decoder {
     /// samples are ROI-local: sample `(0, 0)` corresponds to the requested
     /// image-space coordinate `(roi.x, roi.y)`.
     ///
-    /// ROI decode is currently supported for modular still images. Unsupported
-    /// paths, including VarDCT reconstruction and unsupported channel geometry,
-    /// return [`Error::Unsupported`].
+    /// ROI decode is currently supported for modular still images. VarDCT raw
+    /// channel output remains unsupported because VarDCT reconstruction exposes
+    /// image-space RGB/XYB data rather than original raw channels.
     pub fn decode_channels(&self, input: &[u8]) -> Result<DecodedChannels> {
         self.validate_shared_options()?;
         decode_channels_buffered(input, self.codec_config())
@@ -202,12 +202,13 @@ impl Decoder {
     /// Decodes an interleaved image.
     ///
     /// Modular still images return their decoded integer samples, preserving
-    /// the decoded sample bit depth. Supported non-ROI VarDCT still images
-    /// return 8-bit sRGB RGB samples with no alpha channel.
+    /// the decoded sample bit depth. Supported VarDCT still images return 8-bit
+    /// sRGB RGB samples with no alpha channel.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management or orientation handling.
-    /// VarDCT ROI decode and unreconstructed VarDCT layouts return
+    /// VarDCT ROI is implemented as post-reconstruction cropping and may decode
+    /// the full frame internally. Unreconstructed VarDCT layouts return
     /// [`Error::Unsupported`].
     pub fn decode(&self, input: &[u8]) -> Result<DecodedImage> {
         self.validate_shared_options()?;
@@ -217,12 +218,13 @@ impl Decoder {
     /// Decodes to interleaved RGBA8.
     ///
     /// Modular still images are decoded through the raw-channel path and then
-    /// scaled or expanded to RGBA8. Supported non-ROI VarDCT still images return
-    /// opaque sRGB RGBA8.
+    /// scaled or expanded to RGBA8. Supported VarDCT still images return opaque
+    /// sRGB RGBA8.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management or orientation handling.
-    /// VarDCT ROI decode and unreconstructed VarDCT layouts return
+    /// VarDCT ROI is implemented as post-reconstruction cropping and may decode
+    /// the full frame internally. Unreconstructed VarDCT layouts return
     /// [`Error::Unsupported`].
     pub fn decode_rgba8(&self, input: &[u8]) -> Result<RgbaImage> {
         self.validate_shared_options()?;
@@ -232,12 +234,13 @@ impl Decoder {
     /// Decodes to interleaved RGBA16.
     ///
     /// Modular still images are decoded through the raw-channel path and then
-    /// scaled or expanded to RGBA16. Supported non-ROI VarDCT still images
-    /// return opaque sRGB RGBA16.
+    /// scaled or expanded to RGBA16. Supported VarDCT still images return opaque
+    /// sRGB RGBA16.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management or orientation handling.
-    /// VarDCT ROI decode and unreconstructed VarDCT layouts return
+    /// VarDCT ROI is implemented as post-reconstruction cropping and may decode
+    /// the full frame internally. Unreconstructed VarDCT layouts return
     /// [`Error::Unsupported`].
     pub fn decode_rgba16(&self, input: &[u8]) -> Result<Rgba16Image> {
         self.validate_shared_options()?;
@@ -320,6 +323,24 @@ fn decode_channels_buffered(
     decode_channels_codestream(codestream, config.region.is_some())
 }
 
+fn parse_file_for_public_pixel_decode(
+    input: &[u8],
+    config: jxl_codec::DecodeConfig,
+) -> Result<(jxl_codec::ExtractedCodestream, jxl_codec::Codestream)> {
+    if config.region.is_some() {
+        let parsed = jxl_codec::parse_file(input)?;
+        let frame = parsed
+            .1
+            .first_frame
+            .as_ref()
+            .ok_or(Error::Unsupported("image has no decoded frame"))?;
+        if frame.encoding == FrameEncoding::VarDct {
+            return Ok(parsed);
+        }
+    }
+    jxl_codec::parse_file_with_config(input, config)
+}
+
 fn decode_channels_codestream(
     codestream: jxl_codec::Codestream,
     region_requested: bool,
@@ -373,11 +394,7 @@ fn decode_channels_codestream(
 }
 
 fn decode_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<DecodedImage> {
-    if config.region.is_some() {
-        return decode_modular_buffered(input, config);
-    }
-
-    let (_, codestream) = jxl_codec::parse_file_with_config(input, config)?;
+    let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if codestream.basic_info.have_animation {
         return Err(Error::Unsupported("animated image decode"));
     }
@@ -390,18 +407,15 @@ fn decode_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<Deco
             .first_frame_vardct_plan
             .as_ref()
             .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
-        let image = jxl_codec::assemble_vardct_srgb8_image(plan)?
+        let mut image = jxl_codec::assemble_vardct_srgb8_image(plan)?
             .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+        if let Some(region) = config.region {
+            image = crop_vardct_srgb8(image, region)?;
+        }
         return decoded_image_from_vardct_srgb8(image);
     }
 
     decode_buffered_codestream(codestream)
-}
-
-fn decode_modular_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<DecodedImage> {
-    let (_, codestream) = jxl_codec::parse_file_with_config(input, config)?;
-    let channels = decode_channels_codestream(codestream, config.region.is_some())?;
-    decode_buffered_channels(channels)
 }
 
 fn decode_buffered_codestream(codestream: jxl_codec::Codestream) -> Result<DecodedImage> {
@@ -445,11 +459,7 @@ fn decode_buffered_channels(channels: DecodedChannels) -> Result<DecodedImage> {
 }
 
 fn decode_rgba8_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<RgbaImage> {
-    if config.region.is_some() {
-        return decode_modular_rgba8_buffered(input, config);
-    }
-
-    let (_, codestream) = jxl_codec::parse_file_with_config(input, config)?;
+    let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if codestream.basic_info.have_animation {
         return Err(Error::Unsupported("animated image decode"));
     }
@@ -462,20 +472,15 @@ fn decode_rgba8_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Resul
             .first_frame_vardct_plan
             .as_ref()
             .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
-        let image = jxl_codec::assemble_vardct_srgb8_image(plan)?
+        let mut image = jxl_codec::assemble_vardct_srgb8_image(plan)?
             .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+        if let Some(region) = config.region {
+            image = crop_vardct_srgb8(image, region)?;
+        }
         return rgba8_from_vardct_srgb8(image);
     }
 
     rgba8_from_modular_codestream(codestream)
-}
-
-fn decode_modular_rgba8_buffered(
-    input: &[u8],
-    config: jxl_codec::DecodeConfig,
-) -> Result<RgbaImage> {
-    let decoded = decode_buffered(input, config)?;
-    rgba8_from_decoded_image(&decoded)
 }
 
 fn rgba8_from_modular_codestream(codestream: jxl_codec::Codestream) -> Result<RgbaImage> {
@@ -530,11 +535,7 @@ fn decoded_image_from_vardct_srgb8(image: jxl_codec::VarDctSrgb8Image) -> Result
 }
 
 fn decode_rgba16_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<Rgba16Image> {
-    if config.region.is_some() {
-        return decode_modular_rgba16_buffered(input, config);
-    }
-
-    let (_, codestream) = jxl_codec::parse_file_with_config(input, config)?;
+    let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if codestream.basic_info.have_animation {
         return Err(Error::Unsupported("animated image decode"));
     }
@@ -547,20 +548,15 @@ fn decode_rgba16_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Resu
             .first_frame_vardct_plan
             .as_ref()
             .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
-        let image = jxl_codec::assemble_vardct_srgb16_image(plan)?
+        let mut image = jxl_codec::assemble_vardct_srgb16_image(plan)?
             .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+        if let Some(region) = config.region {
+            image = crop_vardct_srgb16(image, region)?;
+        }
         return rgba16_from_vardct_srgb16(image);
     }
 
     rgba16_from_modular_codestream(codestream)
-}
-
-fn decode_modular_rgba16_buffered(
-    input: &[u8],
-    config: jxl_codec::DecodeConfig,
-) -> Result<Rgba16Image> {
-    let decoded = decode_buffered(input, config)?;
-    rgba16_from_decoded_image(&decoded)
 }
 
 fn rgba16_from_modular_codestream(codestream: jxl_codec::Codestream) -> Result<Rgba16Image> {
@@ -596,6 +592,120 @@ fn rgba16_from_vardct_srgb16(image: jxl_codec::VarDctSrgb16Image) -> Result<Rgba
         height: image.height,
         pixels,
     })
+}
+
+fn crop_vardct_srgb8(
+    image: jxl_codec::VarDctSrgb8Image,
+    region: jxl_codec::ImageRegion,
+) -> Result<jxl_codec::VarDctSrgb8Image> {
+    validate_decode_region(image.width, image.height, region)?;
+    Ok(jxl_codec::VarDctSrgb8Image {
+        width: region.width,
+        height: region.height,
+        pixels: crop_interleaved_u8(&image.pixels, image.width, 3, region)?,
+    })
+}
+
+fn crop_vardct_srgb16(
+    image: jxl_codec::VarDctSrgb16Image,
+    region: jxl_codec::ImageRegion,
+) -> Result<jxl_codec::VarDctSrgb16Image> {
+    validate_decode_region(image.width, image.height, region)?;
+    Ok(jxl_codec::VarDctSrgb16Image {
+        width: region.width,
+        height: region.height,
+        pixels: crop_interleaved_u16(&image.pixels, image.width, 3, region)?,
+    })
+}
+
+fn validate_decode_region(width: u32, height: u32, region: jxl_codec::ImageRegion) -> Result<()> {
+    if region.width == 0 || region.height == 0 {
+        return Err(Error::InvalidCodestream("empty decode region"));
+    }
+    let end_x = region
+        .x
+        .checked_add(region.width)
+        .ok_or(Error::InvalidCodestream("decode region is outside image"))?;
+    let end_y = region
+        .y
+        .checked_add(region.height)
+        .ok_or(Error::InvalidCodestream("decode region is outside image"))?;
+    if end_x > width || end_y > height {
+        return Err(Error::InvalidCodestream("decode region is outside image"));
+    }
+    Ok(())
+}
+
+fn crop_interleaved_u8(
+    samples: &[u8],
+    width: u32,
+    channels: usize,
+    region: jxl_codec::ImageRegion,
+) -> Result<Vec<u8>> {
+    let output_len = (region.width as usize)
+        .checked_mul(region.height as usize)
+        .and_then(|samples| samples.checked_mul(channels))
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let row_stride = (width as usize)
+        .checked_mul(channels)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let x = (region.x as usize)
+        .checked_mul(channels)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let copy_width = (region.width as usize)
+        .checked_mul(channels)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let mut output = Vec::with_capacity(output_len);
+    for y in region.y as usize..(region.y + region.height) as usize {
+        let start = y
+            .checked_mul(row_stride)
+            .and_then(|start| start.checked_add(x))
+            .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+        let end = start
+            .checked_add(copy_width)
+            .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+        let row = samples
+            .get(start..end)
+            .ok_or(Error::InvalidCodestream("decoded pixel count mismatch"))?;
+        output.extend_from_slice(row);
+    }
+    Ok(output)
+}
+
+fn crop_interleaved_u16(
+    samples: &[u16],
+    width: u32,
+    channels: usize,
+    region: jxl_codec::ImageRegion,
+) -> Result<Vec<u16>> {
+    let output_len = (region.width as usize)
+        .checked_mul(region.height as usize)
+        .and_then(|samples| samples.checked_mul(channels))
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let row_stride = (width as usize)
+        .checked_mul(channels)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let x = (region.x as usize)
+        .checked_mul(channels)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let copy_width = (region.width as usize)
+        .checked_mul(channels)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let mut output = Vec::with_capacity(output_len);
+    for y in region.y as usize..(region.y + region.height) as usize {
+        let start = y
+            .checked_mul(row_stride)
+            .and_then(|start| start.checked_add(x))
+            .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+        let end = start
+            .checked_add(copy_width)
+            .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+        let row = samples
+            .get(start..end)
+            .ok_or(Error::InvalidCodestream("decoded pixel count mismatch"))?;
+        output.extend_from_slice(row);
+    }
+    Ok(output)
 }
 
 fn vardct_srgb_sample_count(width: u32, height: u32) -> Result<usize> {
@@ -1274,11 +1384,15 @@ mod tests {
         );
         assert_eq!(
             roi_decoder.decode(&bytes),
-            Err(Error::Unsupported("VarDCT image decode"))
+            Err(Error::Unsupported("VarDCT image reconstruction"))
         );
         assert_eq!(
             roi_decoder.decode_rgba8(&bytes),
-            Err(Error::Unsupported("VarDCT image decode"))
+            Err(Error::Unsupported("VarDCT image reconstruction"))
+        );
+        assert_eq!(
+            roi_decoder.decode_rgba16(&bytes),
+            Err(Error::Unsupported("VarDCT image reconstruction"))
         );
         assert_eq!(
             decode_rgba16(&bytes),
@@ -1312,11 +1426,23 @@ mod tests {
 
         let encoded_bytes = std::fs::read(&encoded).unwrap();
         let _ = std::fs::remove_file(&encoded);
+        let roi = Rect {
+            x: 17,
+            y: 19,
+            width: 41,
+            height: 29,
+        };
         let roi_decoder = Decoder::new().roi(Rect {
-            x: 0,
+            x: roi.x,
+            y: roi.y,
+            width: roi.width,
+            height: roi.height,
+        });
+        let out_of_bounds_roi_decoder = Decoder::new().roi(Rect {
+            x: 319,
             y: 0,
-            width: 32,
-            height: 32,
+            width: 2,
+            height: 1,
         });
 
         assert_eq!(
@@ -1327,29 +1453,20 @@ mod tests {
             roi_decoder.decode_channels(&encoded_bytes),
             Err(Error::Unsupported("VarDCT image decode"))
         );
-        assert_eq!(
-            roi_decoder.decode(&encoded_bytes),
-            Err(Error::Unsupported("VarDCT image decode"))
-        );
-        assert_eq!(
-            roi_decoder.decode_rgba8(&encoded_bytes),
-            Err(Error::Unsupported("VarDCT image decode"))
-        );
-        assert_eq!(
-            roi_decoder.decode_rgba16(&encoded_bytes),
-            Err(Error::Unsupported("VarDCT image decode"))
-        );
 
         let decoded = decode(&encoded_bytes).unwrap();
         let rgba = decode_rgba8(&encoded_bytes).unwrap();
         let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        let roi_decoded = roi_decoder.decode(&encoded_bytes).unwrap();
+        let roi_rgba = roi_decoder.decode_rgba8(&encoded_bytes).unwrap();
+        let roi_rgba16 = roi_decoder.decode_rgba16(&encoded_bytes).unwrap();
 
         assert_eq!(decoded.width, 320);
         assert_eq!(decoded.height, 192);
         assert_eq!(decoded.color_channels, 3);
         assert_eq!(decoded.alpha, None);
         assert_eq!(decoded.bit_depth, 8);
-        let PixelData::U8(decoded_pixels) = decoded.pixels else {
+        let PixelData::U8(decoded_pixels) = &decoded.pixels else {
             panic!("expected VarDCT decode to return 8-bit RGB");
         };
         assert_eq!(decoded_pixels.len(), 320 * 192 * 3);
@@ -1358,6 +1475,7 @@ mod tests {
                 .chunks_exact(3)
                 .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
         );
+        assert_roi_matches_full_image(&roi_decoded, &decoded, roi);
 
         assert_eq!(rgba.width, 320);
         assert_eq!(rgba.height, 192);
@@ -1368,6 +1486,7 @@ mod tests {
                 .chunks_exact(4)
                 .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
         );
+        assert_roi_matches_full_rgba8(&roi_rgba, &rgba, roi);
 
         assert_eq!(rgba16.width, 320);
         assert_eq!(rgba16.height, 192);
@@ -1383,6 +1502,19 @@ mod tests {
                 .pixels
                 .chunks_exact(4)
                 .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
+        );
+        assert_roi_matches_full_rgba16(&roi_rgba16, &rgba16, roi);
+        assert_eq!(
+            out_of_bounds_roi_decoder.decode(&encoded_bytes),
+            Err(Error::InvalidCodestream("decode region is outside image"))
+        );
+        assert_eq!(
+            out_of_bounds_roi_decoder.decode_rgba8(&encoded_bytes),
+            Err(Error::InvalidCodestream("decode region is outside image"))
+        );
+        assert_eq!(
+            out_of_bounds_roi_decoder.decode_rgba16(&encoded_bytes),
+            Err(Error::InvalidCodestream("decode region is outside image"))
         );
     }
 
