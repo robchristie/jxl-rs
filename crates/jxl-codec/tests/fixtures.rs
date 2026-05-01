@@ -2178,6 +2178,301 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
 }
 
 #[test]
+fn generated_vardct_xyb_inverse_variants_compare_against_oracle_when_available() {
+    let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+        eprintln!("skipping generated VarDCT XYB inverse sweep; reference tools are not built");
+        return;
+    };
+
+    let cases: &[(&str, &[&str])] = &[
+        ("default", &["-d", "1.0", "-m", "0", "--container=0"]),
+        (
+            "intensity510",
+            &[
+                "-d",
+                "1.0",
+                "-m",
+                "0",
+                "--container=0",
+                "--intensity_target=510",
+            ],
+        ),
+        (
+            "no_gaborish",
+            &["-d", "1.0", "-m", "0", "--container=0", "--gaborish=0"],
+        ),
+        (
+            "epf3",
+            &["-d", "1.0", "-m", "0", "--container=0", "--epf=3"],
+        ),
+        (
+            "epf0",
+            &["-d", "1.0", "-m", "0", "--container=0", "--epf=0"],
+        ),
+    ];
+
+    let mut sweep = Vec::new();
+    for (case, args) in cases {
+        let input_prefix = format!("jxl-rs-vardct-xyb-{case}-source");
+        let encoded_prefix = format!("jxl-rs-vardct-xyb-{case}");
+        let reference_prefix = format!("jxl-rs-vardct-xyb-{case}-reference");
+        let input = unique_temp_path(&input_prefix, "ppm");
+        let encoded = unique_temp_path(&encoded_prefix, "jxl");
+        let reference_output = unique_temp_path(&reference_prefix, "ppm");
+        write_split_vardct_source_ppm(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(*args)
+            .arg("--quiet")
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed for {case}: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let djxl_output = Command::new(&djxl)
+            .arg(&encoded)
+            .arg(&reference_output)
+            .arg("--quiet")
+            .output()
+            .unwrap();
+        assert!(
+            djxl_output.status.success(),
+            "reference djxl failed for {case}: {}",
+            String::from_utf8_lossy(&djxl_output.stderr)
+        );
+        let reference = std::fs::read(&reference_output).unwrap();
+        let reference = parse_ppm_rgb(&reference);
+        let _ = std::fs::remove_file(&reference_output);
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+        let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+        let variants = vardct_xyb_inverse_variant_diagnostics(plan)
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .map(|diagnostics| {
+                let metrics = srgb8_oracle_metrics(&diagnostics.srgb8, &reference, &[]);
+                (
+                    diagnostics.variant,
+                    diagnostics.rgb_channels[2].negative_samples,
+                    diagnostics.rgb_channels[2].above_one_samples,
+                    metrics.max_abs_error,
+                    metrics.sum_abs_error,
+                    metrics.checksum,
+                )
+            })
+            .collect::<Vec<_>>();
+        sweep.push((*case, variants));
+    }
+
+    assert_eq!(
+        sweep,
+        vec![
+            (
+                "default",
+                vec![
+                    (
+                        VarDctXybInverseVariant::Current,
+                        61343,
+                        0,
+                        255,
+                        13432857,
+                        16084947495213242878,
+                    ),
+                    (
+                        VarDctXybInverseVariant::BPlusBias,
+                        61440,
+                        0,
+                        255,
+                        13498272,
+                        16896813426672388648,
+                    ),
+                    (
+                        VarDctXybInverseVariant::NegBMinusBias,
+                        61373,
+                        0,
+                        255,
+                        13423127,
+                        7315749054627243831,
+                    ),
+                    (
+                        VarDctXybInverseVariant::NegBPlusBias,
+                        61440,
+                        0,
+                        255,
+                        13481195,
+                        17150958906575354849,
+                    ),
+                ],
+            ),
+            (
+                "intensity510",
+                vec![
+                    (
+                        VarDctXybInverseVariant::Current,
+                        61382,
+                        0,
+                        255,
+                        13881010,
+                        16638335618079846766,
+                    ),
+                    (
+                        VarDctXybInverseVariant::BPlusBias,
+                        61440,
+                        0,
+                        255,
+                        13925043,
+                        10245945764686711697,
+                    ),
+                    (
+                        VarDctXybInverseVariant::NegBMinusBias,
+                        61372,
+                        0,
+                        255,
+                        13869402,
+                        13762079880043813700,
+                    ),
+                    (
+                        VarDctXybInverseVariant::NegBPlusBias,
+                        61440,
+                        0,
+                        255,
+                        13911946,
+                        3313982918017741945,
+                    ),
+                ],
+            ),
+            (
+                "no_gaborish",
+                vec![
+                    (
+                        VarDctXybInverseVariant::Current,
+                        61349,
+                        0,
+                        255,
+                        13888613,
+                        12799347294171503985,
+                    ),
+                    (
+                        VarDctXybInverseVariant::BPlusBias,
+                        61440,
+                        0,
+                        255,
+                        13909337,
+                        14279669750713412069,
+                    ),
+                    (
+                        VarDctXybInverseVariant::NegBMinusBias,
+                        61229,
+                        0,
+                        255,
+                        13878896,
+                        6443755003065423493,
+                    ),
+                    (
+                        VarDctXybInverseVariant::NegBPlusBias,
+                        61440,
+                        0,
+                        255,
+                        13901150,
+                        13232571994213848623,
+                    ),
+                ],
+            ),
+            (
+                "epf3",
+                vec![
+                    (
+                        VarDctXybInverseVariant::Current,
+                        61286,
+                        0,
+                        255,
+                        13428871,
+                        10086884591179215222,
+                    ),
+                    (
+                        VarDctXybInverseVariant::BPlusBias,
+                        61440,
+                        0,
+                        255,
+                        13494472,
+                        1470654536382225335,
+                    ),
+                    (
+                        VarDctXybInverseVariant::NegBMinusBias,
+                        61349,
+                        0,
+                        255,
+                        13418276,
+                        11072272105224510651,
+                    ),
+                    (
+                        VarDctXybInverseVariant::NegBPlusBias,
+                        61440,
+                        0,
+                        255,
+                        13476871,
+                        1576697077026637336,
+                    ),
+                ],
+            ),
+            (
+                "epf0",
+                vec![
+                    (
+                        VarDctXybInverseVariant::Current,
+                        61361,
+                        0,
+                        255,
+                        13434499,
+                        2809378369546915828,
+                    ),
+                    (
+                        VarDctXybInverseVariant::BPlusBias,
+                        61440,
+                        0,
+                        255,
+                        13499991,
+                        17985584951154406610,
+                    ),
+                    (
+                        VarDctXybInverseVariant::NegBMinusBias,
+                        61383,
+                        0,
+                        255,
+                        13425351,
+                        11834436755581518257,
+                    ),
+                    (
+                        VarDctXybInverseVariant::NegBPlusBias,
+                        61440,
+                        0,
+                        255,
+                        13482755,
+                        9330004809503651277,
+                    ),
+                ],
+            ),
+        ]
+    );
+    assert!(sweep.iter().all(|(_, variants)| {
+        variants
+            .iter()
+            .min_by_key(|(_, _, _, _, sum_abs_error, _)| *sum_abs_error)
+            .map(|(variant, _, _, _, _, _)| *variant)
+            == Some(VarDctXybInverseVariant::NegBMinusBias)
+    }));
+}
+
+#[test]
 fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
     let Some(cjxl) = reference_cjxl() else {
         eprintln!("skipping generated progressive-AC VarDCT fixture; reference cjxl is not built");
