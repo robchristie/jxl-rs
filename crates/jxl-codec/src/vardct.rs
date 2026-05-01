@@ -662,6 +662,22 @@ pub fn assemble_vardct_srgb8_image(plan: &VarDctDecodePlan) -> Result<Option<Var
         .map(|image| image.map(|image| vardct_linear_rgb_to_srgb8(&image)))
 }
 
+/// Assembles one VarDCT AC pass and converts it to interleaved sRGB8.
+///
+/// This selects exactly one AC pass and does not merge data from earlier or
+/// later passes. Returns `Ok(None)` when the requested pass has no spatial+DC
+/// grid.
+pub fn assemble_vardct_srgb8_image_for_pass(
+    plan: &VarDctDecodePlan,
+    pass: usize,
+) -> Result<Option<VarDctSrgb8Image>> {
+    assemble_vardct_xyb_image_for_pass(plan, pass).map(|image| {
+        image.map(|image| {
+            vardct_linear_rgb_to_srgb8(&vardct_xyb_to_linear_rgb(&image, &plan.opsin_params))
+        })
+    })
+}
+
 /// Assembles available VarDCT XYB data and converts it to interleaved sRGB16.
 ///
 /// Like `assemble_vardct_srgb8_image`, this is a debugging and fixture-oracle
@@ -669,6 +685,22 @@ pub fn assemble_vardct_srgb8_image(plan: &VarDctDecodePlan) -> Result<Option<Var
 pub fn assemble_vardct_srgb16_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctSrgb16Image>> {
     assemble_vardct_linear_rgb_image(plan)
         .map(|image| image.map(|image| vardct_linear_rgb_to_srgb16(&image)))
+}
+
+/// Assembles one VarDCT AC pass and converts it to interleaved sRGB16.
+///
+/// This selects exactly one AC pass and does not merge data from earlier or
+/// later passes. Returns `Ok(None)` when the requested pass has no spatial+DC
+/// grid.
+pub fn assemble_vardct_srgb16_image_for_pass(
+    plan: &VarDctDecodePlan,
+    pass: usize,
+) -> Result<Option<VarDctSrgb16Image>> {
+    assemble_vardct_xyb_image_for_pass(plan, pass).map(|image| {
+        image.map(|image| {
+            vardct_linear_rgb_to_srgb16(&vardct_xyb_to_linear_rgb(&image, &plan.opsin_params))
+        })
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

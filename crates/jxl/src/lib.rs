@@ -110,6 +110,12 @@ pub struct Decoder {
 pub struct DecodeOptions {
     pub output: DecodeOutput,
     pub roi: Option<Rect>,
+    /// Selects exactly one VarDCT AC pass for public RGB/RGBA output.
+    ///
+    /// `None` uses final VarDCT reconstruction. `Some(pass)` is intended for
+    /// progressive preview-style output and does not merge earlier or later AC
+    /// passes. Modular decode and raw-channel decode reject this option.
+    pub vardct_pass: Option<usize>,
     pub threads: ThreadingMode,
     pub memory_limit: Option<usize>,
 }
@@ -184,6 +190,11 @@ impl Decoder {
         self
     }
 
+    pub fn vardct_pass(mut self, pass: usize) -> Self {
+        self.options.vardct_pass = Some(pass);
+        self
+    }
+
     /// Decodes raw image channels.
     ///
     /// If [`Decoder::roi`] is set, the returned [`DecodedChannels::width`] and
@@ -196,6 +207,9 @@ impl Decoder {
     /// image-space RGB/XYB data rather than original raw channels.
     pub fn decode_channels(&self, input: &[u8]) -> Result<DecodedChannels> {
         self.validate_shared_options()?;
+        if self.options.vardct_pass.is_some() {
+            return Err(Error::Unsupported("VarDCT progressive pass decode"));
+        }
         decode_channels_buffered(input, self.codec_config())
     }
 
@@ -212,7 +226,7 @@ impl Decoder {
     /// [`Error::Unsupported`].
     pub fn decode(&self, input: &[u8]) -> Result<DecodedImage> {
         self.validate_shared_options()?;
-        decode_buffered(input, self.codec_config())
+        decode_buffered(input, self.codec_config(), self.options.vardct_pass)
     }
 
     /// Decodes to interleaved RGBA8.
@@ -228,7 +242,7 @@ impl Decoder {
     /// [`Error::Unsupported`].
     pub fn decode_rgba8(&self, input: &[u8]) -> Result<RgbaImage> {
         self.validate_shared_options()?;
-        decode_rgba8_buffered(input, self.codec_config())
+        decode_rgba8_buffered(input, self.codec_config(), self.options.vardct_pass)
     }
 
     /// Decodes to interleaved RGBA16.
@@ -244,7 +258,7 @@ impl Decoder {
     /// [`Error::Unsupported`].
     pub fn decode_rgba16(&self, input: &[u8]) -> Result<Rgba16Image> {
         self.validate_shared_options()?;
-        decode_rgba16_buffered(input, self.codec_config())
+        decode_rgba16_buffered(input, self.codec_config(), self.options.vardct_pass)
     }
 
     fn validate_shared_options(&self) -> Result<()> {
@@ -399,14 +413,20 @@ fn decode_channels_codestream(
     })
 }
 
-fn decode_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<DecodedImage> {
+fn decode_buffered(
+    input: &[u8],
+    config: jxl_codec::DecodeConfig,
+    vardct_pass: Option<usize>,
+) -> Result<DecodedImage> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
         return decoded_image_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
             &codestream,
             config.region,
+            vardct_pass,
         )?);
     }
+    reject_vardct_pass_for_non_vardct(vardct_pass)?;
 
     decode_buffered_codestream(codestream)
 }
@@ -451,14 +471,20 @@ fn decode_buffered_channels(channels: DecodedChannels) -> Result<DecodedImage> {
     }
 }
 
-fn decode_rgba8_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<RgbaImage> {
+fn decode_rgba8_buffered(
+    input: &[u8],
+    config: jxl_codec::DecodeConfig,
+    vardct_pass: Option<usize>,
+) -> Result<RgbaImage> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
         return rgba8_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
             &codestream,
             config.region,
+            vardct_pass,
         )?);
     }
+    reject_vardct_pass_for_non_vardct(vardct_pass)?;
 
     rgba8_from_modular_codestream(codestream)
 }
@@ -517,23 +543,34 @@ fn decoded_image_from_vardct_srgb8(image: jxl_codec::VarDctSrgb8Image) -> Result
 fn vardct_srgb8_image_from_codestream(
     codestream: &jxl_codec::Codestream,
     region: Option<jxl_codec::ImageRegion>,
+    pass: Option<usize>,
 ) -> Result<jxl_codec::VarDctSrgb8Image> {
-    let mut image = jxl_codec::assemble_vardct_srgb8_image(first_frame_vardct_plan(codestream)?)?
-        .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+    let plan = first_frame_vardct_plan(codestream)?;
+    let mut image = match pass {
+        Some(pass) => jxl_codec::assemble_vardct_srgb8_image_for_pass(plan, pass)?,
+        None => jxl_codec::assemble_vardct_srgb8_image(plan)?,
+    }
+    .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
     if let Some(region) = region {
         image = crop_vardct_srgb8(image, region)?;
     }
     Ok(image)
 }
 
-fn decode_rgba16_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<Rgba16Image> {
+fn decode_rgba16_buffered(
+    input: &[u8],
+    config: jxl_codec::DecodeConfig,
+    vardct_pass: Option<usize>,
+) -> Result<Rgba16Image> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
         return rgba16_from_vardct_srgb16(vardct_srgb16_image_from_codestream(
             &codestream,
             config.region,
+            vardct_pass,
         )?);
     }
+    reject_vardct_pass_for_non_vardct(vardct_pass)?;
 
     rgba16_from_modular_codestream(codestream)
 }
@@ -576,13 +613,25 @@ fn rgba16_from_vardct_srgb16(image: jxl_codec::VarDctSrgb16Image) -> Result<Rgba
 fn vardct_srgb16_image_from_codestream(
     codestream: &jxl_codec::Codestream,
     region: Option<jxl_codec::ImageRegion>,
+    pass: Option<usize>,
 ) -> Result<jxl_codec::VarDctSrgb16Image> {
-    let mut image = jxl_codec::assemble_vardct_srgb16_image(first_frame_vardct_plan(codestream)?)?
-        .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+    let plan = first_frame_vardct_plan(codestream)?;
+    let mut image = match pass {
+        Some(pass) => jxl_codec::assemble_vardct_srgb16_image_for_pass(plan, pass)?,
+        None => jxl_codec::assemble_vardct_srgb16_image(plan)?,
+    }
+    .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
     if let Some(region) = region {
         image = crop_vardct_srgb16(image, region)?;
     }
     Ok(image)
+}
+
+fn reject_vardct_pass_for_non_vardct(pass: Option<usize>) -> Result<()> {
+    if pass.is_some() {
+        return Err(Error::Unsupported("VarDCT progressive pass decode"));
+    }
+    Ok(())
 }
 
 fn crop_vardct_srgb8(
@@ -1028,6 +1077,7 @@ mod tests {
 
         assert_eq!(decoder.options().output, DecodeOutput::Channels);
         assert_eq!(decoder.options().roi, None);
+        assert_eq!(decoder.options().vardct_pass, None);
         assert_eq!(decoder.options().threads, ThreadingMode::Auto);
         assert_eq!(decoder.options().memory_limit, None);
     }
@@ -1073,6 +1123,24 @@ mod tests {
         assert_eq!(
             zero_threads_decoder.decode_rgba8(&bytes),
             Err(Error::Unsupported("zero decoder threads"))
+        );
+
+        let vardct_pass_decoder = Decoder::new().vardct_pass(0);
+        assert_eq!(
+            vardct_pass_decoder.decode_channels(&bytes),
+            Err(Error::Unsupported("VarDCT progressive pass decode"))
+        );
+        assert_eq!(
+            vardct_pass_decoder.decode(&bytes),
+            Err(Error::Unsupported("VarDCT progressive pass decode"))
+        );
+        assert_eq!(
+            vardct_pass_decoder.decode_rgba8(&bytes),
+            Err(Error::Unsupported("VarDCT progressive pass decode"))
+        );
+        assert_eq!(
+            vardct_pass_decoder.decode_rgba16(&bytes),
+            Err(Error::Unsupported("VarDCT progressive pass decode"))
         );
 
         let out_of_bounds_roi_decoder = Decoder::new().roi(Rect {
@@ -1405,7 +1473,15 @@ mod tests {
         let cjxl_output = Command::new(&cjxl)
             .arg(&input)
             .arg(&encoded)
-            .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+            .args([
+                "-d",
+                "1.0",
+                "-m",
+                "0",
+                "--container=0",
+                "--progressive_ac",
+                "--quiet",
+            ])
             .output()
             .unwrap();
         let _ = std::fs::remove_file(&input);
@@ -1451,6 +1527,24 @@ mod tests {
         let roi_decoded = roi_decoder.decode(&encoded_bytes).unwrap();
         let roi_rgba = roi_decoder.decode_rgba8(&encoded_bytes).unwrap();
         let roi_rgba16 = roi_decoder.decode_rgba16(&encoded_bytes).unwrap();
+        let pass0_decoded = Decoder::new()
+            .vardct_pass(0)
+            .decode(&encoded_bytes)
+            .unwrap();
+        let pass0_rgba = Decoder::new()
+            .vardct_pass(0)
+            .decode_rgba8(&encoded_bytes)
+            .unwrap();
+        let pass0_rgba16 = Decoder::new()
+            .vardct_pass(0)
+            .decode_rgba16(&encoded_bytes)
+            .unwrap();
+        let pass0_roi = Decoder::new()
+            .vardct_pass(0)
+            .roi(roi)
+            .decode(&encoded_bytes)
+            .unwrap();
+        let missing_pass_decoder = Decoder::new().vardct_pass(99);
 
         assert_eq!(decoded.width, 320);
         assert_eq!(decoded.height, 192);
@@ -1467,6 +1561,12 @@ mod tests {
                 .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
         );
         assert_roi_matches_full_image(&roi_decoded, &decoded, roi);
+        assert_eq!(pass0_decoded.width, 320);
+        assert_eq!(pass0_decoded.height, 192);
+        assert_eq!(pass0_decoded.color_channels, 3);
+        assert_eq!(pass0_decoded.alpha, None);
+        assert_eq!(pass0_decoded.bit_depth, 8);
+        assert_roi_matches_full_image(&pass0_roi, &pass0_decoded, roi);
 
         assert_eq!(rgba.width, 320);
         assert_eq!(rgba.height, 192);
@@ -1478,6 +1578,15 @@ mod tests {
                 .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
         );
         assert_roi_matches_full_rgba8(&roi_rgba, &rgba, roi);
+        assert_eq!(pass0_rgba.width, 320);
+        assert_eq!(pass0_rgba.height, 192);
+        assert_eq!(pass0_rgba.pixels.len(), 320 * 192 * 4);
+        assert!(
+            pass0_rgba
+                .pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel[3] == 255)
+        );
 
         assert_eq!(rgba16.width, 320);
         assert_eq!(rgba16.height, 192);
@@ -1495,6 +1604,15 @@ mod tests {
                 .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
         );
         assert_roi_matches_full_rgba16(&roi_rgba16, &rgba16, roi);
+        assert_eq!(pass0_rgba16.width, 320);
+        assert_eq!(pass0_rgba16.height, 192);
+        assert_eq!(pass0_rgba16.pixels.len(), 320 * 192 * 4);
+        assert!(
+            pass0_rgba16
+                .pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel[3] == u16::MAX)
+        );
         assert_eq!(
             out_of_bounds_roi_decoder.decode(&encoded_bytes),
             Err(Error::InvalidCodestream("decode region is outside image"))
@@ -1506,6 +1624,18 @@ mod tests {
         assert_eq!(
             out_of_bounds_roi_decoder.decode_rgba16(&encoded_bytes),
             Err(Error::InvalidCodestream("decode region is outside image"))
+        );
+        assert_eq!(
+            missing_pass_decoder.decode(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT image reconstruction"))
+        );
+        assert_eq!(
+            missing_pass_decoder.decode_rgba8(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT image reconstruction"))
+        );
+        assert_eq!(
+            missing_pass_decoder.decode_rgba16(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT image reconstruction"))
         );
     }
 
