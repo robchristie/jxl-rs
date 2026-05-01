@@ -329,30 +329,36 @@ fn parse_file_for_public_pixel_decode(
 ) -> Result<(jxl_codec::ExtractedCodestream, jxl_codec::Codestream)> {
     if config.region.is_some() {
         let parsed = jxl_codec::parse_file(input)?;
-        let frame = parsed
-            .1
-            .first_frame
-            .as_ref()
-            .ok_or(Error::Unsupported("image has no decoded frame"))?;
-        if frame.encoding == FrameEncoding::VarDct {
+        if first_frame_encoding(&parsed.1)? == FrameEncoding::VarDct {
             return Ok(parsed);
         }
     }
     jxl_codec::parse_file_with_config(input, config)
 }
 
+fn first_frame_encoding(codestream: &jxl_codec::Codestream) -> Result<FrameEncoding> {
+    if codestream.basic_info.have_animation {
+        return Err(Error::Unsupported("animated image decode"));
+    }
+    Ok(codestream
+        .first_frame
+        .as_ref()
+        .ok_or(Error::Unsupported("image has no decoded frame"))?
+        .encoding)
+}
+
+fn first_frame_vardct_plan(codestream: &jxl_codec::Codestream) -> Result<&VarDctDecodePlan> {
+    codestream
+        .first_frame_vardct_plan
+        .as_ref()
+        .ok_or(Error::Unsupported("VarDCT image reconstruction"))
+}
+
 fn decode_channels_codestream(
     codestream: jxl_codec::Codestream,
     region_requested: bool,
 ) -> Result<DecodedChannels> {
-    if codestream.basic_info.have_animation {
-        return Err(Error::Unsupported("animated image decode"));
-    }
-    let frame = codestream
-        .first_frame
-        .as_ref()
-        .ok_or(Error::Unsupported("image has no decoded frame"))?;
-    if frame.encoding != FrameEncoding::Modular {
+    if first_frame_encoding(&codestream)? != FrameEncoding::Modular {
         return Err(Error::Unsupported("VarDCT image decode"));
     }
     let modular = codestream
@@ -395,24 +401,11 @@ fn decode_channels_codestream(
 
 fn decode_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<DecodedImage> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
-    if codestream.basic_info.have_animation {
-        return Err(Error::Unsupported("animated image decode"));
-    }
-    let frame = codestream
-        .first_frame
-        .as_ref()
-        .ok_or(Error::Unsupported("image has no decoded frame"))?;
-    if frame.encoding == FrameEncoding::VarDct {
-        let plan = codestream
-            .first_frame_vardct_plan
-            .as_ref()
-            .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
-        let mut image = jxl_codec::assemble_vardct_srgb8_image(plan)?
-            .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
-        if let Some(region) = config.region {
-            image = crop_vardct_srgb8(image, region)?;
-        }
-        return decoded_image_from_vardct_srgb8(image);
+    if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
+        return decoded_image_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
+            &codestream,
+            config.region,
+        )?);
     }
 
     decode_buffered_codestream(codestream)
@@ -460,24 +453,11 @@ fn decode_buffered_channels(channels: DecodedChannels) -> Result<DecodedImage> {
 
 fn decode_rgba8_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<RgbaImage> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
-    if codestream.basic_info.have_animation {
-        return Err(Error::Unsupported("animated image decode"));
-    }
-    let frame = codestream
-        .first_frame
-        .as_ref()
-        .ok_or(Error::Unsupported("image has no decoded frame"))?;
-    if frame.encoding == FrameEncoding::VarDct {
-        let plan = codestream
-            .first_frame_vardct_plan
-            .as_ref()
-            .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
-        let mut image = jxl_codec::assemble_vardct_srgb8_image(plan)?
-            .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
-        if let Some(region) = config.region {
-            image = crop_vardct_srgb8(image, region)?;
-        }
-        return rgba8_from_vardct_srgb8(image);
+    if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
+        return rgba8_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
+            &codestream,
+            config.region,
+        )?);
     }
 
     rgba8_from_modular_codestream(codestream)
@@ -534,26 +514,25 @@ fn decoded_image_from_vardct_srgb8(image: jxl_codec::VarDctSrgb8Image) -> Result
     })
 }
 
+fn vardct_srgb8_image_from_codestream(
+    codestream: &jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+) -> Result<jxl_codec::VarDctSrgb8Image> {
+    let mut image = jxl_codec::assemble_vardct_srgb8_image(first_frame_vardct_plan(codestream)?)?
+        .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+    if let Some(region) = region {
+        image = crop_vardct_srgb8(image, region)?;
+    }
+    Ok(image)
+}
+
 fn decode_rgba16_buffered(input: &[u8], config: jxl_codec::DecodeConfig) -> Result<Rgba16Image> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
-    if codestream.basic_info.have_animation {
-        return Err(Error::Unsupported("animated image decode"));
-    }
-    let frame = codestream
-        .first_frame
-        .as_ref()
-        .ok_or(Error::Unsupported("image has no decoded frame"))?;
-    if frame.encoding == FrameEncoding::VarDct {
-        let plan = codestream
-            .first_frame_vardct_plan
-            .as_ref()
-            .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
-        let mut image = jxl_codec::assemble_vardct_srgb16_image(plan)?
-            .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
-        if let Some(region) = config.region {
-            image = crop_vardct_srgb16(image, region)?;
-        }
-        return rgba16_from_vardct_srgb16(image);
+    if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
+        return rgba16_from_vardct_srgb16(vardct_srgb16_image_from_codestream(
+            &codestream,
+            config.region,
+        )?);
     }
 
     rgba16_from_modular_codestream(codestream)
@@ -592,6 +571,18 @@ fn rgba16_from_vardct_srgb16(image: jxl_codec::VarDctSrgb16Image) -> Result<Rgba
         height: image.height,
         pixels,
     })
+}
+
+fn vardct_srgb16_image_from_codestream(
+    codestream: &jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+) -> Result<jxl_codec::VarDctSrgb16Image> {
+    let mut image = jxl_codec::assemble_vardct_srgb16_image(first_frame_vardct_plan(codestream)?)?
+        .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+    if let Some(region) = region {
+        image = crop_vardct_srgb16(image, region)?;
+    }
+    Ok(image)
 }
 
 fn crop_vardct_srgb8(
