@@ -32,13 +32,18 @@ decoder needs:
 - A first modular residual token decoder for planned group channels, including
   weighted predictor properties/state and sample decoding for simple modular
   fixtures such as `pq_gradient.jxl`.
-- A small public inspection API through the `jxl` crate.
+- A small public inspection and still-image decode API through the `jxl` crate,
+  including modular raw channel output, modular RGB/RGBA output, and supported
+  VarDCT RGB/RGBA output with post-reconstruction ROI cropping and progressive
+  AC pass selection.
 - A `jxlinfo-rs` CLI for metadata inspection.
+- A `jxl-decode-rs` CLI for supported still-image decode to RGBA PAM.
 - Fixture tests against `reference/libjxl/testdata`, with optional comparison
   to the built libjxl `jxlinfo` reference tool.
 
-Pixel reconstruction is not implemented yet. The next decoder slices should add
-modular inverse transforms and raw channel assembly, then VarDCT.
+The decoder remains incomplete. Current VarDCT output is a reconstruction
+convenience path and does not yet implement full JPEG XL color management,
+orientation handling, low-memory ROI, animation, or JPEG reconstruction.
 
 ## Workspace
 
@@ -53,6 +58,42 @@ modular inverse transforms and raw channel assembly, then VarDCT.
 ```sh
 cargo run -p jxl-cli --bin jxlinfo-rs -- reference/libjxl/testdata/jxl/splines.jxl
 ```
+
+Decode a supported still image to RGBA PAM, 8-bit by default:
+
+```sh
+cargo run -p jxl-cli --bin jxl-decode-rs -- input.jxl output.pam
+```
+
+Decode 16-bit RGBA PAM:
+
+```sh
+cargo run -p jxl-cli --bin jxl-decode-rs -- input.jxl output.pam --rgba16
+```
+
+Decode a region of interest:
+
+```sh
+cargo run -p jxl-cli --bin jxl-decode-rs -- input.jxl output.pam --roi 10,20,320,240
+```
+
+Write PAM to stdout for pipelines:
+
+```sh
+cargo run -p jxl-cli --bin jxl-decode-rs -- input.jxl - --roi 10,20,320,240 > crop.pam
+```
+
+For VarDCT images with progressive AC passes, select exactly one AC pass for
+preview-style RGB/RGBA output:
+
+```sh
+cargo run -p jxl-cli --bin jxl-decode-rs -- input.jxl preview.pam --vardct-pass 0
+```
+
+`--vardct-pass` is only valid for VarDCT RGB/RGBA output. It does not merge
+earlier or later progressive passes. Output from `jxl-decode-rs` is always RGBA
+PAM; use `--rgba8`/`--bits 8` for 8-bit samples and `--rgba16`/`--bits 16` for
+16-bit samples.
 
 ## Reference Tools
 

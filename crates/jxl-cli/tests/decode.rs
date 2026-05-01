@@ -87,6 +87,32 @@ fn decode_cli_writes_roi_with_rgba8_alias() {
 }
 
 #[test]
+fn decode_cli_writes_roi_to_stdout() {
+    let input = workspace_path("crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_jxl-decode-rs"))
+        .arg(&input)
+        .arg("-")
+        .args(["--roi", "5,7,11,9"])
+        .output()
+        .unwrap();
+
+    assert!(
+        result.status.success(),
+        "jxl-decode-rs failed: {}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(result.stderr, b"");
+    assert!(result.stdout.starts_with(b"P7\nWIDTH 11\nHEIGHT 9\n"));
+
+    let pam = parse_pam_rgba(&result.stdout);
+    assert_eq!(pam.width, 11);
+    assert_eq!(pam.height, 9);
+    assert_eq!(pam.maxval, 255);
+    assert_eq!(pam.samples.len(), 11 * 9 * 4);
+}
+
+#[test]
 fn decode_cli_rejects_vardct_pass_for_modular_image() {
     let input = workspace_path("crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl");
     let output = unique_temp_path("jxl-cli-decode-vardct-pass-modular", "pam");

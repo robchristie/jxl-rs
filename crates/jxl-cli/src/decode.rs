@@ -7,7 +7,7 @@ use std::{
 use clap::{Parser, ValueEnum};
 
 #[derive(Debug, Parser)]
-#[command(about = "Decode supported JPEG XL still images to raw RGBA PAM")]
+#[command(about = "Decode supported JPEG XL still images to RGBA PAM")]
 struct Args {
     /// JPEG XL file to decode.
     input: PathBuf,
