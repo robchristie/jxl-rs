@@ -648,7 +648,7 @@ pub fn assemble_vardct_xyb_image_for_pass(
 /// group using the parsed DC coefficients and zero AC coefficients, then applies
 /// the same loop filters as `assemble_vardct_xyb_image`.
 pub fn assemble_vardct_dc_xyb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
-    let mut image = assemble_vardct_xyb_image_dc_only(plan, 1.0)?;
+    let mut image = assemble_vardct_xyb_image_dc_only(plan, 8.0)?;
     if let Some(image) = image.as_mut() {
         apply_vardct_gaborish(image, &plan.loop_filter);
         if plan.loop_filter.epf_iters >= 1 {
@@ -3718,7 +3718,7 @@ fn spatialize_vardct_ac_grid(
     metadata: &VarDctAcGroupMetadata,
     dc_groups: &[VarDctDcGroupMetadata],
 ) -> Result<VarDctAcSpatialGrid> {
-    spatialize_vardct_ac_grid_with_dc_multiplier(grid, global, metadata, dc_groups, 1.0)
+    spatialize_vardct_ac_grid_with_dc_multiplier(grid, global, metadata, dc_groups, 8.0)
 }
 
 fn spatialize_vardct_ac_grid_with_dc_multiplier(
