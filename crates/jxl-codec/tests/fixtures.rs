@@ -7,9 +7,10 @@ use std::{
 use jxl_codec::{
     BlendMode, ColorSpace, ColorTransform, DecodeConfig, ExtraChannelType, FileFormat,
     FrameEncoding, FrameSectionKind, FrameType, ImageRegion, ModularGroupExecution,
-    TransferFunction, TransformId, VarDctSrgb8Image, assemble_vardct_linear_rgb_image,
-    assemble_vardct_srgb8_image, assemble_vardct_srgb8_image_for_pass, assemble_vardct_xyb_image,
-    parse_file, parse_file_with_config,
+    TransferFunction, TransformId, VarDctSrgb8Image, assemble_vardct_dc_srgb8_image,
+    assemble_vardct_dc_xyb_image, assemble_vardct_linear_rgb_image, assemble_vardct_srgb8_image,
+    assemble_vardct_srgb8_image_for_pass, assemble_vardct_xyb_image, parse_file,
+    parse_file_with_config,
 };
 
 #[test]
@@ -861,6 +862,27 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             3082885028, 979023853, 3128313927, 942663329, 1037195995, 991994853
         ]
     );
+    let dc_xyb_image = assemble_vardct_dc_xyb_image(plan).unwrap().unwrap();
+    assert_eq!(dc_xyb_image.width, 320);
+    assert_eq!(dc_xyb_image.height, 192);
+    assert_eq!(dc_xyb_image.groups_assembled, 2);
+    assert_eq!(dc_xyb_image.groups_missing, 0);
+    let dc_xyb_summary = float_channel_summary(&dc_xyb_image.channels);
+    let dc_xyb_anchors = float_channel_corner_anchors(&dc_xyb_image.channels, dc_xyb_image.width);
+    assert_eq!(
+        dc_xyb_summary,
+        vec![
+            (59655, 16885286105860934924),
+            (59679, 14199208036457300590),
+            (59576, 17882600085377345369),
+        ]
+    );
+    assert_eq!(
+        dc_xyb_anchors,
+        [
+            3082885028, 988896654, 3108050852, 955342222, 1036979162, 982569403
+        ]
+    );
     let rgb_image = assemble_vardct_linear_rgb_image(plan).unwrap().unwrap();
     assert_eq!(rgb_image.width, 320);
     assert_eq!(rgb_image.height, 192);
@@ -924,6 +946,25 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(
         metrics.reference_anchors,
         vec![0, 1, 1, 125, 128, 124, 253, 255, 255]
+    );
+    let dc_srgb8_image = assemble_vardct_dc_srgb8_image(plan).unwrap().unwrap();
+    let dc_metrics = srgb8_oracle_metrics(&dc_srgb8_image, &reference, &anchor_indices);
+    let dc_summary = srgb8_image_summary(&dc_srgb8_image);
+    assert_eq!(dc_metrics.max_abs_error, 255);
+    assert_eq!(dc_metrics.sum_abs_error, 20234555);
+    assert_eq!(dc_metrics.checksum, 10756140538219977864);
+    assert_eq!(dc_metrics.anchors, vec![0, 1, 0, 15, 14, 0, 34, 33, 0]);
+    assert_eq!(
+        dc_metrics.reference_anchors,
+        vec![0, 1, 1, 125, 128, 124, 253, 255, 255]
+    );
+    assert_eq!(
+        dc_summary,
+        (
+            118853,
+            10756140538219977864,
+            vec![0, 1, 0, 10, 20, 0, 34, 33, 0],
+        )
     );
     assert_eq!(dequantized_grid.group, 0);
     assert_eq!(dequantized_grid.pass, 0);

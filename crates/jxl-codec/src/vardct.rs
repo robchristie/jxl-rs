@@ -642,6 +642,24 @@ pub fn assemble_vardct_xyb_image_for_pass(
     Ok(image)
 }
 
+/// Assembles a DC-only VarDCT XYB image.
+///
+/// This is a reconstruction diagnostic helper. It spatializes each final AC
+/// group using the parsed DC coefficients and zero AC coefficients, then applies
+/// the same loop filters as `assemble_vardct_xyb_image`.
+pub fn assemble_vardct_dc_xyb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
+    let mut image = assemble_vardct_xyb_image_dc_only(plan)?;
+    if let Some(image) = image.as_mut() {
+        apply_vardct_gaborish(image, &plan.loop_filter);
+        if plan.loop_filter.epf_iters >= 1 {
+            if let Some(epf) = plan.epf_metadata.as_ref() {
+                apply_vardct_epf(image, &plan.loop_filter, epf);
+            }
+        }
+    }
+    Ok(image)
+}
+
 /// Assembles available VarDCT XYB data and converts it to linear RGB.
 ///
 /// This is intentionally still an internal reconstruction stage: it applies the
@@ -672,6 +690,15 @@ pub fn assemble_vardct_srgb8_image_for_pass(
     pass: usize,
 ) -> Result<Option<VarDctSrgb8Image>> {
     assemble_vardct_xyb_image_for_pass(plan, pass).map(|image| {
+        image.map(|image| {
+            vardct_linear_rgb_to_srgb8(&vardct_xyb_to_linear_rgb(&image, &plan.opsin_params))
+        })
+    })
+}
+
+/// Assembles DC-only VarDCT XYB data and converts it to interleaved sRGB8.
+pub fn assemble_vardct_dc_srgb8_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctSrgb8Image>> {
+    assemble_vardct_dc_xyb_image(plan).map(|image| {
         image.map(|image| {
             vardct_linear_rgb_to_srgb8(&vardct_xyb_to_linear_rgb(&image, &plan.opsin_params))
         })
@@ -1180,6 +1207,69 @@ fn assemble_vardct_xyb_image_final(plan: &VarDctDecodePlan) -> Result<Option<Var
     }
 
     Ok((image.groups_assembled > 0).then_some(image))
+}
+
+fn assemble_vardct_xyb_image_dc_only(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
+    let sample_len = (plan.frame.width as usize)
+        .checked_mul(plan.frame.height as usize)
+        .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
+    let mut image = VarDctXybImage {
+        width: plan.frame.width,
+        height: plan.frame.height,
+        groups_assembled: 0,
+        groups_missing: 0,
+        channels: [
+            vec![0.0; sample_len],
+            vec![0.0; sample_len],
+            vec![0.0; sample_len],
+        ],
+    };
+
+    for metadata in final_vardct_ac_passes_by_group(&plan.ac_group_metadata) {
+        let Some(grid) = dc_only_spatial_grid_for_group(plan, metadata)? else {
+            image.groups_missing += 1;
+            continue;
+        };
+        if grid.group != metadata.payload.group.group
+            || grid.width_blocks != metadata.payload.group.width.div_ceil(8) as usize
+            || grid.height_blocks != metadata.payload.group.height.div_ceil(8) as usize
+        {
+            return Err(Error::InvalidCodestream("invalid VarDCT spatial grid"));
+        }
+        copy_vardct_spatial_group_to_image(&grid, metadata.payload.group, &mut image)?;
+        image.groups_assembled += 1;
+    }
+
+    Ok((image.groups_assembled > 0).then_some(image))
+}
+
+fn dc_only_spatial_grid_for_group(
+    plan: &VarDctDecodePlan,
+    metadata: &VarDctAcGroupMetadata,
+) -> Result<Option<VarDctAcSpatialGrid>> {
+    let Some(global) = plan.global.as_ref() else {
+        return Ok(None);
+    };
+    let width_blocks = metadata.payload.group.width.div_ceil(8) as usize;
+    let height_blocks = metadata.payload.group.height.div_ceil(8) as usize;
+    let coefficient_len = width_blocks
+        .checked_mul(height_blocks)
+        .and_then(|blocks| blocks.checked_mul(DCT_BLOCK_SIZE))
+        .ok_or(Error::InvalidCodestream(
+            "AC group coefficient grid is too large",
+        ))?;
+    let zero_ac = VarDctAcDequantizedGrid {
+        group: metadata.payload.group.group,
+        pass: metadata.payload.pass,
+        width_blocks,
+        height_blocks,
+        per_channel: [
+            VarDctAcDequantizedChannelGrid::new(coefficient_len),
+            VarDctAcDequantizedChannelGrid::new(coefficient_len),
+            VarDctAcDequantizedChannelGrid::new(coefficient_len),
+        ],
+    };
+    spatialize_vardct_ac_grid(&zero_ac, Some(global), metadata, &plan.dc_group_metadata).map(Some)
 }
 
 fn final_vardct_spatial_grid_for_group(

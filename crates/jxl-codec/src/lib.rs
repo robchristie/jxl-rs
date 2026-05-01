@@ -67,8 +67,9 @@ pub use vardct::{
     VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata, VarDctHistogramProbeStage,
     VarDctOpsinParams, VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata,
     VarDctQuantizerMetadata, VarDctRgbImage, VarDctSectionMetadata, VarDctSectionPayloadMetadata,
-    VarDctSrgb8Image, VarDctSrgb16Image, VarDctXybImage, assemble_vardct_linear_rgb_image,
-    assemble_vardct_srgb8_image, assemble_vardct_srgb8_image_for_pass,
-    assemble_vardct_srgb16_image, assemble_vardct_srgb16_image_for_pass, assemble_vardct_xyb_image,
+    VarDctSrgb8Image, VarDctSrgb16Image, VarDctXybImage, assemble_vardct_dc_srgb8_image,
+    assemble_vardct_dc_xyb_image, assemble_vardct_linear_rgb_image, assemble_vardct_srgb8_image,
+    assemble_vardct_srgb8_image_for_pass, assemble_vardct_srgb16_image,
+    assemble_vardct_srgb16_image_for_pass, assemble_vardct_xyb_image,
     assemble_vardct_xyb_image_for_pass,
 };
