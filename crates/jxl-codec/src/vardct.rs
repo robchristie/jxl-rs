@@ -585,6 +585,21 @@ pub struct VarDctXybRgbDiagnostics {
     pub rgb_channels: [VarDctChannelRangeDiagnostics; 3],
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarDctXybInverseVariant {
+    Current,
+    BPlusBias,
+    NegBMinusBias,
+    NegBPlusBias,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctXybInverseVariantDiagnostics {
+    pub variant: VarDctXybInverseVariant,
+    pub rgb_channels: [VarDctChannelRangeDiagnostics; 3],
+    pub srgb8: VarDctSrgb8Image,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarDctSrgb8Image {
     pub width: u32,
@@ -726,8 +741,8 @@ pub fn assemble_vardct_dc_srgb8_image(plan: &VarDctDecodePlan) -> Result<Option<
 /// Evaluates DC-only reconstruction with an alternate DC coefficient multiplier.
 ///
 /// This is a diagnostic helper for checking the normalization boundary between
-/// parsed VarDCT DC coefficients and inverse DCT spatialization. A multiplier of
-/// `1.0` is equivalent to `assemble_vardct_dc_srgb8_image`.
+/// parsed VarDCT DC coefficients and inverse DCT spatialization. A multiplier
+/// of `8.0` is equivalent to `assemble_vardct_dc_srgb8_image`.
 pub fn assemble_vardct_dc_srgb8_image_with_multiplier(
     plan: &VarDctDecodePlan,
     dc_multiplier: f32,
@@ -771,6 +786,40 @@ pub fn vardct_xyb_rgb_diagnostics(
             channel_range_diagnostics(&rgb.channels[channel])
         }),
     }))
+}
+
+/// Evaluates alternate XYB inverse formulas against final VarDCT reconstruction.
+///
+/// This diagnostic keeps production output on `VarDctXybInverseVariant::Current`
+/// while making sign and bias hypotheses measurable against fixture oracles.
+pub fn vardct_xyb_inverse_variant_diagnostics(
+    plan: &VarDctDecodePlan,
+) -> Result<Option<Vec<VarDctXybInverseVariantDiagnostics>>> {
+    let Some(xyb) = assemble_vardct_xyb_image(plan)? else {
+        return Ok(None);
+    };
+    let variants = [
+        VarDctXybInverseVariant::Current,
+        VarDctXybInverseVariant::BPlusBias,
+        VarDctXybInverseVariant::NegBMinusBias,
+        VarDctXybInverseVariant::NegBPlusBias,
+    ];
+
+    Ok(Some(
+        variants
+            .into_iter()
+            .map(|variant| {
+                let rgb = vardct_xyb_to_linear_rgb_with_variant(&xyb, &plan.opsin_params, variant);
+                VarDctXybInverseVariantDiagnostics {
+                    variant,
+                    rgb_channels: std::array::from_fn(|channel| {
+                        channel_range_diagnostics(&rgb.channels[channel])
+                    }),
+                    srgb8: vardct_linear_rgb_to_srgb8(&rgb),
+                }
+            })
+            .collect(),
+    ))
 }
 
 /// Assembles available VarDCT XYB data and converts it to interleaved sRGB16.
@@ -1952,6 +2001,14 @@ fn vardct_opsin_params_from_matrix(
 }
 
 fn vardct_xyb_to_linear_rgb(xyb: &VarDctXybImage, opsin: &VarDctOpsinParams) -> VarDctRgbImage {
+    vardct_xyb_to_linear_rgb_with_variant(xyb, opsin, VarDctXybInverseVariant::Current)
+}
+
+fn vardct_xyb_to_linear_rgb_with_variant(
+    xyb: &VarDctXybImage,
+    opsin: &VarDctOpsinParams,
+    variant: VarDctXybInverseVariant,
+) -> VarDctRgbImage {
     let mut rgb = VarDctRgbImage {
         width: xyb.width,
         height: xyb.height,
@@ -1963,11 +2020,12 @@ fn vardct_xyb_to_linear_rgb(xyb: &VarDctXybImage, opsin: &VarDctOpsinParams) -> 
     };
 
     for index in 0..xyb.channels[0].len() {
-        let [r, g, b] = xyb_sample_to_linear_rgb(
+        let [r, g, b] = xyb_sample_to_linear_rgb_with_variant(
             xyb.channels[0][index],
             xyb.channels[1][index],
             xyb.channels[2][index],
             opsin,
+            variant,
         );
         rgb.channels[0][index] = r;
         rgb.channels[1][index] = g;
@@ -2027,10 +2085,26 @@ fn linear_sample_to_srgb(sample: f32, max: f32) -> u32 {
     encoded.mul_add(max, 0.0).round().clamp(0.0, max) as u32
 }
 
+#[cfg(test)]
 fn xyb_sample_to_linear_rgb(x: f32, y: f32, b: f32, opsin: &VarDctOpsinParams) -> [f32; 3] {
+    xyb_sample_to_linear_rgb_with_variant(x, y, b, opsin, VarDctXybInverseVariant::Current)
+}
+
+fn xyb_sample_to_linear_rgb_with_variant(
+    x: f32,
+    y: f32,
+    b: f32,
+    opsin: &VarDctOpsinParams,
+    variant: VarDctXybInverseVariant,
+) -> [f32; 3] {
     let gamma_r = y + x - opsin.opsin_biases_cbrt[0];
     let gamma_g = y - x - opsin.opsin_biases_cbrt[1];
-    let gamma_b = b - opsin.opsin_biases_cbrt[2];
+    let gamma_b = match variant {
+        VarDctXybInverseVariant::Current => b - opsin.opsin_biases_cbrt[2],
+        VarDctXybInverseVariant::BPlusBias => b + opsin.opsin_biases_cbrt[2],
+        VarDctXybInverseVariant::NegBMinusBias => -b - opsin.opsin_biases_cbrt[2],
+        VarDctXybInverseVariant::NegBPlusBias => -b + opsin.opsin_biases_cbrt[2],
+    };
     let mixed = [
         gamma_r * gamma_r * gamma_r + opsin.opsin_biases[0],
         gamma_g * gamma_g * gamma_g + opsin.opsin_biases[1],

@@ -7,11 +7,12 @@ use std::{
 use jxl_codec::{
     BlendMode, ColorSpace, ColorTransform, DecodeConfig, ExtraChannelType, FileFormat,
     FrameEncoding, FrameSectionKind, FrameType, ImageRegion, ModularGroupExecution,
-    TransferFunction, TransformId, VarDctSrgb8Image, assemble_vardct_dc_srgb8_image,
-    assemble_vardct_dc_srgb8_image_with_multiplier, assemble_vardct_dc_xyb_image,
-    assemble_vardct_linear_rgb_image, assemble_vardct_srgb8_image,
+    TransferFunction, TransformId, VarDctSrgb8Image, VarDctXybInverseVariant,
+    assemble_vardct_dc_srgb8_image, assemble_vardct_dc_srgb8_image_with_multiplier,
+    assemble_vardct_dc_xyb_image, assemble_vardct_linear_rgb_image, assemble_vardct_srgb8_image,
     assemble_vardct_srgb8_image_for_pass, assemble_vardct_xyb_image, parse_file,
-    parse_file_with_config, vardct_dc_coefficient_diagnostics, vardct_xyb_rgb_diagnostics,
+    parse_file_with_config, vardct_dc_coefficient_diagnostics,
+    vardct_xyb_inverse_variant_diagnostics, vardct_xyb_rgb_diagnostics,
 };
 
 #[test]
@@ -1044,6 +1045,69 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(
         metrics.reference_anchors,
         vec![0, 1, 1, 125, 128, 124, 253, 255, 255]
+    );
+    let xyb_inverse_variant_metrics = vardct_xyb_inverse_variant_diagnostics(plan)
+        .unwrap()
+        .unwrap()
+        .iter()
+        .map(|diagnostics| {
+            let metrics = srgb8_oracle_metrics(&diagnostics.srgb8, &reference, &anchor_indices);
+            (
+                diagnostics.variant,
+                diagnostics.rgb_channels[2].negative_samples,
+                diagnostics.rgb_channels[2].above_one_samples,
+                metrics.max_abs_error,
+                metrics.sum_abs_error,
+                metrics.checksum,
+                metrics.anchors,
+                metrics.reference_anchors,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        xyb_inverse_variant_metrics,
+        vec![
+            (
+                VarDctXybInverseVariant::Current,
+                61343,
+                0,
+                255,
+                13432857,
+                16084947495213242878,
+                vec![3, 5, 0, 104, 97, 0, 255, 255, 0],
+                vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
+            ),
+            (
+                VarDctXybInverseVariant::BPlusBias,
+                61440,
+                0,
+                255,
+                13498272,
+                16896813426672388648,
+                vec![7, 9, 0, 104, 98, 0, 255, 255, 0],
+                vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
+            ),
+            (
+                VarDctXybInverseVariant::NegBMinusBias,
+                61373,
+                0,
+                255,
+                13423127,
+                7315749054627243831,
+                vec![3, 5, 0, 104, 97, 0, 255, 255, 0],
+                vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
+            ),
+            (
+                VarDctXybInverseVariant::NegBPlusBias,
+                61440,
+                0,
+                255,
+                13481195,
+                17150958906575354849,
+                vec![7, 9, 0, 105, 98, 0, 255, 255, 0],
+                vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
+            ),
+        ]
     );
     let dc_srgb8_image = assemble_vardct_dc_srgb8_image(plan).unwrap().unwrap();
     let dc_metrics = srgb8_oracle_metrics(&dc_srgb8_image, &reference, &anchor_indices);
