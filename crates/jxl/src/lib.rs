@@ -1491,6 +1491,25 @@ mod tests {
             String::from_utf8_lossy(&cjxl_output.stderr)
         );
 
+        let reference = reference_djxl().map(|djxl| {
+            let output = unique_temp_path("jxl-rgba-vardct-reference", "ppm");
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed: {}",
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+
+            let reference = std::fs::read(&output).unwrap();
+            let _ = std::fs::remove_file(&output);
+            parse_ppm_rgb(&reference)
+        });
+
         let encoded_bytes = std::fs::read(&encoded).unwrap();
         let _ = std::fs::remove_file(&encoded);
         let roi = Rect {
@@ -1560,6 +1579,27 @@ mod tests {
                 .chunks_exact(3)
                 .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
         );
+        if let Some(reference) = &reference {
+            assert_eq!(decoded.width, reference.width);
+            assert_eq!(decoded.height, reference.height);
+            let metrics = srgb8_oracle_metrics(
+                &decoded,
+                reference,
+                &[0, decoded_pixels.len() / 2, decoded_pixels.len() - 1],
+            );
+            assert_eq!(
+                metrics,
+                Srgb8OracleMetrics {
+                    max_abs_error: 255,
+                    sum_abs_error: 20_235_722,
+                    checksum: 7_422_369_262_333_388_879,
+                    anchors: vec![0, 11, 0],
+                    reference_anchors: vec![0, 21, 255],
+                }
+            );
+        } else {
+            eprintln!("skipping public VarDCT djxl comparison; tool is not built");
+        }
         assert_roi_matches_full_image(&roi_decoded, &decoded, roi);
         assert_eq!(pass0_decoded.width, 320);
         assert_eq!(pass0_decoded.height, 192);
@@ -1990,6 +2030,15 @@ mod tests {
         samples: Vec<u16>,
     }
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct Srgb8OracleMetrics {
+        max_abs_error: u16,
+        sum_abs_error: u64,
+        checksum: u64,
+        anchors: Vec<u16>,
+        reference_anchors: Vec<u16>,
+    }
+
     fn parse_ppm_rgb(bytes: &[u8]) -> PpmRgb {
         let (magic, offset) = netpbm_token(bytes, 0);
         assert_eq!(magic, b"P6");
@@ -2090,6 +2139,47 @@ mod tests {
         match &image.pixels {
             PixelData::U8(samples) => samples.iter().copied().map(u16::from).collect(),
             PixelData::U16(samples) => samples.clone(),
+        }
+    }
+
+    fn srgb8_oracle_metrics(
+        decoded: &DecodedImage,
+        reference: &PpmRgb,
+        anchor_indices: &[usize],
+    ) -> Srgb8OracleMetrics {
+        assert_eq!(decoded.width, reference.width);
+        assert_eq!(decoded.height, reference.height);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.bit_depth, 8);
+        let PixelData::U8(samples) = &decoded.pixels else {
+            panic!("expected public oracle comparison to use 8-bit RGB output");
+        };
+        assert_eq!(samples.len(), reference.samples.len());
+
+        let mut max_abs_error = 0u16;
+        let mut sum_abs_error = 0u64;
+        let mut checksum = 0xcbf2_9ce4_8422_2325u64;
+        for (index, (&actual, &reference)) in samples.iter().zip(&reference.samples).enumerate() {
+            let actual = u16::from(actual);
+            let error = actual.abs_diff(reference);
+            max_abs_error = max_abs_error.max(error);
+            sum_abs_error += u64::from(error);
+            checksum ^= ((index as u64) << 32) ^ ((actual as u64) << 16) ^ u64::from(reference);
+            checksum = checksum.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+
+        Srgb8OracleMetrics {
+            max_abs_error,
+            sum_abs_error,
+            checksum,
+            anchors: anchor_indices
+                .iter()
+                .map(|&index| u16::from(samples[index]))
+                .collect(),
+            reference_anchors: anchor_indices
+                .iter()
+                .map(|&index| reference.samples[index])
+                .collect(),
         }
     }
 
