@@ -11,7 +11,7 @@ use jxl_codec::{
     assemble_vardct_dc_srgb8_image_with_multiplier, assemble_vardct_dc_xyb_image,
     assemble_vardct_linear_rgb_image, assemble_vardct_srgb8_image,
     assemble_vardct_srgb8_image_for_pass, assemble_vardct_xyb_image, parse_file,
-    parse_file_with_config, vardct_dc_coefficient_diagnostics,
+    parse_file_with_config, vardct_dc_coefficient_diagnostics, vardct_xyb_rgb_diagnostics,
 };
 
 #[test]
@@ -925,6 +925,103 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         rgb_anchors,
         [
             981284571, 985279457, 3131245224, 1066158729, 1065589631, 3210548450
+        ]
+    );
+    let xyb_rgb_diagnostics = vardct_xyb_rgb_diagnostics(plan).unwrap().unwrap();
+    assert_eq!(
+        xyb_rgb_diagnostics
+            .xyb_channels
+            .iter()
+            .map(|channel| (
+                channel.nonzero_samples,
+                channel.negative_samples,
+                channel.above_one_samples,
+                channel.min_bits,
+                channel.max_bits,
+                channel.sum_bits,
+                channel.checksum,
+                channel.anchors_bits.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                59535,
+                29488,
+                0,
+                3191298882,
+                1051715701,
+                1124434642,
+                14003271042806168252,
+                vec![3108050851, 3155229193, 979251269],
+            ),
+            (
+                59565,
+                42,
+                13316,
+                3161978485,
+                1090797967,
+                1193341501,
+                6286233978990905395,
+                vec![1012981083, 1053652294, 1062172090],
+            ),
+            (
+                59580,
+                29745,
+                18,
+                3220582914,
+                1074141196,
+                3293977634,
+                9120613581062752292,
+                vec![3138522218, 3188253518, 1009180798],
+            ),
+        ]
+    );
+    assert_eq!(
+        xyb_rgb_diagnostics
+            .rgb_channels
+            .iter()
+            .map(|channel| (
+                channel.nonzero_samples,
+                channel.negative_samples,
+                channel.above_one_samples,
+                channel.min_bits,
+                channel.max_bits,
+                channel.sum_bits,
+                channel.checksum,
+                channel.anchors_bits.clone(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                61440,
+                3450,
+                17569,
+                3267813839,
+                1157875372,
+                1204167160,
+                15142340477072682072,
+                vec![981284571, 1020373812, 1066158729],
+            ),
+            (
+                61440,
+                1967,
+                17460,
+                3215902163,
+                1148681198,
+                1202231181,
+                8273289965492884272,
+                vec![985279457, 1048949363, 1065589631],
+            ),
+            (
+                61440,
+                61343,
+                0,
+                3295541074,
+                1022590783,
+                3348374447,
+                8817027365039332181,
+                vec![3131245224, 3186334817, 3210548450],
+            ),
         ]
     );
     let srgb8_image = assemble_vardct_srgb8_image(plan).unwrap().unwrap();

@@ -568,6 +568,24 @@ pub struct VarDctRgbImage {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctChannelRangeDiagnostics {
+    pub nonzero_samples: usize,
+    pub negative_samples: usize,
+    pub above_one_samples: usize,
+    pub min_bits: u32,
+    pub max_bits: u32,
+    pub sum_bits: u32,
+    pub checksum: u64,
+    pub anchors_bits: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VarDctXybRgbDiagnostics {
+    pub xyb_channels: [VarDctChannelRangeDiagnostics; 3],
+    pub rgb_channels: [VarDctChannelRangeDiagnostics; 3],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarDctSrgb8Image {
     pub width: u32,
     pub height: u32,
@@ -735,6 +753,24 @@ pub fn vardct_dc_coefficient_diagnostics(
         .into_iter()
         .map(|metadata| vardct_dc_coefficient_diagnostics_for_group(plan, metadata))
         .collect()
+}
+
+/// Summarizes XYB and linear RGB ranges for final VarDCT reconstruction.
+pub fn vardct_xyb_rgb_diagnostics(
+    plan: &VarDctDecodePlan,
+) -> Result<Option<VarDctXybRgbDiagnostics>> {
+    let Some(xyb) = assemble_vardct_xyb_image(plan)? else {
+        return Ok(None);
+    };
+    let rgb = vardct_xyb_to_linear_rgb(&xyb, &plan.opsin_params);
+    Ok(Some(VarDctXybRgbDiagnostics {
+        xyb_channels: std::array::from_fn(|channel| {
+            channel_range_diagnostics(&xyb.channels[channel])
+        }),
+        rgb_channels: std::array::from_fn(|channel| {
+            channel_range_diagnostics(&rgb.channels[channel])
+        }),
+    }))
 }
 
 /// Assembles available VarDCT XYB data and converts it to interleaved sRGB16.
@@ -4071,6 +4107,33 @@ fn sample_anchors_f32_bits(samples: &[f32]) -> Vec<u32> {
         .into_iter()
         .map(|index| samples[index].to_bits())
         .collect()
+}
+
+fn channel_range_diagnostics(samples: &[f32]) -> VarDctChannelRangeDiagnostics {
+    let (min, max) = samples
+        .iter()
+        .copied()
+        .fold((f32::INFINITY, f32::NEG_INFINITY), |(min, max), sample| {
+            (min.min(sample), max.max(sample))
+        });
+    let sum = samples.iter().copied().sum::<f32>();
+    let mut checksum = 0u64;
+    for (index, &sample) in samples.iter().enumerate() {
+        if sample != 0.0 {
+            checksum = checksum_dequantized_coefficient(checksum, index, sample);
+        }
+    }
+
+    VarDctChannelRangeDiagnostics {
+        nonzero_samples: samples.iter().filter(|sample| **sample != 0.0).count(),
+        negative_samples: samples.iter().filter(|sample| **sample < 0.0).count(),
+        above_one_samples: samples.iter().filter(|sample| **sample > 1.0).count(),
+        min_bits: min.to_bits(),
+        max_bits: max.to_bits(),
+        sum_bits: sum.to_bits(),
+        checksum,
+        anchors_bits: sample_anchors_f32_bits(samples),
+    }
 }
 
 fn write_spatial_sample(grid: &mut VarDctAcSpatialChannelGrid, index: usize, value: f32) {
