@@ -8,7 +8,8 @@ use jxl_codec::{
     BlendMode, ColorSpace, ColorTransform, DecodeConfig, ExtraChannelType, FileFormat,
     FrameEncoding, FrameSectionKind, FrameType, ImageRegion, ModularGroupExecution,
     TransferFunction, TransformId, VarDctSrgb8Image, assemble_vardct_linear_rgb_image,
-    assemble_vardct_srgb8_image, assemble_vardct_xyb_image, parse_file, parse_file_with_config,
+    assemble_vardct_srgb8_image, assemble_vardct_srgb8_image_for_pass, assemble_vardct_xyb_image,
+    parse_file, parse_file_with_config,
 };
 
 #[test]
@@ -1778,6 +1779,25 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
         String::from_utf8_lossy(&cjxl_output.stderr)
     );
 
+    let reference = reference_djxl().map(|djxl| {
+        let reference_output = unique_temp_path("jxl-rs-vardct-progressive-ac-reference", "ppm");
+        let djxl_output = Command::new(&djxl)
+            .arg(&encoded)
+            .arg(&reference_output)
+            .arg("--quiet")
+            .output()
+            .unwrap();
+        assert!(
+            djxl_output.status.success(),
+            "reference djxl failed: {}",
+            String::from_utf8_lossy(&djxl_output.stderr)
+        );
+        let reference = std::fs::read(&reference_output).unwrap();
+        let reference = parse_ppm_rgb(&reference);
+        let _ = std::fs::remove_file(&reference_output);
+        reference
+    });
+
     let encoded_bytes = std::fs::read(&encoded).unwrap();
     let _ = std::fs::remove_file(&encoded);
     let (_, codestream) = parse_file(&encoded_bytes).unwrap();
@@ -1931,6 +1951,95 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
                 )),
             ),
         ]
+    );
+
+    let xyb_image = assemble_vardct_xyb_image(plan).unwrap().unwrap();
+    assert_eq!(xyb_image.width, 320);
+    assert_eq!(xyb_image.height, 192);
+    assert_eq!(xyb_image.groups_assembled, 2);
+    assert_eq!(xyb_image.groups_missing, 0);
+    let xyb_summary = float_channel_summary(&xyb_image.channels);
+    let xyb_anchors = float_channel_corner_anchors(&xyb_image.channels, xyb_image.width);
+
+    let rgb_image = assemble_vardct_linear_rgb_image(plan).unwrap().unwrap();
+    assert_eq!(rgb_image.width, 320);
+    assert_eq!(rgb_image.height, 192);
+    let rgb_summary = float_channel_summary(&rgb_image.channels);
+    let rgb_anchors = float_channel_corner_anchors(&rgb_image.channels, rgb_image.width);
+
+    let srgb8_image = assemble_vardct_srgb8_image(plan).unwrap().unwrap();
+    assert_eq!(srgb8_image.width, 320);
+    assert_eq!(srgb8_image.height, 192);
+    let pass0_srgb8 = assemble_vardct_srgb8_image_for_pass(plan, 0)
+        .unwrap()
+        .unwrap();
+    assert_eq!(pass0_srgb8.width, 320);
+    assert_eq!(pass0_srgb8.height, 192);
+    let missing_pass = assemble_vardct_srgb8_image_for_pass(plan, 99).unwrap();
+    assert_eq!(missing_pass, None);
+
+    let anchor_indices = [
+        0usize,
+        1,
+        2,
+        ((95 * 320 + 159) * 3) as usize,
+        ((95 * 320 + 159) * 3 + 1) as usize,
+        ((95 * 320 + 159) * 3 + 2) as usize,
+        ((191 * 320 + 319) * 3) as usize,
+        ((191 * 320 + 319) * 3 + 1) as usize,
+        ((191 * 320 + 319) * 3 + 2) as usize,
+    ];
+    let final_metrics = reference
+        .as_ref()
+        .map(|reference| srgb8_oracle_metrics(&srgb8_image, reference, &anchor_indices));
+    let pass0_summary = srgb8_image_summary(&pass0_srgb8);
+    assert_eq!(
+        xyb_summary,
+        vec![
+            (59700, 658357540345322030),
+            (59727, 16928111066820396861),
+            (59689, 11620418859641040130),
+        ]
+    );
+    assert_eq!(
+        xyb_anchors,
+        [
+            3082885027, 986146560, 3118362489, 954082669, 1037082483, 988079946
+        ]
+    );
+    assert_eq!(
+        rgb_summary,
+        vec![
+            (61440, 7345819027233518833),
+            (61440, 6755060154345280122),
+            (61440, 11976213438535935495),
+        ]
+    );
+    assert_eq!(
+        rgb_anchors,
+        [
+            953244193, 958135958, 3106060956, 1015202363, 1014735147, 3159157256
+        ]
+    );
+    if let Some(metrics) = final_metrics {
+        assert_eq!(metrics.max_abs_error, 255);
+        assert_eq!(metrics.sum_abs_error, 20235722);
+        assert_eq!(metrics.checksum, 6564848104799546419);
+        assert_eq!(metrics.anchors, vec![0, 0, 0, 16, 13, 0, 34, 33, 0]);
+        assert_eq!(
+            metrics.reference_anchors,
+            vec![0, 1, 1, 125, 128, 124, 253, 255, 255]
+        );
+    } else {
+        eprintln!("skipping progressive-AC VarDCT djxl comparison; tool is not built");
+    }
+    assert_eq!(
+        pass0_summary,
+        (
+            119044,
+            17427325158605359674,
+            vec![0, 0, 0, 10, 20, 0, 34, 33, 0],
+        )
     );
 }
 
@@ -2592,6 +2701,72 @@ fn srgb8_oracle_metrics(
             .map(|&index| ppm_sample_to_srgb8(reference.samples[index], reference.maxval))
             .collect(),
     }
+}
+
+fn float_channel_summary(channels: &[Vec<f32>; 3]) -> Vec<(usize, u64)> {
+    channels
+        .iter()
+        .map(|channel| {
+            channel
+                .iter()
+                .enumerate()
+                .filter(|(_, sample)| **sample != 0.0)
+                .fold((0usize, 0u64), |(count, checksum), (index, sample)| {
+                    let checksum = checksum
+                        .wrapping_mul(1_099_511_628_211)
+                        .wrapping_add(index as u64)
+                        .rotate_left(11)
+                        ^ sample.to_bits() as u64;
+                    (count + 1, checksum)
+                })
+        })
+        .collect()
+}
+
+fn float_channel_corner_anchors(channels: &[Vec<f32>; 3], width: u32) -> [u32; 6] {
+    let last = channels[0].len() - 1;
+    assert_eq!(last % width as usize, width as usize - 1);
+    [
+        channels[0][0].to_bits(),
+        channels[1][0].to_bits(),
+        channels[2][0].to_bits(),
+        channels[0][last].to_bits(),
+        channels[1][last].to_bits(),
+        channels[2][last].to_bits(),
+    ]
+}
+
+fn srgb8_image_summary(image: &VarDctSrgb8Image) -> (usize, u64, Vec<u8>) {
+    let checksum = image
+        .pixels
+        .iter()
+        .enumerate()
+        .fold(0u64, |checksum, (index, sample)| {
+            checksum
+                .wrapping_mul(1_099_511_628_211)
+                .wrapping_add(index as u64)
+                .rotate_left(11)
+                ^ u64::from(*sample)
+        });
+    let anchor_indices = [
+        0usize,
+        1,
+        2,
+        image.pixels.len() / 2,
+        image.pixels.len() / 2 + 1,
+        image.pixels.len() / 2 + 2,
+        image.pixels.len() - 3,
+        image.pixels.len() - 2,
+        image.pixels.len() - 1,
+    ];
+    (
+        image.pixels.iter().filter(|sample| **sample != 0).count(),
+        checksum,
+        anchor_indices
+            .iter()
+            .map(|&index| image.pixels[index])
+            .collect(),
+    )
 }
 
 fn ppm_sample_to_srgb8(sample: u16, maxval: u32) -> u8 {
