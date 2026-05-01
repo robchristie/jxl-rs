@@ -598,12 +598,12 @@ impl VarDctXybImage {
 
 /// Assembles available final VarDCT spatial+DC group grids into full-frame XYB channels.
 ///
-/// For progressive AC frames this uses the latest available AC pass for each
-/// group. Returns `Ok(None)` when no selected group has spatial+DC samples. Groups
-/// without spatial+DC samples are counted in `VarDctXybImage::groups_missing`
-/// and left as zeroes in the output buffers.
+/// For progressive AC frames this merges all available AC passes up to the
+/// latest pass for each group. Returns `Ok(None)` when no selected group has
+/// spatial+DC samples. Groups without spatial+DC samples are counted in
+/// `VarDctXybImage::groups_missing` and left as zeroes in the output buffers.
 pub fn assemble_vardct_xyb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
-    let mut image = assemble_vardct_xyb_image_from_groups(&plan.frame, &plan.ac_group_metadata)?;
+    let mut image = assemble_vardct_xyb_image_final(plan)?;
     if let Some(image) = image.as_mut() {
         apply_vardct_gaborish(image, &plan.loop_filter);
         if plan.loop_filter.epf_iters >= 1 {
@@ -1101,6 +1101,7 @@ impl VarDctAcSpatialGrid {
     }
 }
 
+#[cfg(test)]
 fn assemble_vardct_xyb_image_from_groups(
     frame: &VarDctFrameMetadata,
     groups: &[VarDctAcGroupMetadata],
@@ -1146,10 +1147,132 @@ fn assemble_vardct_xyb_image_from_groups_with_mode(
     Ok((image.groups_assembled > 0).then_some(image))
 }
 
+fn assemble_vardct_xyb_image_final(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
+    let sample_len = (plan.frame.width as usize)
+        .checked_mul(plan.frame.height as usize)
+        .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
+    let mut image = VarDctXybImage {
+        width: plan.frame.width,
+        height: plan.frame.height,
+        groups_assembled: 0,
+        groups_missing: 0,
+        channels: [
+            vec![0.0; sample_len],
+            vec![0.0; sample_len],
+            vec![0.0; sample_len],
+        ],
+    };
+
+    for metadata in final_vardct_ac_passes_by_group(&plan.ac_group_metadata) {
+        let spatial = final_vardct_spatial_grid_for_group(plan, metadata)?;
+        let Some(grid) = spatial.as_ref().or(metadata.spatial_with_dc_grid.as_ref()) else {
+            image.groups_missing += 1;
+            continue;
+        };
+        if grid.group != metadata.payload.group.group
+            || grid.width_blocks != metadata.payload.group.width.div_ceil(8) as usize
+            || grid.height_blocks != metadata.payload.group.height.div_ceil(8) as usize
+        {
+            return Err(Error::InvalidCodestream("invalid VarDCT spatial grid"));
+        }
+        copy_vardct_spatial_group_to_image(grid, metadata.payload.group, &mut image)?;
+        image.groups_assembled += 1;
+    }
+
+    Ok((image.groups_assembled > 0).then_some(image))
+}
+
+fn final_vardct_spatial_grid_for_group(
+    plan: &VarDctDecodePlan,
+    final_metadata: &VarDctAcGroupMetadata,
+) -> Result<Option<VarDctAcSpatialGrid>> {
+    let mut passes = plan
+        .ac_group_metadata
+        .iter()
+        .filter(|metadata| {
+            metadata.payload.group.group == final_metadata.payload.group.group
+                && metadata.payload.pass <= final_metadata.payload.pass
+        })
+        .collect::<Vec<_>>();
+    passes.sort_by_key(|metadata| metadata.payload.pass);
+    if passes.len() <= 1 {
+        return Ok(None);
+    }
+
+    let Some(mut merged) = passes
+        .first()
+        .and_then(|metadata| metadata.dequantized_grid.clone())
+    else {
+        return Ok(None);
+    };
+    for metadata in passes.iter().skip(1) {
+        let Some(grid) = metadata.dequantized_grid.as_ref() else {
+            return Ok(None);
+        };
+        merge_vardct_dequantized_grid(&mut merged, grid)?;
+    }
+    merged.pass = final_metadata.payload.pass;
+
+    spatialize_vardct_ac_grid(
+        &merged,
+        plan.global.as_ref(),
+        final_metadata,
+        &plan.dc_group_metadata,
+    )
+    .map(Some)
+}
+
+fn merge_vardct_dequantized_grid(
+    merged: &mut VarDctAcDequantizedGrid,
+    grid: &VarDctAcDequantizedGrid,
+) -> Result<()> {
+    if merged.group != grid.group
+        || merged.width_blocks != grid.width_blocks
+        || merged.height_blocks != grid.height_blocks
+    {
+        return Err(Error::InvalidCodestream(
+            "incompatible progressive VarDCT AC grids",
+        ));
+    }
+
+    for channel in 0..3 {
+        let merged_channel = &mut merged.per_channel[channel];
+        let grid_channel = &grid.per_channel[channel];
+        if merged_channel.coefficients.len() != grid_channel.coefficients.len() {
+            return Err(Error::InvalidCodestream(
+                "incompatible progressive VarDCT AC grids",
+            ));
+        }
+        merged_channel.nonzero_coefficients = 0;
+        merged_channel.coefficient_checksum = 0;
+        for (index, (merged_coeff, coeff)) in merged_channel
+            .coefficients
+            .iter_mut()
+            .zip(&grid_channel.coefficients)
+            .enumerate()
+        {
+            let value = f32::from_bits(*merged_coeff) + f32::from_bits(*coeff);
+            *merged_coeff = value.to_bits();
+            if value != 0.0 {
+                merged_channel.nonzero_coefficients += 1;
+                merged_channel.coefficient_checksum = checksum_dequantized_coefficient(
+                    merged_channel.coefficient_checksum,
+                    index,
+                    value,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 enum VarDctAssemblyMode {
+    #[cfg(test)]
     Final,
-    Pass { pass: usize },
+    Pass {
+        pass: usize,
+    },
 }
 
 fn vardct_ac_groups_for_assembly(
@@ -1157,6 +1280,7 @@ fn vardct_ac_groups_for_assembly(
     mode: VarDctAssemblyMode,
 ) -> Vec<&VarDctAcGroupMetadata> {
     match mode {
+        #[cfg(test)]
         VarDctAssemblyMode::Final => final_vardct_ac_passes_by_group(groups),
         VarDctAssemblyMode::Pass { pass } => vardct_ac_passes_by_group(groups, pass),
     }
