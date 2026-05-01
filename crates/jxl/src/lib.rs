@@ -199,16 +199,46 @@ impl Decoder {
         decode_channels_buffered(input, self.codec_config())
     }
 
+    /// Decodes an interleaved image.
+    ///
+    /// Modular still images return their decoded integer samples, preserving
+    /// the decoded sample bit depth. Supported non-ROI VarDCT still images
+    /// return 8-bit sRGB RGB samples with no alpha channel.
+    ///
+    /// VarDCT output is currently a reconstruction convenience path: it does
+    /// not yet apply full JPEG XL color management or orientation handling.
+    /// VarDCT ROI decode and unreconstructed VarDCT layouts return
+    /// [`Error::Unsupported`].
     pub fn decode(&self, input: &[u8]) -> Result<DecodedImage> {
         self.validate_shared_options()?;
         decode_buffered(input, self.codec_config())
     }
 
+    /// Decodes to interleaved RGBA8.
+    ///
+    /// Modular still images are decoded through the raw-channel path and then
+    /// scaled or expanded to RGBA8. Supported non-ROI VarDCT still images return
+    /// opaque sRGB RGBA8.
+    ///
+    /// VarDCT output is currently a reconstruction convenience path: it does
+    /// not yet apply full JPEG XL color management or orientation handling.
+    /// VarDCT ROI decode and unreconstructed VarDCT layouts return
+    /// [`Error::Unsupported`].
     pub fn decode_rgba8(&self, input: &[u8]) -> Result<RgbaImage> {
         self.validate_shared_options()?;
         decode_rgba8_buffered(input, self.codec_config())
     }
 
+    /// Decodes to interleaved RGBA16.
+    ///
+    /// Modular still images are decoded through the raw-channel path and then
+    /// scaled or expanded to RGBA16. Supported non-ROI VarDCT still images
+    /// return opaque sRGB RGBA16.
+    ///
+    /// VarDCT output is currently a reconstruction convenience path: it does
+    /// not yet apply full JPEG XL color management or orientation handling.
+    /// VarDCT ROI decode and unreconstructed VarDCT layouts return
+    /// [`Error::Unsupported`].
     pub fn decode_rgba16(&self, input: &[u8]) -> Result<Rgba16Image> {
         self.validate_shared_options()?;
         decode_rgba16_buffered(input, self.codec_config())
@@ -1282,6 +1312,34 @@ mod tests {
 
         let encoded_bytes = std::fs::read(&encoded).unwrap();
         let _ = std::fs::remove_file(&encoded);
+        let roi_decoder = Decoder::new().roi(Rect {
+            x: 0,
+            y: 0,
+            width: 32,
+            height: 32,
+        });
+
+        assert_eq!(
+            decode_channels(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT image decode"))
+        );
+        assert_eq!(
+            roi_decoder.decode_channels(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT image decode"))
+        );
+        assert_eq!(
+            roi_decoder.decode(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT image decode"))
+        );
+        assert_eq!(
+            roi_decoder.decode_rgba8(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT image decode"))
+        );
+        assert_eq!(
+            roi_decoder.decode_rgba16(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT image decode"))
+        );
+
         let decoded = decode(&encoded_bytes).unwrap();
         let rgba = decode_rgba8(&encoded_bytes).unwrap();
         let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
