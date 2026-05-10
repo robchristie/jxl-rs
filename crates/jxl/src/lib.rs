@@ -1591,9 +1591,9 @@ mod tests {
                 metrics,
                 Srgb8OracleMetrics {
                     max_abs_error: 255,
-                    sum_abs_error: 13_432_857,
-                    checksum: 13_670_859_663_510_988_879,
-                    anchors: vec![3, 44, 0],
+                    sum_abs_error: 13_423_127,
+                    checksum: 15_223_620_237_915_187_279,
+                    anchors: vec![3, 40, 0],
                     reference_anchors: vec![0, 21, 255],
                 }
             );

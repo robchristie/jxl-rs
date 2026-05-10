@@ -587,7 +587,7 @@ pub struct VarDctXybRgbDiagnostics {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VarDctXybInverseVariant {
-    Current,
+    BMinusBias,
     BPlusBias,
     NegBMinusBias,
     NegBPlusBias,
@@ -790,8 +790,9 @@ pub fn vardct_xyb_rgb_diagnostics(
 
 /// Evaluates alternate XYB inverse formulas against final VarDCT reconstruction.
 ///
-/// This diagnostic keeps production output on `VarDctXybInverseVariant::Current`
-/// while making sign and bias hypotheses measurable against fixture oracles.
+/// This diagnostic makes sign and bias hypotheses measurable against fixture
+/// oracles. Production output currently uses
+/// `VarDctXybInverseVariant::NegBMinusBias`.
 pub fn vardct_xyb_inverse_variant_diagnostics(
     plan: &VarDctDecodePlan,
 ) -> Result<Option<Vec<VarDctXybInverseVariantDiagnostics>>> {
@@ -799,7 +800,7 @@ pub fn vardct_xyb_inverse_variant_diagnostics(
         return Ok(None);
     };
     let variants = [
-        VarDctXybInverseVariant::Current,
+        VarDctXybInverseVariant::BMinusBias,
         VarDctXybInverseVariant::BPlusBias,
         VarDctXybInverseVariant::NegBMinusBias,
         VarDctXybInverseVariant::NegBPlusBias,
@@ -2001,7 +2002,7 @@ fn vardct_opsin_params_from_matrix(
 }
 
 fn vardct_xyb_to_linear_rgb(xyb: &VarDctXybImage, opsin: &VarDctOpsinParams) -> VarDctRgbImage {
-    vardct_xyb_to_linear_rgb_with_variant(xyb, opsin, VarDctXybInverseVariant::Current)
+    vardct_xyb_to_linear_rgb_with_variant(xyb, opsin, VarDctXybInverseVariant::NegBMinusBias)
 }
 
 fn vardct_xyb_to_linear_rgb_with_variant(
@@ -2087,7 +2088,7 @@ fn linear_sample_to_srgb(sample: f32, max: f32) -> u32 {
 
 #[cfg(test)]
 fn xyb_sample_to_linear_rgb(x: f32, y: f32, b: f32, opsin: &VarDctOpsinParams) -> [f32; 3] {
-    xyb_sample_to_linear_rgb_with_variant(x, y, b, opsin, VarDctXybInverseVariant::Current)
+    xyb_sample_to_linear_rgb_with_variant(x, y, b, opsin, VarDctXybInverseVariant::NegBMinusBias)
 }
 
 fn xyb_sample_to_linear_rgb_with_variant(
@@ -2100,7 +2101,7 @@ fn xyb_sample_to_linear_rgb_with_variant(
     let gamma_r = y + x - opsin.opsin_biases_cbrt[0];
     let gamma_g = y - x - opsin.opsin_biases_cbrt[1];
     let gamma_b = match variant {
-        VarDctXybInverseVariant::Current => b - opsin.opsin_biases_cbrt[2],
+        VarDctXybInverseVariant::BMinusBias => b - opsin.opsin_biases_cbrt[2],
         VarDctXybInverseVariant::BPlusBias => b + opsin.opsin_biases_cbrt[2],
         VarDctXybInverseVariant::NegBMinusBias => -b - opsin.opsin_biases_cbrt[2],
         VarDctXybInverseVariant::NegBPlusBias => -b + opsin.opsin_biases_cbrt[2],
@@ -7208,9 +7209,9 @@ mod tests {
 
         assert_eq!(rgb.width, 1);
         assert_eq!(rgb.height, 1);
-        assert!((rgb.channels[0][0] - 0.860836).abs() < 1.0e-6);
-        assert!((rgb.channels[1][0] + 0.25376424).abs() < 1.0e-6);
-        assert!((rgb.channels[2][0] + 0.12067059).abs() < 1.0e-6);
+        assert!((rgb.channels[0][0] - 0.87693274).abs() < 1.0e-6);
+        assert!((rgb.channels[1][0] + 0.23766755).abs() < 1.0e-6);
+        assert!((rgb.channels[2][0] + 0.31094164).abs() < 1.0e-6);
     }
 
     #[test]
