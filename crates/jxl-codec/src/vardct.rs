@@ -13,10 +13,10 @@ use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_paylo
 use crate::metadata::ImageMetadata;
 use crate::metadata::unpack_signed;
 use crate::modular::{
-    MaTreeLeafProbe, ModularDecodedGroup, ModularGroupChannelPlan, ModularGroupHeader,
-    ModularPredictor, ModularTreeCoding, ModularTreeCodingProbe, decode_modular_stream_from_reader,
-    probe_modular_global_tree_coding, read_modular_global_tree_coding,
-    read_modular_group_header_metadata,
+    MaTreeLeafProbe, ModularDecodedChannel, ModularDecodedGroup, ModularGroupChannelPlan,
+    ModularGroupHeader, ModularPredictor, ModularTreeCoding, ModularTreeCodingProbe,
+    decode_modular_stream_from_reader, probe_modular_global_tree_coding,
+    read_modular_global_tree_coding, read_modular_group_header_metadata,
 };
 use crate::transform::CustomTransformData;
 use std::ops::Range;
@@ -4088,6 +4088,8 @@ fn trace_vardct_ac_group_channel(
         vec![0i32; row_len],
         vec![0i32; row_len],
     ];
+    let quant_field = vardct_quant_field_for_group(metadata, dc_groups)?;
+    let quant_dc_contexts = vardct_quant_dc_contexts_for_group(metadata, global, dc_groups)?;
     let mut coefficient_grid = VarDctAcCoefficientGrid {
         group: metadata.payload.group.group,
         pass: metadata.payload.pass,
@@ -4116,6 +4118,15 @@ fn trace_vardct_ac_group_channel(
     let mut block_summaries = Vec::new();
 
     for block in blocks {
+        let block_index = block.block_y * width_blocks + block.block_x;
+        let qf = *quant_field
+            .get(block_index)
+            .ok_or(Error::InvalidCodestream("invalid AC quant field"))?;
+        let qf =
+            u32::try_from(qf).map_err(|_| Error::InvalidCodestream("invalid AC quant field"))?;
+        let quant_dc_context = *quant_dc_contexts
+            .get(block_index)
+            .ok_or(Error::InvalidCodestream("invalid AC DC context"))?;
         for channel in CHANNEL_ORDER {
             let predicted_nzeros = predict_from_top_and_left(
                 &row_nzeros[channel],
@@ -4133,6 +4144,8 @@ fn trace_vardct_ac_group_channel(
                 block,
                 channel,
                 predicted_nzeros as usize,
+                quant_dc_context,
+                qf,
                 &mut row_nzeros[channel],
                 None,
                 width_blocks,
@@ -4203,6 +4216,8 @@ fn decode_vardct_ac_block_probe(
     block: VarDctFirstAcBlock,
     channel: usize,
     predicted_nzeros: usize,
+    quant_dc_context: usize,
+    quant_field: u32,
     row_nzeros: &mut [i32],
     row_nzeros_top: Option<&[i32]>,
     nzeros_stride: usize,
@@ -4218,10 +4233,15 @@ fn decode_vardct_ac_block_probe(
     let covered_blocks =
         STRATEGY_BLOCKS_X[block.raw_strategy] * STRATEGY_BLOCKS_Y[block.raw_strategy];
     let block_size = covered_blocks * DCT_BLOCK_SIZE;
-    if block_size > FIRST_AC_BLOCK_EVENT_LIMIT + covered_blocks {
-        return Err(Error::Unsupported("large VarDCT AC coefficient probe"));
-    }
-    let block_context = vardct_block_context(&global.block_context_map, order, channel)?;
+    let capture_events =
+        capture_events && block_size <= FIRST_AC_BLOCK_EVENT_LIMIT + covered_blocks;
+    let block_context = vardct_block_context(
+        &global.block_context_map,
+        order,
+        channel,
+        quant_dc_context,
+        quant_field,
+    )?;
     let nonzero_context = vardct_nonzero_context(
         predicted_nzeros,
         block_context,
@@ -4452,22 +4472,109 @@ fn vardct_ac_blocks_for_group(
     Ok(blocks)
 }
 
+fn vardct_quant_dc_contexts_for_group(
+    metadata: &VarDctAcGroupMetadata,
+    global: &VarDctGlobalMetadata,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<Vec<usize>> {
+    let width_blocks = metadata.payload.group.width.div_ceil(8).min(256 / 8) as usize;
+    let height_blocks = metadata.payload.group.height.div_ceil(8).min(256 / 8) as usize;
+    let len = width_blocks
+        .checked_mul(height_blocks)
+        .ok_or(Error::InvalidCodestream("AC group is too large"))?;
+    if global.block_context_map.num_dc_contexts <= 1 {
+        return Ok(vec![0; len]);
+    }
+
+    let dc_group = vardct_dc_group_for_ac_group(metadata, dc_groups)?;
+    let var_dct_dc = dc_group
+        .var_dct_dc
+        .as_ref()
+        .ok_or(Error::Unsupported("VarDCT DC coefficients"))?;
+    let channel_x = var_dct_dc
+        .channels
+        .iter()
+        .find(|channel| channel.channel_index == 1)
+        .ok_or(Error::Unsupported("VarDCT DC coefficients"))?;
+    let channel_y = var_dct_dc
+        .channels
+        .iter()
+        .find(|channel| channel.channel_index == 0)
+        .ok_or(Error::Unsupported("VarDCT DC coefficients"))?;
+    let channel_b = var_dct_dc
+        .channels
+        .iter()
+        .find(|channel| channel.channel_index == 2)
+        .ok_or(Error::Unsupported("VarDCT DC coefficients"))?;
+    let group_min_x = ((metadata.payload.group.x - dc_group.payload.group.x) / 8) as usize;
+    let group_min_y = ((metadata.payload.group.y - dc_group.payload.group.y) / 8) as usize;
+    let mut contexts = vec![0; len];
+    for y in 0..height_blocks {
+        for x in 0..width_blocks {
+            let source_x = group_min_x + x;
+            let source_y = group_min_y + y;
+            let sample_x = modular_channel_sample(channel_x, source_x, source_y)?;
+            let sample_y = modular_channel_sample(channel_y, source_x, source_y)?;
+            let sample_b = modular_channel_sample(channel_b, source_x, source_y)?;
+            let bucket_x =
+                threshold_bucket_i32(sample_x, &global.block_context_map.dc_thresholds[0]);
+            let bucket_y =
+                threshold_bucket_i32(sample_y, &global.block_context_map.dc_thresholds[1]);
+            let bucket_b =
+                threshold_bucket_i32(sample_b, &global.block_context_map.dc_thresholds[2]);
+            let bucket = ((bucket_x * (global.block_context_map.dc_thresholds[2].len() + 1))
+                + bucket_b)
+                * (global.block_context_map.dc_thresholds[1].len() + 1)
+                + bucket_y;
+            contexts[y * width_blocks + x] = bucket;
+        }
+    }
+    Ok(contexts)
+}
+
+fn modular_channel_sample(channel: &ModularDecodedChannel, x: usize, y: usize) -> Result<i32> {
+    if x >= channel.width as usize || y >= channel.height as usize {
+        return Err(Error::InvalidCodestream("invalid VarDCT DC coefficient"));
+    }
+    channel
+        .samples
+        .get(y * channel.width as usize + x)
+        .copied()
+        .ok_or(Error::InvalidCodestream("invalid VarDCT DC coefficient"))
+}
+
+fn threshold_bucket_i32(sample: i32, thresholds: &[i32]) -> usize {
+    thresholds
+        .iter()
+        .filter(|threshold| sample > **threshold)
+        .count()
+}
+
 fn vardct_block_context(
     block_context_map: &VarDctBlockContextMapMetadata,
     order: usize,
     channel: usize,
+    quant_dc_context: usize,
+    quant_field: u32,
 ) -> Result<usize> {
     const DEFAULT_CONTEXT_MAP: [u8; 39] = [
         0, 1, 2, 2, 3, 3, 4, 5, 6, 6, 6, 6, 6, 7, 8, 9, 9, 10, 11, 12, 13, 14, 14, 14, 14, 14, 7,
         8, 9, 9, 10, 11, 12, 13, 14, 14, 14, 14, 14,
     ];
-    if !block_context_map.dc_thresholds.iter().all(Vec::is_empty)
-        || !block_context_map.qf_thresholds.is_empty()
-    {
-        return Err(Error::Unsupported("non-default VarDCT AC block contexts"));
+    if quant_dc_context >= block_context_map.num_dc_contexts {
+        return Err(Error::InvalidCodestream("invalid AC DC context"));
     }
+    let qf_context = block_context_map
+        .qf_thresholds
+        .iter()
+        .filter(|threshold| quant_field > **threshold)
+        .count();
     let mapped_channel = if channel < 2 { channel ^ 1 } else { 2 };
-    let index = mapped_channel * STRATEGY_ORDER_BUCKETS + order;
+    let index = (((mapped_channel * STRATEGY_ORDER_BUCKETS + order)
+        * (block_context_map.qf_thresholds.len() + 1)
+        + qf_context)
+        * block_context_map.num_dc_contexts)
+        + quant_dc_context;
     let context_map = block_context_map
         .context_map_probe
         .as_ref()
@@ -4856,6 +4963,14 @@ fn spatial_transform_for_strategy(raw_strategy: usize) -> Option<SpatialTransfor
         13 => (8, 4, SpatialTransformKind::Dct),
         14..=17 => (8, 8, SpatialTransformKind::Afv(raw_strategy - 14)),
         18 => (64, 64, SpatialTransformKind::Dct),
+        19 => (32, 64, SpatialTransformKind::Dct),
+        20 => (64, 32, SpatialTransformKind::Dct),
+        21 => (128, 128, SpatialTransformKind::Dct),
+        22 => (64, 128, SpatialTransformKind::Dct),
+        23 => (128, 64, SpatialTransformKind::Dct),
+        24 => (256, 256, SpatialTransformKind::Dct),
+        25 => (128, 256, SpatialTransformKind::Dct),
+        26 => (256, 128, SpatialTransformKind::Dct),
         _ => return None,
     };
     Some(SpatialTransform {
@@ -5492,6 +5607,11 @@ fn default_dequant_matrix(raw_strategy: usize, channel: usize) -> Result<Vec<f32
         12 | 13 => default_dct4x8_quant_weights(width, height, channel)?,
         14..=17 => default_afv_quant_weights(channel)?,
         18 => default_dct_quant_weights(width, height, DCT64_QUANT_BANDS, 8, channel)?,
+        19 | 20 => default_dct_quant_weights(width, height, DCT32X64_QUANT_BANDS, 8, channel)?,
+        21 => default_dct_quant_weights(width, height, DCT128_QUANT_BANDS, 8, channel)?,
+        22 | 23 => default_dct_quant_weights(width, height, DCT64X128_QUANT_BANDS, 8, channel)?,
+        24 => default_dct_quant_weights(width, height, DCT256_QUANT_BANDS, 8, channel)?,
+        25 | 26 => default_dct_quant_weights(width, height, DCT128X256_QUANT_BANDS, 8, channel)?,
         _ => {
             return Err(Error::Unsupported(
                 "default dequant matrix for VarDCT AC strategy",
@@ -5826,6 +5946,121 @@ const DCT64_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
         -0.27321684,
     ],
     [0.9 * 4992.2485, -1.2, -1.2, -0.8, -0.7, -0.7, -0.4, -0.5],
+]];
+const DCT32X64_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [
+        0.65 * 23629.074,
+        -1.025,
+        -0.78,
+        -0.65012,
+        -0.19041574,
+        -0.20819396,
+        -0.421064,
+        -0.32733846,
+    ],
+    [
+        0.65 * 8611.324,
+        -0.30419582,
+        -0.36330366,
+        -0.3566038,
+        -0.34430745,
+        -0.33699593,
+        -0.30180866,
+        -0.27321684,
+    ],
+    [0.65 * 4492.2485, -1.2, -1.2, -0.8, -0.7, -0.7, -0.4, -0.5],
+]];
+const DCT128_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [
+        1.8 * 26629.074,
+        -1.025,
+        -0.78,
+        -0.65012,
+        -0.19041574,
+        -0.20819396,
+        -0.421064,
+        -0.32733846,
+    ],
+    [
+        1.8 * 9311.323,
+        -0.30419582,
+        -0.36330366,
+        -0.3566038,
+        -0.34430745,
+        -0.33699593,
+        -0.30180866,
+        -0.27321684,
+    ],
+    [1.8 * 4992.2485, -1.2, -1.2, -0.8, -0.7, -0.7, -0.4, -0.5],
+]];
+const DCT64X128_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [
+        1.3 * 23629.074,
+        -1.025,
+        -0.78,
+        -0.65012,
+        -0.19041574,
+        -0.20819396,
+        -0.421064,
+        -0.32733846,
+    ],
+    [
+        1.3 * 8611.324,
+        -0.30419582,
+        -0.36330366,
+        -0.3566038,
+        -0.34430745,
+        -0.33699593,
+        -0.30180866,
+        -0.27321684,
+    ],
+    [1.3 * 4492.2485, -1.2, -1.2, -0.8, -0.7, -0.7, -0.4, -0.5],
+]];
+const DCT256_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [
+        3.6 * 26629.074,
+        -1.025,
+        -0.78,
+        -0.65012,
+        -0.19041574,
+        -0.20819396,
+        -0.421064,
+        -0.32733846,
+    ],
+    [
+        3.6 * 9311.323,
+        -0.30419582,
+        -0.36330366,
+        -0.3566038,
+        -0.34430745,
+        -0.33699593,
+        -0.30180866,
+        -0.27321684,
+    ],
+    [3.6 * 4992.2485, -1.2, -1.2, -0.8, -0.7, -0.7, -0.4, -0.5],
+]];
+const DCT128X256_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [
+        2.6 * 23629.074,
+        -1.025,
+        -0.78,
+        -0.65012,
+        -0.19041574,
+        -0.20819396,
+        -0.421064,
+        -0.32733846,
+    ],
+    [
+        2.6 * 8611.324,
+        -0.30419582,
+        -0.36330366,
+        -0.3566038,
+        -0.34430745,
+        -0.33699593,
+        -0.30180866,
+        -0.27321684,
+    ],
+    [2.6 * 4492.2485, -1.2, -1.2, -0.8, -0.7, -0.7, -0.4, -0.5],
 ]];
 const DCT4X8_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
     [
@@ -8265,6 +8500,54 @@ mod tests {
         assert_eq!(samples.len(), 32);
         for sample in samples {
             assert!((sample - 1.0).abs() < 1.0e-6);
+        }
+    }
+
+    #[test]
+    fn large_dct_strategies_have_spatial_transforms_and_default_dequant_matrices() {
+        let expected = [
+            (18, 64, 64),
+            (19, 32, 64),
+            (20, 64, 32),
+            (21, 128, 128),
+            (22, 64, 128),
+            (23, 128, 64),
+            (24, 256, 256),
+            (25, 128, 256),
+            (26, 256, 128),
+        ];
+
+        for (raw_strategy, width, height) in expected {
+            let transform = spatial_transform_for_strategy(raw_strategy).unwrap();
+            assert_eq!(transform.width, width, "raw strategy {raw_strategy}");
+            assert_eq!(transform.height, height, "raw strategy {raw_strategy}");
+            assert!(matches!(transform.kind, SpatialTransformKind::Dct));
+
+            for channel in 0..3 {
+                let matrix = default_dequant_matrix(raw_strategy, channel).unwrap();
+                assert_eq!(matrix.len(), width * height, "raw strategy {raw_strategy}");
+                assert!(
+                    matrix
+                        .iter()
+                        .all(|weight| weight.is_finite() && *weight > 0.0),
+                    "raw strategy {raw_strategy} channel {channel}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn inverse_dct_rect_large_rectangular_dc_only_is_constant() {
+        for (width, height) in [(32, 64), (64, 32)] {
+            let mut coefficients = vec![0.0f32; width * height];
+            coefficients[0] = (width * height) as f32;
+            coefficients[0] = coefficients[0].sqrt();
+            let samples = inverse_dct_rect(width, height, &coefficients).unwrap();
+
+            assert_eq!(samples.len(), width * height);
+            for sample in samples {
+                assert!((sample - 1.0).abs() < 1.0e-5);
+            }
         }
     }
 

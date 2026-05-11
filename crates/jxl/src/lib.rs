@@ -3192,6 +3192,116 @@ mod tests {
     }
 
     #[test]
+    fn decode_supports_multigroup_var_dct_block_contexts_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!(
+                "skipping multi-group VarDCT block-context decode; reference cjxl is not built"
+            );
+            return;
+        };
+
+        let input = unique_temp_path("jxl-rgba-vardct-multigroup-source", "ppm");
+        let encoded = unique_temp_path("jxl-rgba-vardct-multigroup", "jxl");
+        write_multigroup_vardct_source_ppm(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args([
+                "-d",
+                "1.0",
+                "-e",
+                "7",
+                "-m",
+                "0",
+                "--container=0",
+                "--quiet",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let reference = reference_djxl().map(|djxl| {
+            let output = unique_temp_path("jxl-rgba-vardct-multigroup-reference", "ppm");
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed: {}",
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+
+            let reference = std::fs::read(&output).unwrap();
+            let _ = std::fs::remove_file(&output);
+            parse_ppm_rgb(&reference)
+        });
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        let vardct = info.first_frame_vardct.as_ref().unwrap();
+        let plan = info.first_frame_vardct_plan.as_ref().unwrap();
+        let global = plan.global.as_ref().unwrap();
+        assert_eq!(vardct.width, 1024);
+        assert_eq!(vardct.height, 512);
+        assert_eq!(vardct.groups_x, 4);
+        assert_eq!(vardct.groups_y, 2);
+        assert_eq!(plan.ac_group_metadata.len(), 8);
+        assert!(!global.block_context_map.all_default);
+        assert!(!global.block_context_map.qf_thresholds.is_empty());
+        assert_eq!(global.block_context_map.num_contexts, 6);
+        assert!(
+            plan.ac_group_metadata
+                .iter()
+                .all(|group| group.spatial_with_dc_grid.is_some())
+        );
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        let rgba = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, 1024);
+        assert_eq!(decoded.height, 512);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.alpha, None);
+        let PixelData::U8(decoded_pixels) = &decoded.pixels else {
+            panic!("expected multi-group VarDCT decode to return 8-bit RGB");
+        };
+        assert_eq!(decoded_pixels.len(), 1024 * 512 * 3);
+        assert_decoded_channels_match_image(&decode_channels(&encoded_bytes).unwrap(), &decoded);
+        assert_eq!(rgba.width, 1024);
+        assert_eq!(rgba.height, 512);
+        assert!(rgba.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+
+        if let Some(reference) = &reference {
+            let metrics = srgb8_oracle_metrics(
+                &decoded,
+                reference,
+                &[0, decoded_pixels.len() / 2, decoded_pixels.len() - 1],
+            );
+            assert_eq!(
+                metrics,
+                Srgb8OracleMetrics {
+                    max_abs_error: 254,
+                    sum_abs_error: 164301497,
+                    checksum: 16729806134982033339,
+                    anchors: vec![0, 13, 0],
+                    reference_anchors: vec![0, 4, 254],
+                }
+            );
+        } else {
+            eprintln!("skipping multi-group VarDCT djxl comparison; tool is not built");
+        }
+    }
+
+    #[test]
     fn decode_supports_resampled_generated_var_dct_when_available() {
         let Some(cjxl) = reference_cjxl() else {
             eprintln!("skipping resampled VarDCT decode; reference cjxl is not built");
@@ -5636,6 +5746,20 @@ mod tests {
     fn write_resampled_vardct_source_ppm(path: &Path) {
         let width = 96u32;
         let height = 64u32;
+        let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
+        for y in 0..height {
+            for x in 0..width {
+                bytes.push((x * 255 / (width - 1)) as u8);
+                bytes.push((y * 255 / (height - 1)) as u8);
+                bytes.push(((x + y) * 255 / (width + height - 2)) as u8);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn write_multigroup_vardct_source_ppm(path: &Path) {
+        let width = 1024u32;
+        let height = 512u32;
         let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
         for y in 0..height {
             for x in 0..width {
