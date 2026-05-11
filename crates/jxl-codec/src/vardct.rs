@@ -1052,6 +1052,38 @@ pub fn xyb_image_to_srgb16_with_variant(
     vardct_linear_rgb_to_srgb16(&vardct_xyb_to_linear_rgb_with_variant(xyb, opsin, variant))
 }
 
+/// Assembles available VarDCT YCbCr data and converts it to interleaved sRGB8.
+pub fn assemble_vardct_ycbcr_srgb8_image(
+    plan: &VarDctDecodePlan,
+) -> Result<Option<VarDctSrgb8Image>> {
+    assemble_vardct_xyb_image(plan).map(|image| image.map(|image| vardct_ycbcr_to_srgb8(&image)))
+}
+
+/// Assembles one VarDCT YCbCr AC pass and converts it to interleaved sRGB8.
+pub fn assemble_vardct_ycbcr_srgb8_image_for_pass(
+    plan: &VarDctDecodePlan,
+    pass: usize,
+) -> Result<Option<VarDctSrgb8Image>> {
+    assemble_vardct_xyb_image_for_pass(plan, pass)
+        .map(|image| image.map(|image| vardct_ycbcr_to_srgb8(&image)))
+}
+
+/// Assembles available VarDCT YCbCr data and converts it to interleaved sRGB16.
+pub fn assemble_vardct_ycbcr_srgb16_image(
+    plan: &VarDctDecodePlan,
+) -> Result<Option<VarDctSrgb16Image>> {
+    assemble_vardct_xyb_image(plan).map(|image| image.map(|image| vardct_ycbcr_to_srgb16(&image)))
+}
+
+/// Assembles one VarDCT YCbCr AC pass and converts it to interleaved sRGB16.
+pub fn assemble_vardct_ycbcr_srgb16_image_for_pass(
+    plan: &VarDctDecodePlan,
+    pass: usize,
+) -> Result<Option<VarDctSrgb16Image>> {
+    assemble_vardct_xyb_image_for_pass(plan, pass)
+        .map(|image| image.map(|image| vardct_ycbcr_to_srgb16(&image)))
+}
+
 /// Assembles available VarDCT XYB data and converts it to interleaved sRGB8.
 ///
 /// This is a debugging and fixture-oracle convenience layer over
@@ -2616,6 +2648,23 @@ fn linear_sample_to_srgb8(sample: f32) -> u8 {
     linear_sample_to_srgb(sample, u8::MAX as f32) as u8
 }
 
+fn vardct_ycbcr_to_srgb8(ycbcr: &VarDctXybImage) -> VarDctSrgb8Image {
+    let sample_count = ycbcr.channels[0].len();
+    let mut pixels = Vec::with_capacity(sample_count * 3);
+    for index in 0..sample_count {
+        let [r, g, b] = ycbcr_to_rgb_samples(ycbcr, index);
+        pixels.push(encoded_sample_to_u8(r));
+        pixels.push(encoded_sample_to_u8(g));
+        pixels.push(encoded_sample_to_u8(b));
+    }
+
+    VarDctSrgb8Image {
+        width: ycbcr.width,
+        height: ycbcr.height,
+        pixels,
+    }
+}
+
 fn vardct_linear_rgb_to_srgb16(rgb: &VarDctRgbImage) -> VarDctSrgb16Image {
     let sample_count = rgb.channels[0].len();
     let mut pixels = Vec::with_capacity(sample_count * 3);
@@ -2634,6 +2683,46 @@ fn vardct_linear_rgb_to_srgb16(rgb: &VarDctRgbImage) -> VarDctSrgb16Image {
 
 fn linear_sample_to_srgb16(sample: f32) -> u16 {
     linear_sample_to_srgb(sample, u16::MAX as f32) as u16
+}
+
+fn vardct_ycbcr_to_srgb16(ycbcr: &VarDctXybImage) -> VarDctSrgb16Image {
+    let sample_count = ycbcr.channels[0].len();
+    let mut pixels = Vec::with_capacity(sample_count * 3);
+    for index in 0..sample_count {
+        let [r, g, b] = ycbcr_to_rgb_samples(ycbcr, index);
+        pixels.push(encoded_sample_to_u16(r));
+        pixels.push(encoded_sample_to_u16(g));
+        pixels.push(encoded_sample_to_u16(b));
+    }
+
+    VarDctSrgb16Image {
+        width: ycbcr.width,
+        height: ycbcr.height,
+        pixels,
+    }
+}
+
+fn ycbcr_to_rgb_samples(ycbcr: &VarDctXybImage, index: usize) -> [f32; 3] {
+    let y = ycbcr.channels[1][index] + 128.0 / 255.0;
+    let cb = ycbcr.channels[0][index];
+    let cr = ycbcr.channels[2][index];
+    [
+        cr.mul_add(1.402, y),
+        (-0.299f32 * 1.402 / 0.587).mul_add(cr, (-0.114f32 * 1.772 / 0.587).mul_add(cb, y)),
+        cb.mul_add(1.772, y),
+    ]
+}
+
+fn encoded_sample_to_u8(sample: f32) -> u8 {
+    encoded_sample_to_int(sample, u8::MAX as f32) as u8
+}
+
+fn encoded_sample_to_u16(sample: f32) -> u16 {
+    encoded_sample_to_int(sample, u16::MAX as f32) as u16
+}
+
+fn encoded_sample_to_int(sample: f32, max: f32) -> u32 {
+    sample.clamp(0.0, 1.0).mul_add(max, 0.0).round() as u32
 }
 
 fn linear_sample_to_srgb(sample: f32, max: f32) -> u32 {
@@ -2765,6 +2854,7 @@ pub struct VarDctBlockContextMapMetadata {
     pub dc_thresholds: [Vec<i32>; 3],
     pub qf_thresholds: Vec<u32>,
     pub context_map_size: usize,
+    pub context_map: Option<Vec<u8>>,
     pub num_contexts: usize,
     pub num_dc_contexts: usize,
     pub context_map_probe: Option<VarDctContextMapProbe>,
@@ -5172,9 +5262,9 @@ fn vardct_block_context(
         * block_context_map.num_dc_contexts)
         + quant_dc_context;
     let context_map = block_context_map
-        .context_map_probe
+        .context_map
         .as_ref()
-        .map(|probe| probe.entries.as_slice())
+        .map(Vec::as_slice)
         .unwrap_or(&DEFAULT_CONTEXT_MAP);
     context_map
         .get(index)
@@ -8777,6 +8867,7 @@ fn read_vardct_block_context_map(reader: &mut BitReader<'_>) -> Result<VarDctBlo
                 dc_thresholds: [Vec::new(), Vec::new(), Vec::new()],
                 qf_thresholds: Vec::new(),
                 context_map_size: DEFAULT_CONTEXT_MAP_SIZE,
+                context_map: None,
                 num_contexts: DEFAULT_NUM_CONTEXTS,
                 num_dc_contexts: 1,
                 context_map_probe: None,
@@ -8850,6 +8941,7 @@ fn read_vardct_block_context_map(reader: &mut BitReader<'_>) -> Result<VarDctBlo
             dc_thresholds,
             qf_thresholds,
             context_map_size,
+            context_map: Some(context_map),
             num_contexts,
             num_dc_contexts,
             context_map_probe: Some(VarDctContextMapProbe::from(&context_map_probe)),

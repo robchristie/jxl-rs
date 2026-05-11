@@ -3230,6 +3230,106 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
 }
 
 #[test]
+fn generated_vardct_nondefault_qf_context_map_decodes_coefficients_when_available() {
+    let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+        eprintln!(
+            "skipping generated VarDCT block context map check; reference tools are not built"
+        );
+        return;
+    };
+
+    let input = workspace_path("reference/libjxl/testdata/jxl/flower/flower_cropped.jpg");
+    let encoded = unique_temp_path("jxl-rs-vardct-qf-context-map", "jxl");
+    let reference_output = unique_temp_path("jxl-rs-vardct-qf-context-map-reference", "ppm");
+    let cjxl_output = Command::new(&cjxl)
+        .arg(&input)
+        .arg(&encoded)
+        .args([
+            "-d",
+            "1.0",
+            "-e",
+            "9",
+            "-j",
+            "0",
+            "-m",
+            "0",
+            "--container=0",
+            "--quiet",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        cjxl_output.status.success(),
+        "reference cjxl failed for non-default qf context map: {}",
+        String::from_utf8_lossy(&cjxl_output.stderr)
+    );
+    let djxl_output = Command::new(&djxl)
+        .arg(&encoded)
+        .arg(&reference_output)
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        djxl_output.status.success(),
+        "reference djxl failed for non-default qf context map: {}",
+        String::from_utf8_lossy(&djxl_output.stderr)
+    );
+    let reference = std::fs::read(&reference_output).unwrap();
+    let _ = std::fs::remove_file(&reference_output);
+    let reference = parse_ppm_rgb(&reference);
+
+    let encoded_bytes = std::fs::read(&encoded).unwrap();
+    let _ = std::fs::remove_file(&encoded);
+    let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+    let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+    let global = plan.global.as_ref().unwrap();
+    assert!(!global.block_context_map.all_default);
+    assert_eq!(global.block_context_map.qf_thresholds.len(), 1);
+    assert_eq!(global.block_context_map.context_map_size, 78);
+    assert_eq!(
+        global.block_context_map.context_map.as_ref().map(Vec::len),
+        Some(78)
+    );
+    assert!(
+        plan.ac_group_metadata
+            .iter()
+            .all(|metadata| metadata.parse_error.is_none())
+    );
+
+    let first_group = plan
+        .ac_group_metadata
+        .iter()
+        .find(|metadata| metadata.payload.group.group == 0)
+        .unwrap();
+    assert_eq!(first_group.parse_error, None);
+    assert!(
+        first_group
+            .coefficient_summary
+            .as_ref()
+            .is_some_and(|summary| summary.blocks_decoded > 0)
+    );
+    assert!(first_group.dequantized_grid.is_some());
+    assert!(first_group.spatial_with_dc_grid.is_some());
+
+    let srgb = assemble_vardct_srgb8_image(plan).unwrap().unwrap();
+    let width = srgb.width as usize;
+    let height = srgb.height as usize;
+    let center = (height / 2 * width + width / 2) * 3;
+    let anchor_indices = [
+        0,
+        center,
+        center + 1,
+        ((height - 1) * width + width - 1) * 3 + 2,
+    ];
+    let metrics = srgb8_oracle_metrics(&srgb, &reference, &anchor_indices);
+    assert_eq!(metrics.max_abs_error, 255);
+    assert_eq!(metrics.sum_abs_error, 340_701_912);
+    assert_eq!(metrics.checksum, 7585262771943461864);
+    assert_eq!(metrics.anchors, vec![44, 255, 164, 0]);
+    assert_eq!(metrics.reference_anchors, vec![77, 133, 52, 100]);
+}
+
+#[test]
 fn generated_vardct_intensity_target_scales_opsin_plan_when_available() {
     let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
         eprintln!("skipping generated VarDCT intensity fixture; reference tools are not built");

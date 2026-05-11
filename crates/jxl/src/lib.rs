@@ -1165,12 +1165,23 @@ fn vardct_srgb8_image_from_codestream(
     region: Option<jxl_codec::ImageRegion>,
     pass: Option<usize>,
 ) -> Result<jxl_codec::VarDctSrgb8Image> {
-    ensure_vardct_srgb_color_transform(codestream)?;
+    let color_transform = first_frame_color_transform(codestream)?;
     let plan = first_frame_vardct_plan(codestream)?;
-    ensure_vardct_default_ac_quant_matrices(plan)?;
-    let mut image = match pass {
-        Some(pass) => jxl_codec::assemble_vardct_srgb8_image_for_pass(plan, pass)?,
-        None => jxl_codec::assemble_vardct_srgb8_image(plan)?,
+    let mut image = match color_transform {
+        jxl_codec::ColorTransform::Xyb => match pass {
+            Some(pass) => jxl_codec::assemble_vardct_srgb8_image_for_pass(plan, pass)?,
+            None => jxl_codec::assemble_vardct_srgb8_image(plan)?,
+        },
+        jxl_codec::ColorTransform::YCbCr => {
+            ensure_vardct_ycbcr_444(codestream)?;
+            match pass {
+                Some(pass) => jxl_codec::assemble_vardct_ycbcr_srgb8_image_for_pass(plan, pass)?,
+                None => jxl_codec::assemble_vardct_ycbcr_srgb8_image(plan)?,
+            }
+        }
+        jxl_codec::ColorTransform::None => {
+            return Err(Error::Unsupported("VarDCT non-XYB color transform"));
+        }
     }
     .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
     if let Some(region) = region {
@@ -1289,12 +1300,23 @@ fn vardct_srgb16_image_from_codestream(
     region: Option<jxl_codec::ImageRegion>,
     pass: Option<usize>,
 ) -> Result<jxl_codec::VarDctSrgb16Image> {
-    ensure_vardct_srgb_color_transform(codestream)?;
+    let color_transform = first_frame_color_transform(codestream)?;
     let plan = first_frame_vardct_plan(codestream)?;
-    ensure_vardct_default_ac_quant_matrices(plan)?;
-    let mut image = match pass {
-        Some(pass) => jxl_codec::assemble_vardct_srgb16_image_for_pass(plan, pass)?,
-        None => jxl_codec::assemble_vardct_srgb16_image(plan)?,
+    let mut image = match color_transform {
+        jxl_codec::ColorTransform::Xyb => match pass {
+            Some(pass) => jxl_codec::assemble_vardct_srgb16_image_for_pass(plan, pass)?,
+            None => jxl_codec::assemble_vardct_srgb16_image(plan)?,
+        },
+        jxl_codec::ColorTransform::YCbCr => {
+            ensure_vardct_ycbcr_444(codestream)?;
+            match pass {
+                Some(pass) => jxl_codec::assemble_vardct_ycbcr_srgb16_image_for_pass(plan, pass)?,
+                None => jxl_codec::assemble_vardct_ycbcr_srgb16_image(plan)?,
+            }
+        }
+        jxl_codec::ColorTransform::None => {
+            return Err(Error::Unsupported("VarDCT non-XYB color transform"));
+        }
     }
     .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
     if let Some(region) = region {
@@ -1303,24 +1325,13 @@ fn vardct_srgb16_image_from_codestream(
     Ok(image)
 }
 
-fn ensure_vardct_srgb_color_transform(codestream: &jxl_codec::Codestream) -> Result<()> {
+fn ensure_vardct_ycbcr_444(codestream: &jxl_codec::Codestream) -> Result<()> {
     let frame = codestream
         .first_frame
         .as_ref()
         .ok_or(Error::Unsupported("image has no decoded frame"))?;
-    if frame.color_transform != jxl_codec::ColorTransform::Xyb {
-        return Err(Error::Unsupported("VarDCT non-XYB color transform"));
-    }
-    Ok(())
-}
-
-fn ensure_vardct_default_ac_quant_matrices(plan: &VarDctDecodePlan) -> Result<()> {
-    if plan
-        .ac_global_metadata
-        .as_ref()
-        .is_some_and(|metadata| metadata.all_default_quant_matrices == Some(false))
-    {
-        return Err(Error::Unsupported("custom VarDCT AC quant matrices"));
+    if frame.chroma_subsampling.max_h_shift != 0 || frame.chroma_subsampling.max_v_shift != 0 {
+        return Err(Error::Unsupported("VarDCT YCbCr chroma subsampling"));
     }
     Ok(())
 }
@@ -3212,7 +3223,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_public_ycbcr_var_dct_reconstruction() {
+    fn decodes_public_ycbcr_var_dct_reconstruction() {
         let bytes = std::fs::read(workspace_path(
             "reference/libjxl/testdata/jxl/jpeg_reconstruction/1x1_exif_xmp.jxl",
         ))
@@ -3231,21 +3242,41 @@ mod tests {
             Some(false)
         );
         assert_eq!(plan.ac_global_metadata.as_ref().unwrap().parse_error, None);
+
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded.width, 1);
+        assert_eq!(decoded.height, 1);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.bit_depth, 8);
+        assert_eq!(decoded.pixels, PixelData::U8(vec![255, 255, 255]));
+
+        let channels = decode_channels(&bytes).unwrap();
+        assert_eq!(channels.width, 1);
+        assert_eq!(channels.height, 1);
+        assert_eq!(channels.color_channels, 3);
+        assert_eq!(channels.bit_depth, 8);
+        assert!(channels.channels.iter().take(3).all(|channel| {
+            channel.width == 1
+                && channel.height == 1
+                && channel.bit_depth == 8
+                && channel.samples == ChannelData::U8(vec![255])
+        }));
+
         assert_eq!(
-            decode(&bytes),
-            Err(Error::Unsupported("VarDCT non-XYB color transform"))
+            decode_rgba8(&bytes).unwrap(),
+            RgbaImage {
+                width: 1,
+                height: 1,
+                pixels: vec![255, 255, 255, 255],
+            }
         );
         assert_eq!(
-            decode_channels(&bytes),
-            Err(Error::Unsupported("VarDCT non-XYB color transform"))
-        );
-        assert_eq!(
-            decode_rgba8(&bytes),
-            Err(Error::Unsupported("VarDCT non-XYB color transform"))
-        );
-        assert_eq!(
-            decode_rgba16(&bytes),
-            Err(Error::Unsupported("VarDCT non-XYB color transform"))
+            decode_rgba16(&bytes).unwrap(),
+            Rgba16Image {
+                width: 1,
+                height: 1,
+                pixels: vec![u16::MAX, u16::MAX, u16::MAX, u16::MAX],
+            }
         );
     }
 
