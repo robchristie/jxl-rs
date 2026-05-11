@@ -718,16 +718,11 @@ fn append_vardct_extra_channels(
     if codestream.metadata.extra_channels.is_empty() {
         return Ok(());
     }
-    if vardct_pass.is_some() {
-        return Err(Error::Unsupported(
-            "VarDCT extra-channel progressive pass output",
-        ));
-    }
     if channels.color_channels != codestream.metadata.num_color_channels() as usize {
         return Err(Error::Unsupported("VarDCT non-RGB raw channel output"));
     }
 
-    let mut extra_channels = vardct_extra_channels_from_ac(codestream)?;
+    let mut extra_channels = vardct_extra_channels_from_ac(codestream, vardct_pass)?;
     if let Some(region) = region {
         extra_channels = extra_channels
             .into_iter()
@@ -749,6 +744,7 @@ struct VarDctExtraChannelPlane {
 
 fn vardct_extra_channels_from_ac(
     codestream: &jxl_codec::Codestream,
+    vardct_pass: Option<usize>,
 ) -> Result<Vec<DecodedChannel>> {
     let plan = first_frame_vardct_plan(codestream)?;
     let color_channels = codestream.metadata.num_color_channels() as usize;
@@ -779,7 +775,11 @@ fn vardct_extra_channels_from_ac(
         .collect::<Result<Vec<_>>>()?;
 
     let mut saw_extra_channel = vec![false; planes.len()];
-    for group_metadata in &plan.ac_group_metadata {
+    for group_metadata in plan.ac_group_metadata.iter().filter(|group| {
+        vardct_pass
+            .map(|pass| group.payload.pass == pass)
+            .unwrap_or(true)
+    }) {
         if !group_metadata.payload.modular_ac_channels.is_empty()
             && group_metadata.modular_ac.is_none()
         {
@@ -2534,6 +2534,16 @@ mod tests {
         };
         assert_eq!(roi_alpha, &window_u8(&expected_alpha, 320, roi));
 
+        let pass0_channels = Decoder::new()
+            .vardct_pass(0)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_eq!(pass0_channels.alpha, channels.alpha);
+        let ChannelData::U8(pass0_alpha) = &pass0_channels.channels[3].samples else {
+            panic!("expected 8-bit VarDCT pass alpha channel");
+        };
+        assert_eq!(pass0_alpha, &expected_alpha);
+
         let decoded = decode(&encoded_bytes).unwrap();
         assert_eq!(decoded.width, 320);
         assert_eq!(decoded.height, 192);
@@ -2557,6 +2567,19 @@ mod tests {
         assert_eq!(rgba8.pixels.len(), expected_alpha.len() * 4);
         assert_eq!(
             rgba8
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>(),
+            expected_alpha
+        );
+
+        let pass0_rgba8 = Decoder::new()
+            .vardct_pass(0)
+            .decode_rgba8(&encoded_bytes)
+            .unwrap();
+        assert_eq!(
+            pass0_rgba8
                 .pixels
                 .chunks_exact(4)
                 .map(|pixel| pixel[3])
@@ -2875,6 +2898,20 @@ mod tests {
             panic!("expected 8-bit VarDCT ROI alpha channel");
         };
         assert_eq!(roi_alpha, &window_u8(&source.alpha, source.width, roi));
+
+        let pass0_channels = Decoder::new()
+            .vardct_pass(0)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_eq!(pass0_channels.alpha, channels.alpha);
+        let ChannelData::U8(pass0_depth) = &pass0_channels.channels[3].samples else {
+            panic!("expected 8-bit VarDCT pass depth channel");
+        };
+        assert_eq!(pass0_depth, &source.depth);
+        let ChannelData::U8(pass0_alpha) = &pass0_channels.channels[4].samples else {
+            panic!("expected 8-bit VarDCT pass alpha channel");
+        };
+        assert_eq!(pass0_alpha, &source.alpha);
     }
 
     #[test]
