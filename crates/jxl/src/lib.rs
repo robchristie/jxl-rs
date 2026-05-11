@@ -96,6 +96,13 @@ pub struct Rgba16Image {
     pub pixels: Vec<u16>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearRgbImage {
+    pub width: u32,
+    pub height: u32,
+    pub pixels: Vec<f32>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PixelData {
     U8(Vec<u8>),
@@ -106,6 +113,15 @@ pub enum PixelData {
 pub enum ChannelData {
     U8(Vec<u8>),
     U16(Vec<u16>),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecodedOutput {
+    Channels(DecodedChannels),
+    Interleaved(DecodedImage),
+    Rgba8(RgbaImage),
+    Rgba16(Rgba16Image),
+    LinearRgb(LinearRgbImage),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -124,6 +140,10 @@ pub struct DecodeOptions {
     /// passes. Modular decode rejects this option.
     pub vardct_pass: Option<usize>,
     pub threads: ThreadingMode,
+    /// Maximum bytes allowed for the returned decoded sample buffers.
+    ///
+    /// This is a final-output guard for the buffered API. It does not yet
+    /// account for all parser and reconstruction working memory.
     pub memory_limit: Option<usize>,
 }
 
@@ -134,6 +154,7 @@ pub enum DecodeOutput {
     Interleaved,
     Rgba8,
     Rgba16,
+    LinearRgb,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +208,11 @@ impl Decoder {
         self
     }
 
+    pub fn without_roi(mut self) -> Self {
+        self.options.roi = None;
+        self
+    }
+
     pub fn threads(mut self, threads: ThreadingMode) -> Self {
         self.options.threads = threads;
         self
@@ -197,9 +223,30 @@ impl Decoder {
         self
     }
 
+    pub fn without_memory_limit(mut self) -> Self {
+        self.options.memory_limit = None;
+        self
+    }
+
     pub fn vardct_pass(mut self, pass: usize) -> Self {
         self.options.vardct_pass = Some(pass);
         self
+    }
+
+    pub fn final_vardct_pass(mut self) -> Self {
+        self.options.vardct_pass = None;
+        self
+    }
+
+    /// Decodes using the configured [`DecodeOutput`] mode.
+    pub fn decode_output(&self, input: &[u8]) -> Result<DecodedOutput> {
+        match self.options.output {
+            DecodeOutput::Channels => self.decode_channels(input).map(DecodedOutput::Channels),
+            DecodeOutput::Interleaved => self.decode(input).map(DecodedOutput::Interleaved),
+            DecodeOutput::Rgba8 => self.decode_rgba8(input).map(DecodedOutput::Rgba8),
+            DecodeOutput::Rgba16 => self.decode_rgba16(input).map(DecodedOutput::Rgba16),
+            DecodeOutput::LinearRgb => self.decode_linear_rgb(input).map(DecodedOutput::LinearRgb),
+        }
     }
 
     /// Decodes raw image channels.
@@ -219,7 +266,10 @@ impl Decoder {
     /// modular AC side streams are decoded.
     pub fn decode_channels(&self, input: &[u8]) -> Result<DecodedChannels> {
         self.validate_shared_options()?;
-        decode_channels_buffered(input, self.codec_config(), self.options.vardct_pass)
+        let channels =
+            decode_channels_buffered(input, self.codec_config(), self.options.vardct_pass)?;
+        enforce_decoded_channels_memory_limit(&channels, self.options.memory_limit)?;
+        Ok(channels)
     }
 
     /// Decodes an interleaved image.
@@ -238,7 +288,9 @@ impl Decoder {
     /// [`Error::Unsupported`].
     pub fn decode(&self, input: &[u8]) -> Result<DecodedImage> {
         self.validate_shared_options()?;
-        decode_buffered(input, self.codec_config(), self.options.vardct_pass)
+        let image = decode_buffered(input, self.codec_config(), self.options.vardct_pass)?;
+        enforce_decoded_image_memory_limit(&image, self.options.memory_limit)?;
+        Ok(image)
     }
 
     /// Decodes to interleaved straight-alpha RGBA8.
@@ -257,7 +309,9 @@ impl Decoder {
     /// [`Error::Unsupported`].
     pub fn decode_rgba8(&self, input: &[u8]) -> Result<RgbaImage> {
         self.validate_shared_options()?;
-        decode_rgba8_buffered(input, self.codec_config(), self.options.vardct_pass)
+        let image = decode_rgba8_buffered(input, self.codec_config(), self.options.vardct_pass)?;
+        enforce_memory_limit(image.pixels.len(), self.options.memory_limit)?;
+        Ok(image)
     }
 
     /// Decodes to interleaved straight-alpha RGBA16.
@@ -276,13 +330,32 @@ impl Decoder {
     /// [`Error::Unsupported`].
     pub fn decode_rgba16(&self, input: &[u8]) -> Result<Rgba16Image> {
         self.validate_shared_options()?;
-        decode_rgba16_buffered(input, self.codec_config(), self.options.vardct_pass)
+        let image = decode_rgba16_buffered(input, self.codec_config(), self.options.vardct_pass)?;
+        enforce_memory_limit(
+            checked_sample_bytes(image.pixels.len(), 2)?,
+            self.options.memory_limit,
+        )?;
+        Ok(image)
+    }
+
+    /// Decodes VarDCT XYB color to interleaved linear RGB `f32` samples.
+    ///
+    /// This path applies the inverse opsin transform. It intentionally does
+    /// not yet perform full JPEG XL output color management. Modular images
+    /// and non-XYB VarDCT color transforms currently return
+    /// [`Error::Unsupported`].
+    pub fn decode_linear_rgb(&self, input: &[u8]) -> Result<LinearRgbImage> {
+        self.validate_shared_options()?;
+        let image =
+            decode_linear_rgb_buffered(input, self.codec_config(), self.options.vardct_pass)?;
+        enforce_memory_limit(
+            checked_sample_bytes(image.pixels.len(), std::mem::size_of::<f32>())?,
+            self.options.memory_limit,
+        )?;
+        Ok(image)
     }
 
     fn validate_shared_options(&self) -> Result<()> {
-        if self.options.memory_limit.is_some() {
-            return Err(Error::Unsupported("memory-limited decode"));
-        }
         if self.options.threads == ThreadingMode::Threads(0) {
             return Err(Error::Unsupported("zero decoder threads"));
         }
@@ -291,20 +364,34 @@ impl Decoder {
 
     fn codec_config(&self) -> jxl_codec::DecodeConfig {
         jxl_codec::DecodeConfig {
-            modular_group_execution: match self.options.threads {
-                ThreadingMode::Auto | ThreadingMode::Single => {
-                    jxl_codec::ModularGroupExecution::Serial
-                }
-                ThreadingMode::Threads(threads) => {
-                    jxl_codec::ModularGroupExecution::RequestedThreads(threads)
-                }
-            },
+            modular_group_execution: modular_group_execution_for_threading(self.options.threads),
             region: self.options.roi.map(|roi| jxl_codec::ImageRegion {
                 x: roi.x,
                 y: roi.y,
                 width: roi.width,
                 height: roi.height,
             }),
+        }
+    }
+}
+
+fn modular_group_execution_for_threading(
+    threading: ThreadingMode,
+) -> jxl_codec::ModularGroupExecution {
+    match threading {
+        ThreadingMode::Single => jxl_codec::ModularGroupExecution::Serial,
+        ThreadingMode::Threads(threads) => {
+            jxl_codec::ModularGroupExecution::RequestedThreads(threads)
+        }
+        ThreadingMode::Auto => {
+            let threads = std::thread::available_parallelism()
+                .map(|threads| threads.get())
+                .unwrap_or(1);
+            if threads > 1 {
+                jxl_codec::ModularGroupExecution::RequestedThreads(threads)
+            } else {
+                jxl_codec::ModularGroupExecution::Serial
+            }
         }
     }
 }
@@ -331,6 +418,10 @@ pub fn inspect(input: &[u8]) -> Result<ImageInfo> {
     })
 }
 
+pub fn decode_with_options(input: &[u8], options: DecodeOptions) -> Result<DecodedOutput> {
+    Decoder::with_options(options).decode_output(input)
+}
+
 pub fn decode_channels(input: &[u8]) -> Result<DecodedChannels> {
     Decoder::new().decode_channels(input)
 }
@@ -345,6 +436,10 @@ pub fn decode_rgba8(input: &[u8]) -> Result<RgbaImage> {
 
 pub fn decode_rgba16(input: &[u8]) -> Result<Rgba16Image> {
     Decoder::new().decode_rgba16(input)
+}
+
+pub fn decode_linear_rgb(input: &[u8]) -> Result<LinearRgbImage> {
+    Decoder::new().decode_linear_rgb(input)
 }
 
 fn decode_channels_buffered(
@@ -567,24 +662,20 @@ fn decode_buffered_channels_with_transform_data(
     let alpha = decode_interleaved_alpha(&channels, alpha_channel_index)?;
     let output_channel_indices = interleaved_channel_indices(&channels, alpha_channel_index)?;
     validate_interleaved_channel_geometry(&channels, &output_channel_indices, alpha_channel_index)?;
-    if output_channel_indices
-        .iter()
-        .any(|&index| channels.channels[index].bit_depth != channels.bit_depth)
-    {
-        return Err(Error::Unsupported("mixed bit-depth interleaved output"));
-    }
+    let output_bit_depth = interleaved_output_bit_depth(&channels, &output_channel_indices)?;
 
-    if channels.bit_depth <= 8 {
+    if output_bit_depth <= 8 {
         Ok(DecodedImage {
             width: channels.width,
             height: channels.height,
             color_channels: channels.color_channels,
             alpha,
-            bit_depth: channels.bit_depth,
+            bit_depth: output_bit_depth,
             pixels: PixelData::U8(interleave_channel_u8(
                 &channels,
                 &output_channel_indices,
                 transform_data,
+                output_bit_depth,
             )?),
         })
     } else {
@@ -593,11 +684,12 @@ fn decode_buffered_channels_with_transform_data(
             height: channels.height,
             color_channels: channels.color_channels,
             alpha,
-            bit_depth: channels.bit_depth,
+            bit_depth: output_bit_depth,
             pixels: PixelData::U16(interleave_channel_u16(
                 &channels,
                 &output_channel_indices,
                 transform_data,
+                output_bit_depth,
             )?),
         })
     }
@@ -662,6 +754,34 @@ fn decode_rgba8_buffered(
     rgba8_from_modular_codestream(codestream, config.region)
 }
 
+fn decode_linear_rgb_buffered(
+    input: &[u8],
+    config: jxl_codec::DecodeConfig,
+    vardct_pass: Option<usize>,
+) -> Result<LinearRgbImage> {
+    let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
+    if first_frame_encoding(&codestream)? != FrameEncoding::VarDct {
+        reject_vardct_pass_for_non_vardct(vardct_pass)?;
+        if first_frame_color_transform(&codestream)? != jxl_codec::ColorTransform::Xyb {
+            return Err(Error::Unsupported("linear RGB modular output"));
+        }
+        let orientation = codestream.metadata.orientation;
+        return orient_linear_rgb(
+            modular_xyb_linear_rgb_from_codestream(&codestream, config.region)?,
+            orientation,
+        );
+    }
+    if first_frame_color_transform(&codestream)? != jxl_codec::ColorTransform::Xyb {
+        return Err(Error::Unsupported("linear RGB non-XYB output"));
+    }
+
+    let orientation = codestream.metadata.orientation;
+    orient_linear_rgb(
+        vardct_linear_rgb_image_from_codestream(&codestream, config.region, vardct_pass)?,
+        orientation,
+    )
+}
+
 fn rgba8_from_modular_codestream(
     codestream: jxl_codec::Codestream,
     region: Option<jxl_codec::ImageRegion>,
@@ -719,6 +839,29 @@ fn rgba8_from_vardct_srgb8(image: jxl_codec::VarDctSrgb8Image) -> Result<RgbaIma
         pixels.push(255);
     }
     Ok(RgbaImage {
+        width: image.width,
+        height: image.height,
+        pixels,
+    })
+}
+
+fn linear_rgb_from_vardct_rgb(image: jxl_codec::VarDctRgbImage) -> Result<LinearRgbImage> {
+    let sample_count = vardct_srgb_sample_count(image.width, image.height)?;
+    if image
+        .channels
+        .iter()
+        .any(|channel| channel.len() != sample_count)
+    {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+
+    let mut pixels = Vec::with_capacity(sample_count * 3);
+    for index in 0..sample_count {
+        pixels.push(image.channels[0][index]);
+        pixels.push(image.channels[1][index]);
+        pixels.push(image.channels[2][index]);
+    }
+    Ok(LinearRgbImage {
         width: image.width,
         height: image.height,
         pixels,
@@ -865,6 +1008,19 @@ fn modular_xyb_decoded_channels_srgb16_from_codestream(
     let mut channels = decoded_channels_from_vardct_srgb16(srgb, 3)?;
     append_modular_extra_channels(&mut channels, codestream)?;
     Ok(channels)
+}
+
+fn modular_xyb_linear_rgb_from_codestream(
+    codestream: &jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+) -> Result<LinearRgbImage> {
+    let opsin = jxl_codec::xyb_opsin_params(&codestream.metadata, &codestream.transform_data);
+    let rgb = jxl_codec::xyb_image_to_linear_rgb_with_variant(
+        &modular_codestream_to_xyb_image(codestream, region)?,
+        &opsin,
+        jxl_codec::VarDctXybInverseVariant::BMinusBias,
+    );
+    linear_rgb_from_vardct_rgb(rgb)
 }
 
 fn modular_codestream_to_xyb_image(
@@ -1244,6 +1400,25 @@ fn vardct_srgb8_image_from_codestream(
     Ok(image)
 }
 
+fn vardct_linear_rgb_image_from_codestream(
+    codestream: &jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+    pass: Option<usize>,
+) -> Result<LinearRgbImage> {
+    let plan = first_frame_vardct_plan(codestream)?;
+    let xyb = match pass {
+        Some(pass) => jxl_codec::assemble_vardct_xyb_image_for_pass(plan, pass)?,
+        None => jxl_codec::assemble_vardct_xyb_image(plan)?,
+    }
+    .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+    let rgb = jxl_codec::xyb_image_to_linear_rgb(&xyb, &plan.opsin_params);
+    let mut image = linear_rgb_from_vardct_rgb(rgb)?;
+    if let Some(region) = region {
+        image = crop_linear_rgb_image(image, region)?;
+    }
+    Ok(image)
+}
+
 fn decode_rgba16_buffered(
     input: &[u8],
     config: jxl_codec::DecodeConfig,
@@ -1478,6 +1653,18 @@ fn crop_rgba16_image(image: Rgba16Image, region: jxl_codec::ImageRegion) -> Resu
     })
 }
 
+fn crop_linear_rgb_image(
+    image: LinearRgbImage,
+    region: jxl_codec::ImageRegion,
+) -> Result<LinearRgbImage> {
+    validate_decode_region(image.width, image.height, region)?;
+    Ok(LinearRgbImage {
+        width: region.width,
+        height: region.height,
+        pixels: crop_interleaved_f32(&image.pixels, image.width, 3, region)?,
+    })
+}
+
 fn crop_vardct_srgb8(
     image: jxl_codec::VarDctSrgb8Image,
     region: jxl_codec::ImageRegion,
@@ -1562,6 +1749,42 @@ fn crop_interleaved_u16(
     channels: usize,
     region: jxl_codec::ImageRegion,
 ) -> Result<Vec<u16>> {
+    let output_len = (region.width as usize)
+        .checked_mul(region.height as usize)
+        .and_then(|samples| samples.checked_mul(channels))
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let row_stride = (width as usize)
+        .checked_mul(channels)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let x = (region.x as usize)
+        .checked_mul(channels)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let copy_width = (region.width as usize)
+        .checked_mul(channels)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let mut output = Vec::with_capacity(output_len);
+    for y in region.y as usize..(region.y + region.height) as usize {
+        let start = y
+            .checked_mul(row_stride)
+            .and_then(|start| start.checked_add(x))
+            .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+        let end = start
+            .checked_add(copy_width)
+            .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+        let row = samples
+            .get(start..end)
+            .ok_or(Error::InvalidCodestream("decoded pixel count mismatch"))?;
+        output.extend_from_slice(row);
+    }
+    Ok(output)
+}
+
+fn crop_interleaved_f32(
+    samples: &[f32],
+    width: u32,
+    channels: usize,
+    region: jxl_codec::ImageRegion,
+) -> Result<Vec<f32>> {
     let output_len = (region.width as usize)
         .checked_mul(region.height as usize)
         .and_then(|samples| samples.checked_mul(channels))
@@ -1775,6 +1998,16 @@ fn orient_rgba16(image: Rgba16Image, orientation: Orientation) -> Result<Rgba16I
     })
 }
 
+fn orient_linear_rgb(image: LinearRgbImage, orientation: Orientation) -> Result<LinearRgbImage> {
+    let (width, height, pixels) =
+        orient_interleaved(image.pixels, image.width, image.height, 3, orientation)?;
+    Ok(LinearRgbImage {
+        width,
+        height,
+        pixels,
+    })
+}
+
 fn orient_interleaved<T: Copy>(
     samples: Vec<T>,
     width: u32,
@@ -1963,6 +2196,28 @@ fn validate_interleaved_channel_geometry(
     Ok(())
 }
 
+fn interleaved_output_bit_depth(
+    channels: &DecodedChannels,
+    output_channel_indices: &[usize],
+) -> Result<u32> {
+    let mut output_bit_depth = 0;
+    for &index in output_channel_indices {
+        let bit_depth = channels
+            .channels
+            .get(index)
+            .ok_or(Error::Unsupported("missing color channel output"))?
+            .bit_depth;
+        if bit_depth > 16 {
+            return Err(Error::Unsupported("integer sample depths above 16 bits"));
+        }
+        output_bit_depth = output_bit_depth.max(bit_depth);
+    }
+    if output_bit_depth == 0 {
+        return Err(Error::Unsupported("missing color channel output"));
+    }
+    Ok(output_bit_depth)
+}
+
 fn validate_upsampled_channel_geometry(
     channels: &DecodedChannels,
     channel: &DecodedChannel,
@@ -2060,7 +2315,9 @@ fn interleave_channel_u8(
     image: &DecodedChannels,
     channel_indices: &[usize],
     transform_data: Option<&CustomTransformData>,
+    output_bit_depth: u32,
 ) -> Result<Vec<u8>> {
+    let output_max = max_sample_value(output_bit_depth)?;
     let output_channels = channel_indices.len();
     let sample_count = decoded_channel_sample_count(image)?;
     let pixels = sample_count
@@ -2077,12 +2334,12 @@ fn interleave_channel_u8(
                 let channel = &image.channels[channel_index];
                 let (sample, bit_depth) =
                     channel_sample_at(channel, image.width, x, y, index, transform_data)?;
-                if bit_depth != image.bit_depth || bit_depth > 8 {
+                if bit_depth > output_bit_depth || output_bit_depth > 8 {
                     return Err(Error::InvalidCodestream(
                         "decoded channel bit-depth mismatch",
                     ));
                 }
-                output.push(sample as u8);
+                output.push(scale_sample_to(sample, bit_depth, output_max) as u8);
             }
         }
     }
@@ -2093,7 +2350,9 @@ fn interleave_channel_u16(
     image: &DecodedChannels,
     channel_indices: &[usize],
     transform_data: Option<&CustomTransformData>,
+    output_bit_depth: u32,
 ) -> Result<Vec<u16>> {
+    let output_max = max_sample_value(output_bit_depth)?;
     let output_channels = channel_indices.len();
     let sample_count = decoded_channel_sample_count(image)?;
     let pixels = sample_count
@@ -2110,12 +2369,12 @@ fn interleave_channel_u16(
                 let channel = &image.channels[channel_index];
                 let (sample, bit_depth) =
                     channel_sample_at(channel, image.width, x, y, index, transform_data)?;
-                if bit_depth != image.bit_depth || bit_depth > 16 {
+                if bit_depth > output_bit_depth || output_bit_depth > 16 {
                     return Err(Error::InvalidCodestream(
                         "decoded channel bit-depth mismatch",
                     ));
                 }
-                output.push(sample as u16);
+                output.push(scale_sample_to(sample, bit_depth, output_max) as u16);
             }
         }
     }
@@ -2757,6 +3016,49 @@ fn decoded_channel_sample_count(image: &DecodedChannels) -> Result<usize> {
         .ok_or(Error::InvalidCodestream("decoded image size overflow"))
 }
 
+fn enforce_decoded_channels_memory_limit(
+    channels: &DecodedChannels,
+    limit: Option<usize>,
+) -> Result<()> {
+    let mut bytes = 0usize;
+    for channel in &channels.channels {
+        bytes = bytes
+            .checked_add(channel_data_bytes(&channel.samples)?)
+            .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    }
+    enforce_memory_limit(bytes, limit)
+}
+
+fn enforce_decoded_image_memory_limit(image: &DecodedImage, limit: Option<usize>) -> Result<()> {
+    let bytes = match &image.pixels {
+        PixelData::U8(samples) => samples.len(),
+        PixelData::U16(samples) => checked_sample_bytes(samples.len(), 2)?,
+    };
+    enforce_memory_limit(bytes, limit)
+}
+
+fn channel_data_bytes(samples: &ChannelData) -> Result<usize> {
+    match samples {
+        ChannelData::U8(samples) => Ok(samples.len()),
+        ChannelData::U16(samples) => checked_sample_bytes(samples.len(), 2),
+    }
+}
+
+fn checked_sample_bytes(samples: usize, bytes_per_sample: usize) -> Result<usize> {
+    samples
+        .checked_mul(bytes_per_sample)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))
+}
+
+fn enforce_memory_limit(required: usize, limit: Option<usize>) -> Result<()> {
+    if let Some(limit) = limit
+        && required > limit
+    {
+        return Err(Error::Unsupported("memory limit exceeded"));
+    }
+    Ok(())
+}
+
 fn decoded_image_output_channels(image: &DecodedImage) -> usize {
     image.color_channels + usize::from(image.alpha.is_some())
 }
@@ -2835,6 +3137,54 @@ mod tests {
     }
 
     #[test]
+    fn decoder_memory_limit_can_be_cleared() {
+        let decoder = Decoder::new().memory_limit(1).without_memory_limit();
+
+        assert_eq!(decoder.options().memory_limit, None);
+    }
+
+    #[test]
+    fn decoder_region_and_pass_can_be_cleared() {
+        let decoder = Decoder::new()
+            .roi(Rect {
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4,
+            })
+            .vardct_pass(0)
+            .without_roi()
+            .final_vardct_pass();
+
+        assert_eq!(decoder.options().roi, None);
+        assert_eq!(decoder.options().vardct_pass, None);
+    }
+
+    #[test]
+    fn threading_modes_map_to_modular_group_execution() {
+        assert_eq!(
+            modular_group_execution_for_threading(ThreadingMode::Single),
+            jxl_codec::ModularGroupExecution::Serial
+        );
+        assert_eq!(
+            modular_group_execution_for_threading(ThreadingMode::Threads(3)),
+            jxl_codec::ModularGroupExecution::RequestedThreads(3)
+        );
+        let expected_auto_threads = std::thread::available_parallelism()
+            .map(|threads| threads.get())
+            .unwrap_or(1);
+        let expected_auto = if expected_auto_threads > 1 {
+            jxl_codec::ModularGroupExecution::RequestedThreads(expected_auto_threads)
+        } else {
+            jxl_codec::ModularGroupExecution::Serial
+        };
+        assert_eq!(
+            modular_group_execution_for_threading(ThreadingMode::Auto),
+            expected_auto
+        );
+    }
+
+    #[test]
     fn decoder_methods_match_convenience_functions() {
         let bytes = std::fs::read(workspace_path(
             "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
@@ -2846,6 +3196,60 @@ mod tests {
         assert_eq!(decoder.decode(&bytes), decode(&bytes));
         assert_eq!(decoder.decode_rgba8(&bytes), decode_rgba8(&bytes));
         assert_eq!(decoder.decode_rgba16(&bytes), decode_rgba16(&bytes));
+    }
+
+    #[test]
+    fn decoder_output_option_selects_decode_method() {
+        let bytes = std::fs::read(workspace_path(
+            "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
+        ))
+        .unwrap();
+
+        assert_eq!(
+            Decoder::new().decode_output(&bytes),
+            decode_channels(&bytes).map(DecodedOutput::Channels)
+        );
+        assert_eq!(
+            Decoder::new()
+                .output(DecodeOutput::Interleaved)
+                .decode_output(&bytes),
+            decode(&bytes).map(DecodedOutput::Interleaved)
+        );
+        assert_eq!(
+            Decoder::new()
+                .output(DecodeOutput::Rgba8)
+                .decode_output(&bytes),
+            decode_rgba8(&bytes).map(DecodedOutput::Rgba8)
+        );
+        assert_eq!(
+            Decoder::new()
+                .output(DecodeOutput::Rgba16)
+                .decode_output(&bytes),
+            decode_rgba16(&bytes).map(DecodedOutput::Rgba16)
+        );
+        assert_eq!(
+            Decoder::new()
+                .output(DecodeOutput::LinearRgb)
+                .decode_output(&bytes),
+            Err(Error::Unsupported("linear RGB modular output"))
+        );
+    }
+
+    #[test]
+    fn decode_with_options_uses_configured_output() {
+        let bytes = std::fs::read(workspace_path(
+            "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
+        ))
+        .unwrap();
+        let options = DecodeOptions {
+            output: DecodeOutput::Rgba8,
+            ..DecodeOptions::default()
+        };
+
+        assert_eq!(
+            decode_with_options(&bytes, options),
+            decode_rgba8(&bytes).map(DecodedOutput::Rgba8)
+        );
     }
 
     #[test]
@@ -2865,10 +3269,31 @@ mod tests {
         assert_eq!(roi_decoder.decode_rgba8(&bytes).unwrap().height, 8);
         assert_eq!(roi_decoder.decode_rgba16(&bytes).unwrap().width, 8);
 
-        let memory_decoder = Decoder::new().memory_limit(1024);
+        let memory_decoder = Decoder::new().memory_limit(usize::MAX);
+        assert_eq!(memory_decoder.decode(&bytes), decode(&bytes));
         assert_eq!(
-            memory_decoder.decode(&bytes),
-            Err(Error::Unsupported("memory-limited decode"))
+            memory_decoder.decode_channels(&bytes),
+            decode_channels(&bytes)
+        );
+        assert_eq!(memory_decoder.decode_rgba8(&bytes), decode_rgba8(&bytes));
+        assert_eq!(memory_decoder.decode_rgba16(&bytes), decode_rgba16(&bytes));
+
+        let tight_memory_decoder = Decoder::new().memory_limit(1);
+        assert_eq!(
+            tight_memory_decoder.decode(&bytes),
+            Err(Error::Unsupported("memory limit exceeded"))
+        );
+        assert_eq!(
+            tight_memory_decoder.decode_channels(&bytes),
+            Err(Error::Unsupported("memory limit exceeded"))
+        );
+        assert_eq!(
+            tight_memory_decoder.decode_rgba8(&bytes),
+            Err(Error::Unsupported("memory limit exceeded"))
+        );
+        assert_eq!(
+            tight_memory_decoder.decode_rgba16(&bytes),
+            Err(Error::Unsupported("memory limit exceeded"))
         );
 
         let zero_threads_decoder = Decoder::new().threads(ThreadingMode::Threads(0));
@@ -3390,6 +3815,10 @@ mod tests {
                 pixels: vec![u16::MAX, u16::MAX, u16::MAX, u16::MAX],
             }
         );
+        assert_eq!(
+            decode_linear_rgb(&bytes),
+            Err(Error::Unsupported("linear RGB non-XYB output"))
+        );
     }
 
     #[test]
@@ -3780,9 +4209,35 @@ mod tests {
 
             let decoded = decode(&encoded_bytes).unwrap();
             let rgba = decode_rgba8(&encoded_bytes).unwrap();
+            let linear = decode_linear_rgb(&encoded_bytes).unwrap();
             assert_eq!(rgba.width, 320, "{name}");
             assert_eq!(rgba.height, 192, "{name}");
             assert!(rgba.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+            assert_eq!(linear.width, 320, "{name}");
+            assert_eq!(linear.height, 192, "{name}");
+            assert_eq!(linear.pixels.len(), 320 * 192 * 3, "{name}");
+            assert!(
+                linear.pixels.iter().all(|sample| sample.is_finite()),
+                "{name}"
+            );
+            assert!(
+                linear
+                    .pixels
+                    .chunks_exact(3)
+                    .any(|pixel| pixel[0] != 0.0 || pixel[1] != 0.0 || pixel[2] != 0.0),
+                "{name}"
+            );
+            let roi = Rect {
+                x: 17,
+                y: 19,
+                width: 41,
+                height: 29,
+            };
+            let roi_linear = Decoder::new()
+                .roi(roi)
+                .decode_linear_rgb(&encoded_bytes)
+                .unwrap();
+            assert_roi_matches_full_linear_rgb(&roi_linear, &linear, roi);
 
             let metrics = srgb8_oracle_metrics(
                 &decoded,
@@ -3879,12 +4334,31 @@ mod tests {
         let decoded = decode(&encoded_bytes).unwrap();
         let rgba = decode_rgba8(&encoded_bytes).unwrap();
         let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        let linear = decode_linear_rgb(&encoded_bytes).unwrap();
+        let configured_linear = Decoder::new()
+            .output(DecodeOutput::LinearRgb)
+            .decode_output(&encoded_bytes)
+            .unwrap();
         let roi_decoded = roi_decoder.decode(&encoded_bytes).unwrap();
         let roi_rgba = roi_decoder.decode_rgba8(&encoded_bytes).unwrap();
         let roi_rgba16 = roi_decoder.decode_rgba16(&encoded_bytes).unwrap();
+        let roi_linear = roi_decoder.decode_linear_rgb(&encoded_bytes).unwrap();
+        let roi_configured_linear = decode_with_options(
+            &encoded_bytes,
+            DecodeOptions {
+                output: DecodeOutput::LinearRgb,
+                roi: Some(roi),
+                ..DecodeOptions::default()
+            },
+        )
+        .unwrap();
         let pass0_decoded = Decoder::new()
             .vardct_pass(0)
             .decode(&encoded_bytes)
+            .unwrap();
+        let pass0_linear = Decoder::new()
+            .vardct_pass(0)
+            .decode_linear_rgb(&encoded_bytes)
             .unwrap();
         let pass0_rgba = Decoder::new()
             .vardct_pass(0)
@@ -3917,6 +4391,28 @@ mod tests {
         );
         assert_decoded_channels_match_image(&decoded_channels, &decoded);
         assert_roi_matches_full_channels(&roi_channels, &decoded_channels, roi);
+        assert_eq!(linear.width, 320);
+        assert_eq!(linear.height, 192);
+        assert_eq!(linear.pixels.len(), 320 * 192 * 3);
+        assert!(linear.pixels.iter().all(|sample| sample.is_finite()));
+        assert!(
+            linear
+                .pixels
+                .chunks_exact(3)
+                .any(|pixel| pixel[0] != 0.0 || pixel[1] != 0.0 || pixel[2] != 0.0)
+        );
+        assert_roi_matches_full_linear_rgb(&roi_linear, &linear, roi);
+        assert_eq!(configured_linear, DecodedOutput::LinearRgb(linear.clone()));
+        assert_eq!(
+            roi_configured_linear,
+            DecodedOutput::LinearRgb(roi_linear.clone())
+        );
+        assert_eq!(
+            Decoder::new()
+                .memory_limit(1)
+                .decode_linear_rgb(&encoded_bytes),
+            Err(Error::Unsupported("memory limit exceeded"))
+        );
         if let Some(reference) = &reference {
             assert_eq!(decoded.width, reference.width);
             assert_eq!(decoded.height, reference.height);
@@ -3944,6 +4440,10 @@ mod tests {
         assert_eq!(pass0_decoded.color_channels, 3);
         assert_eq!(pass0_decoded.alpha, None);
         assert_eq!(pass0_decoded.bit_depth, 8);
+        assert_eq!(pass0_linear.width, 320);
+        assert_eq!(pass0_linear.height, 192);
+        assert_eq!(pass0_linear.pixels.len(), 320 * 192 * 3);
+        assert!(pass0_linear.pixels.iter().all(|sample| sample.is_finite()));
         let pass0_channels = Decoder::new()
             .vardct_pass(0)
             .decode_channels(&encoded_bytes)
@@ -4015,6 +4515,10 @@ mod tests {
             Err(Error::InvalidCodestream("decode region is outside image"))
         );
         assert_eq!(
+            out_of_bounds_roi_decoder.decode_linear_rgb(&encoded_bytes),
+            Err(Error::InvalidCodestream("decode region is outside image"))
+        );
+        assert_eq!(
             missing_pass_decoder.decode(&encoded_bytes),
             Err(Error::Unsupported("VarDCT image reconstruction"))
         );
@@ -4028,6 +4532,10 @@ mod tests {
         );
         assert_eq!(
             missing_pass_decoder.decode_rgba16(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT image reconstruction"))
+        );
+        assert_eq!(
+            missing_pass_decoder.decode_linear_rgb(&encoded_bytes),
             Err(Error::Unsupported("VarDCT image reconstruction"))
         );
     }
@@ -4417,6 +4925,30 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected_alpha
         );
+
+        let linear = decode_linear_rgb(&encoded_bytes).unwrap();
+        assert_eq!(linear.width, 320);
+        assert_eq!(linear.height, 192);
+        assert_eq!(linear.pixels.len(), 320 * 192 * 3);
+        assert!(linear.pixels.iter().all(|sample| sample.is_finite()));
+        assert!(
+            linear
+                .pixels
+                .chunks_exact(3)
+                .any(|pixel| pixel[0] != 0.0 || pixel[1] != 0.0 || pixel[2] != 0.0)
+        );
+        let roi_linear = Decoder::new()
+            .roi(roi)
+            .decode_linear_rgb(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_linear_rgb(&roi_linear, &linear, roi);
+        let pass0_linear = Decoder::new()
+            .vardct_pass(0)
+            .decode_linear_rgb(&encoded_bytes)
+            .unwrap();
+        assert_eq!(pass0_linear.width, linear.width);
+        assert_eq!(pass0_linear.height, linear.height);
+        assert_eq!(pass0_linear.pixels.len(), linear.pixels.len());
 
         let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
         assert_eq!(rgba8.width, 320);
@@ -7284,6 +7816,147 @@ mod tests {
     }
 
     #[test]
+    fn decode_channels_exposes_subsampled_modular_depth16_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!(
+                "skipping 16-bit subsampled modular depth raw-channel decode; reference cjxl is not built"
+            );
+            return;
+        };
+
+        let input = unique_temp_path("jxl-gray-modular-depth16-subsampled-source", "pam");
+        let encoded = unique_temp_path("jxl-gray-modular-depth16-subsampled", "jxl");
+        let source = write_gray_depth_source_pam16(&input);
+        assert_eq!(
+            source.depth.len(),
+            source.width as usize * source.height as usize
+        );
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args([
+                "-d",
+                "0",
+                "-m",
+                "1",
+                "--container=0",
+                "--ec_resampling",
+                "2",
+                "--quiet",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert_eq!(info.metadata.color_encoding.color_space, ColorSpace::Gray);
+        assert_eq!(info.metadata.num_color_channels(), 1);
+        assert_eq!(info.metadata.extra_channels.len(), 1);
+        assert_eq!(
+            info.metadata.extra_channels[0].channel_type,
+            ExtraChannelType::Depth
+        );
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, source.width);
+        assert_eq!(channels.height, source.height);
+        assert_eq!(channels.color_channels, 1);
+        assert_eq!(channels.alpha, None);
+        assert_eq!(channels.bit_depth, 16);
+        assert_eq!(channels.channels.len(), 2);
+        let gray_channel = &channels.channels[0];
+        assert_eq!(gray_channel.width, source.width);
+        assert_eq!(gray_channel.height, source.height);
+        assert_eq!(gray_channel.hshift, 0);
+        assert_eq!(gray_channel.vshift, 0);
+        assert_eq!(gray_channel.bit_depth, 16);
+        let depth_channel = &channels.channels[1];
+        assert_eq!(depth_channel.width, source.width.div_ceil(2));
+        assert_eq!(depth_channel.height, source.height.div_ceil(2));
+        assert_eq!(depth_channel.hshift, 1);
+        assert_eq!(depth_channel.vshift, 1);
+        assert_eq!(depth_channel.bit_depth, 16);
+        let ChannelData::U16(depth) = &depth_channel.samples else {
+            panic!("expected 16-bit subsampled modular depth channel");
+        };
+        assert_eq!(depth.iter().copied().min(), Some(1284));
+        assert_eq!(depth.iter().copied().max(), Some(63735));
+        let depth_checksum = depth
+            .iter()
+            .enumerate()
+            .fold(0u64, |checksum, (index, sample)| {
+                checksum
+                    .wrapping_mul(1_099_511_628_211)
+                    .wrapping_add(index as u64)
+                    .rotate_left(11)
+                    ^ u64::from(*sample)
+            });
+        assert_eq!(depth_checksum, 2_995_956_734_774_139_113);
+
+        let roi = Rect {
+            x: 3,
+            y: 4,
+            width: 13,
+            height: 9,
+        };
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_eq!(roi_channels.width, roi.width);
+        assert_eq!(roi_channels.height, roi.height);
+        assert_eq!(roi_channels.color_channels, channels.color_channels);
+        assert_eq!(roi_channels.alpha, None);
+        assert_eq!(roi_channels.channels.len(), channels.channels.len());
+        let roi_depth_channel = &roi_channels.channels[1];
+        assert_eq!(roi_depth_channel.width, 7);
+        assert_eq!(roi_depth_channel.height, 5);
+        assert_eq!(roi_depth_channel.hshift, 1);
+        assert_eq!(roi_depth_channel.vshift, 1);
+        assert_eq!(roi_depth_channel.bit_depth, 16);
+        let ChannelData::U16(roi_depth) = &roi_depth_channel.samples else {
+            panic!("expected 16-bit subsampled modular ROI depth channel");
+        };
+        let shifted_roi = Rect {
+            x: 1,
+            y: 2,
+            width: 7,
+            height: 5,
+        };
+        assert_eq!(
+            roi_depth,
+            &window_u16(depth, depth_channel.width, shifted_roi)
+        );
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, source.width);
+        assert_eq!(decoded.height, source.height);
+        assert_eq!(decoded.color_channels, 1);
+        assert_eq!(decoded.alpha, None);
+        assert_eq!(decoded.bit_depth, 16);
+        let PixelData::U16(gray) = &decoded.pixels else {
+            panic!("expected 16-bit grayscale modular depth image");
+        };
+        let ChannelData::U16(raw_gray) = &gray_channel.samples else {
+            panic!("expected 16-bit grayscale modular color channel");
+        };
+        assert_eq!(gray, raw_gray);
+
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        for (pixel, &gray) in rgba16.pixels.chunks_exact(4).zip(raw_gray) {
+            assert_eq!(pixel, &[gray, gray, gray, u16::MAX]);
+        }
+    }
+
+    #[test]
     fn decode_rgba8_ignores_non_alpha_extra_channels_when_available() {
         let Some(cjxl) = reference_cjxl() else {
             eprintln!("skipping extra-channel RGBA comparison; reference cjxl is not built");
@@ -7582,8 +8255,18 @@ mod tests {
         );
 
         assert_eq!(
-            decode_buffered_channels(channels, Some(3)),
-            Err(Error::Unsupported("mixed bit-depth interleaved output"))
+            decode_buffered_channels(channels, Some(3)).unwrap(),
+            DecodedImage {
+                width: 2,
+                height: 1,
+                color_channels: 3,
+                alpha: Some(AlphaInfo {
+                    bit_depth: 8,
+                    premultiplied: true,
+                }),
+                bit_depth: 16,
+                pixels: PixelData::U16(vec![16_448, 32_896, 65_535, 32_896, 0, 0, 257, 0]),
+            }
         );
     }
 
@@ -7683,6 +8366,13 @@ mod tests {
         width: u32,
         height: u32,
         depth: Vec<u8>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct GrayDepthPam16 {
+        width: u32,
+        height: u32,
+        depth: Vec<u16>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -8149,6 +8839,19 @@ mod tests {
         );
     }
 
+    fn assert_roi_matches_full_linear_rgb(
+        roi_image: &LinearRgbImage,
+        full: &LinearRgbImage,
+        roi: Rect,
+    ) {
+        assert_eq!(roi_image.width, roi.width);
+        assert_eq!(roi_image.height, roi.height);
+        assert_eq!(
+            roi_image.pixels,
+            window_interleaved_f32(&full.pixels, full.width, 3, roi)
+        );
+    }
+
     fn assert_decoded_channels_match_image(channels: &DecodedChannels, image: &DecodedImage) {
         assert_eq!(channels.width, image.width);
         assert_eq!(channels.height, image.height);
@@ -8299,6 +9002,18 @@ mod tests {
     }
 
     fn window_interleaved_u16(samples: &[u16], width: u32, channels: usize, roi: Rect) -> Vec<u16> {
+        let mut output = Vec::with_capacity(roi.width as usize * roi.height as usize * channels);
+        let row_stride = width as usize * channels;
+        let x = roi.x as usize * channels;
+        let copy_width = roi.width as usize * channels;
+        for y in roi.y as usize..(roi.y + roi.height) as usize {
+            let start = y * row_stride + x;
+            output.extend_from_slice(&samples[start..start + copy_width]);
+        }
+        output
+    }
+
+    fn window_interleaved_f32(samples: &[f32], width: u32, channels: usize, roi: Rect) -> Vec<f32> {
         let mut output = Vec::with_capacity(roi.width as usize * roi.height as usize * channels);
         let row_stride = width as usize * channels;
         let x = roi.x as usize * channels;
@@ -8657,6 +9372,31 @@ mod tests {
         }
         std::fs::write(path, bytes).unwrap();
         GrayDepthPam {
+            width,
+            height,
+            depth,
+        }
+    }
+
+    fn write_gray_depth_source_pam16(path: &Path) -> GrayDepthPam16 {
+        let width = 23u32;
+        let height = 19u32;
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE\nTUPLTYPE Depth\nENDHDR\n"
+        )
+        .into_bytes();
+        let mut depth = Vec::with_capacity(width as usize * height as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let gray_sample = ((x * 1543 + y * 811 + 9) & 0xffff) as u16;
+                let depth_sample = ((x * 2017 + y * 1543 + 73) & 0xffff) as u16;
+                bytes.extend_from_slice(&gray_sample.to_be_bytes());
+                bytes.extend_from_slice(&depth_sample.to_be_bytes());
+                depth.push(depth_sample);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+        GrayDepthPam16 {
             width,
             height,
             depth,

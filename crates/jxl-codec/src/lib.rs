@@ -84,6 +84,6 @@ pub use vardct::{
     assemble_vardct_ycbcr_srgb8_image_for_pass, assemble_vardct_ycbcr_srgb16_image,
     assemble_vardct_ycbcr_srgb16_image_for_pass, vardct_dc_coefficient_diagnostics,
     vardct_xyb_inverse_variant_diagnostics, vardct_xyb_rgb_diagnostics, xyb_image_to_linear_rgb,
-    xyb_image_to_srgb8, xyb_image_to_srgb8_with_variant, xyb_image_to_srgb16,
-    xyb_image_to_srgb16_with_variant, xyb_opsin_params,
+    xyb_image_to_linear_rgb_with_variant, xyb_image_to_srgb8, xyb_image_to_srgb8_with_variant,
+    xyb_image_to_srgb16, xyb_image_to_srgb16_with_variant, xyb_opsin_params,
 };

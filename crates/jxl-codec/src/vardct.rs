@@ -1025,6 +1025,15 @@ pub fn xyb_image_to_linear_rgb(xyb: &VarDctXybImage, opsin: &VarDctOpsinParams) 
     vardct_xyb_to_linear_rgb(xyb, opsin)
 }
 
+/// Converts an XYB image to linear RGB with an explicit inverse variant.
+pub fn xyb_image_to_linear_rgb_with_variant(
+    xyb: &VarDctXybImage,
+    opsin: &VarDctOpsinParams,
+    variant: VarDctXybInverseVariant,
+) -> VarDctRgbImage {
+    vardct_xyb_to_linear_rgb_with_variant(xyb, opsin, variant)
+}
+
 /// Converts an XYB image to interleaved sRGB8.
 pub fn xyb_image_to_srgb8(xyb: &VarDctXybImage, opsin: &VarDctOpsinParams) -> VarDctSrgb8Image {
     vardct_linear_rgb_to_srgb8(&vardct_xyb_to_linear_rgb(xyb, opsin))
