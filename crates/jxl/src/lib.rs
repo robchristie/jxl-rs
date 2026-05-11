@@ -213,8 +213,9 @@ impl Decoder {
     ///
     /// Modular still images return decoded integer channels. Supported VarDCT
     /// still images return reconstructed 8-bit sRGB RGB channels, not original
-    /// codestream channels. VarDCT images with extra channels are rejected
-    /// until VarDCT extra-channel reconstruction is implemented.
+    /// codestream channels. VarDCT extra channels are exposed when their
+    /// modular AC side streams are decoded; VarDCT presentation output still
+    /// rejects alpha until compositing is implemented.
     pub fn decode_channels(&self, input: &[u8]) -> Result<DecodedChannels> {
         self.validate_shared_options()?;
         decode_channels_buffered(input, self.codec_config(), self.options.vardct_pass)
@@ -397,10 +398,11 @@ fn decode_channels_codestream(
     vardct_pass: Option<usize>,
 ) -> Result<DecodedChannels> {
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
-        reject_vardct_extra_channel_output(&codestream.metadata)?;
         let orientation = codestream.metadata.orientation;
         let image = vardct_srgb8_image_from_codestream(&codestream, region, vardct_pass)?;
-        return decoded_channels_from_vardct_srgb8(image, orientation);
+        let mut channels = decoded_channels_from_vardct_srgb8(image)?;
+        append_vardct_extra_channels(&mut channels, &codestream, region, vardct_pass)?;
+        return orient_decoded_channels(channels, orientation);
     }
     reject_vardct_pass_for_non_vardct(vardct_pass)?;
     let modular = codestream
@@ -609,33 +611,30 @@ fn decoded_image_from_vardct_srgb8(image: jxl_codec::VarDctSrgb8Image) -> Result
 
 fn decoded_channels_from_vardct_srgb8(
     image: jxl_codec::VarDctSrgb8Image,
-    orientation: Orientation,
 ) -> Result<DecodedChannels> {
-    let (width, height, pixels) =
-        orient_interleaved(image.pixels, image.width, image.height, 3, orientation)?;
-    let sample_count = vardct_srgb_sample_count(width, height)?;
+    let sample_count = vardct_srgb_sample_count(image.width, image.height)?;
     let mut channels = [
         Vec::with_capacity(sample_count),
         Vec::with_capacity(sample_count),
         Vec::with_capacity(sample_count),
     ];
-    for pixel in pixels.chunks_exact(3) {
+    for pixel in image.pixels.chunks_exact(3) {
         channels[0].push(pixel[0]);
         channels[1].push(pixel[1]);
         channels[2].push(pixel[2]);
     }
 
     Ok(DecodedChannels {
-        width,
-        height,
+        width: image.width,
+        height: image.height,
         color_channels: 3,
         alpha: None,
         bit_depth: 8,
         channels: channels
             .into_iter()
             .map(|samples| DecodedChannel {
-                width,
-                height,
+                width: image.width,
+                height: image.height,
                 hshift: 0,
                 vshift: 0,
                 bit_depth: 8,
@@ -643,6 +642,186 @@ fn decoded_channels_from_vardct_srgb8(
             })
             .collect(),
     })
+}
+
+fn append_vardct_extra_channels(
+    channels: &mut DecodedChannels,
+    codestream: &jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+    vardct_pass: Option<usize>,
+) -> Result<()> {
+    if codestream.metadata.extra_channels.is_empty() {
+        return Ok(());
+    }
+    if vardct_pass.is_some() {
+        return Err(Error::Unsupported(
+            "VarDCT extra-channel progressive pass output",
+        ));
+    }
+    if channels.color_channels != codestream.metadata.num_color_channels() as usize {
+        return Err(Error::Unsupported("VarDCT non-RGB raw channel output"));
+    }
+
+    let mut extra_channels = vardct_extra_channels_from_ac(codestream)?;
+    if let Some(region) = region {
+        extra_channels = extra_channels
+            .into_iter()
+            .map(|channel| crop_decoded_channel(channel, region))
+            .collect::<Result<Vec<_>>>()?;
+    }
+    channels.alpha = raw_alpha_info(&codestream.metadata)?;
+    channels.channels.extend(extra_channels);
+    Ok(())
+}
+
+struct VarDctExtraChannelPlane {
+    width: u32,
+    height: u32,
+    bit_depth: u32,
+    samples: Vec<i32>,
+    filled: Vec<bool>,
+}
+
+fn vardct_extra_channels_from_ac(
+    codestream: &jxl_codec::Codestream,
+) -> Result<Vec<DecodedChannel>> {
+    let plan = first_frame_vardct_plan(codestream)?;
+    let color_channels = codestream.metadata.num_color_channels() as usize;
+    let channel_bit_depths = decoded_channel_bit_depths(&codestream.metadata, color_channels)?;
+    let mut planes = codestream
+        .metadata
+        .extra_channels
+        .iter()
+        .enumerate()
+        .map(|(extra_index, extra)| {
+            let bit_depth = *channel_bit_depths.get(color_channels + extra_index).ok_or(
+                Error::InvalidCodestream("decoded channel missing bit-depth metadata"),
+            )?;
+            let shift = extra.dim_shift;
+            let width = codestream.basic_info.width.div_ceil(1u32 << shift);
+            let height = codestream.basic_info.height.div_ceil(1u32 << shift);
+            let sample_count = (width as usize)
+                .checked_mul(height as usize)
+                .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+            Ok(VarDctExtraChannelPlane {
+                width,
+                height,
+                bit_depth,
+                samples: vec![0; sample_count],
+                filled: vec![false; sample_count],
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut saw_extra_channel = vec![false; planes.len()];
+    for group_metadata in &plan.ac_group_metadata {
+        if !group_metadata.payload.modular_ac_channels.is_empty()
+            && group_metadata.modular_ac.is_none()
+        {
+            if let Some(error) = &group_metadata.modular_ac_error {
+                return Err(error.clone());
+            }
+            return Err(Error::Unsupported("VarDCT extra-channel output"));
+        }
+
+        let Some(group) = &group_metadata.modular_ac else {
+            continue;
+        };
+        for channel in &group.channels {
+            if channel.channel_index < color_channels {
+                continue;
+            }
+            let extra_index = channel.channel_index - color_channels;
+            let Some(plane) = planes.get_mut(extra_index) else {
+                return Err(Error::InvalidCodestream(
+                    "decoded VarDCT extra channel index is out of range",
+                ));
+            };
+            copy_vardct_extra_channel_chunk(plane, channel)?;
+            saw_extra_channel[extra_index] = true;
+        }
+    }
+
+    for saw in &saw_extra_channel {
+        if !saw {
+            return Err(Error::Unsupported("VarDCT extra-channel output"));
+        }
+    }
+
+    planes
+        .into_iter()
+        .map(|plane| {
+            if plane.filled.iter().any(|filled| !filled) {
+                return Err(Error::Unsupported("VarDCT extra-channel output"));
+            }
+            let max_sample = max_sample_value(plane.bit_depth)?;
+            decode_channel(
+                codestream.basic_info.width,
+                codestream.basic_info.height,
+                &ModularImageChannel {
+                    width: plane.width,
+                    height: plane.height,
+                    samples: plane.samples,
+                },
+                plane.bit_depth,
+                max_sample,
+            )
+        })
+        .collect()
+}
+
+fn copy_vardct_extra_channel_chunk(
+    plane: &mut VarDctExtraChannelPlane,
+    channel: &ModularDecodedChannel,
+) -> Result<()> {
+    let sample_count = (channel.width as usize)
+        .checked_mul(channel.height as usize)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    if channel.samples.len() != sample_count {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+    let end_x = channel
+        .x0
+        .checked_add(channel.width)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let end_y = channel
+        .y0
+        .checked_add(channel.height)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    if end_x > plane.width || end_y > plane.height {
+        return Err(Error::InvalidCodestream(
+            "decoded VarDCT extra channel exceeds image bounds",
+        ));
+    }
+
+    for row in 0..channel.height as usize {
+        let source_start = row
+            .checked_mul(channel.width as usize)
+            .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+        let source_end = source_start
+            .checked_add(channel.width as usize)
+            .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+        let target_start = ((channel.y0 as usize + row)
+            .checked_mul(plane.width as usize)
+            .and_then(|index| index.checked_add(channel.x0 as usize)))
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+        let target_end = target_start
+            .checked_add(channel.width as usize)
+            .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+
+        if plane.filled[target_start..target_end]
+            .iter()
+            .any(|filled| *filled)
+        {
+            return Err(Error::InvalidCodestream(
+                "overlapping VarDCT extra channel chunks",
+            ));
+        }
+        plane.samples[target_start..target_end]
+            .copy_from_slice(&channel.samples[source_start..source_end]);
+        plane.filled[target_start..target_end].fill(true);
+    }
+    Ok(())
 }
 
 fn vardct_srgb8_image_from_codestream(
@@ -751,13 +930,6 @@ fn reject_vardct_pass_for_non_vardct(pass: Option<usize>) -> Result<()> {
 fn reject_vardct_alpha_output(metadata: &ImageMetadata) -> Result<()> {
     if raw_alpha_channel_index(metadata)?.is_some() {
         return Err(Error::Unsupported("VarDCT alpha output"));
-    }
-    Ok(())
-}
-
-fn reject_vardct_extra_channel_output(metadata: &ImageMetadata) -> Result<()> {
-    if !metadata.extra_channels.is_empty() {
-        return Err(Error::Unsupported("VarDCT extra-channel output"));
     }
     Ok(())
 }
@@ -874,6 +1046,95 @@ fn crop_interleaved_u16(
         output.extend_from_slice(row);
     }
     Ok(output)
+}
+
+fn crop_decoded_channel(
+    channel: DecodedChannel,
+    region: jxl_codec::ImageRegion,
+) -> Result<DecodedChannel> {
+    if channel.hshift != 0 || channel.vshift != 0 {
+        return Err(Error::Unsupported(
+            "subsampled VarDCT extra-channel ROI output",
+        ));
+    }
+    validate_decode_region(channel.width, channel.height, region)?;
+    match channel.samples {
+        ChannelData::U8(samples) => Ok(DecodedChannel {
+            width: region.width,
+            height: region.height,
+            hshift: 0,
+            vshift: 0,
+            bit_depth: channel.bit_depth,
+            samples: ChannelData::U8(crop_interleaved_u8(&samples, channel.width, 1, region)?),
+        }),
+        ChannelData::U16(samples) => Ok(DecodedChannel {
+            width: region.width,
+            height: region.height,
+            hshift: 0,
+            vshift: 0,
+            bit_depth: channel.bit_depth,
+            samples: ChannelData::U16(crop_interleaved_u16(&samples, channel.width, 1, region)?),
+        }),
+    }
+}
+
+fn orient_decoded_channels(
+    channels: DecodedChannels,
+    orientation: Orientation,
+) -> Result<DecodedChannels> {
+    if orientation == Orientation::Identity {
+        return Ok(channels);
+    }
+    let (width, height) = oriented_dimensions(channels.width, channels.height, orientation);
+    let oriented_channels = channels
+        .channels
+        .into_iter()
+        .map(|channel| orient_decoded_channel(channel, width, height, orientation))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(DecodedChannels {
+        width,
+        height,
+        color_channels: channels.color_channels,
+        alpha: channels.alpha,
+        bit_depth: channels.bit_depth,
+        channels: oriented_channels,
+    })
+}
+
+fn orient_decoded_channel(
+    channel: DecodedChannel,
+    image_width: u32,
+    image_height: u32,
+    orientation: Orientation,
+) -> Result<DecodedChannel> {
+    match channel.samples {
+        ChannelData::U8(samples) => {
+            let (width, height, samples) =
+                orient_interleaved(samples, channel.width, channel.height, 1, orientation)?;
+            let (hshift, vshift) = infer_channel_shifts(image_width, image_height, width, height)?;
+            Ok(DecodedChannel {
+                width,
+                height,
+                hshift,
+                vshift,
+                bit_depth: channel.bit_depth,
+                samples: ChannelData::U8(samples),
+            })
+        }
+        ChannelData::U16(samples) => {
+            let (width, height, samples) =
+                orient_interleaved(samples, channel.width, channel.height, 1, orientation)?;
+            let (hshift, vshift) = infer_channel_shifts(image_width, image_height, width, height)?;
+            Ok(DecodedChannel {
+                width,
+                height,
+                hshift,
+                vshift,
+                bit_depth: channel.bit_depth,
+                samples: ChannelData::U16(samples),
+            })
+        }
+    }
 }
 
 fn orient_decoded_image(image: DecodedImage, orientation: Orientation) -> Result<DecodedImage> {
@@ -2091,15 +2352,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_generated_var_dct_alpha_until_extra_channels_are_reconstructed() {
+    fn decode_channels_exposes_generated_var_dct_alpha_when_available() {
         let Some(cjxl) = reference_cjxl() else {
-            eprintln!("skipping VarDCT alpha rejection; reference cjxl is not built");
+            eprintln!("skipping VarDCT alpha raw-channel decode; reference cjxl is not built");
             return;
         };
 
         let input = unique_temp_path("jxl-vardct-alpha-source", "pam");
         let encoded = unique_temp_path("jxl-vardct-alpha", "jxl");
-        write_alpha_source_pam(&input);
+        let expected_alpha = write_vardct_alpha_source_pam(&input);
 
         let cjxl_output = Command::new(&cjxl)
             .arg(&input)
@@ -2125,10 +2386,50 @@ mod tests {
                 premultiplied: false,
             })
         );
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, 320);
+        assert_eq!(channels.height, 192);
+        assert_eq!(channels.color_channels, 3);
         assert_eq!(
-            decode_channels(&encoded_bytes),
-            Err(Error::Unsupported("VarDCT extra-channel output"))
+            channels.alpha,
+            Some(AlphaInfo {
+                bit_depth: 8,
+                premultiplied: false,
+            })
         );
+        assert_eq!(channels.bit_depth, 8);
+        assert_eq!(channels.channels.len(), 4);
+        let alpha_channel = &channels.channels[3];
+        assert_eq!(alpha_channel.width, 320);
+        assert_eq!(alpha_channel.height, 192);
+        assert_eq!(alpha_channel.hshift, 0);
+        assert_eq!(alpha_channel.vshift, 0);
+        assert_eq!(alpha_channel.bit_depth, 8);
+        let ChannelData::U8(alpha) = &alpha_channel.samples else {
+            panic!("expected 8-bit VarDCT alpha channel");
+        };
+        assert_eq!(alpha, &expected_alpha);
+
+        let roi = Rect {
+            x: 17,
+            y: 19,
+            width: 37,
+            height: 29,
+        };
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_eq!(roi_channels.width, roi.width);
+        assert_eq!(roi_channels.height, roi.height);
+        assert_eq!(roi_channels.alpha, channels.alpha);
+        assert_eq!(roi_channels.channels.len(), channels.channels.len());
+        let ChannelData::U8(roi_alpha) = &roi_channels.channels[3].samples else {
+            panic!("expected 8-bit VarDCT ROI alpha channel");
+        };
+        assert_eq!(roi_alpha, &window_u8(&expected_alpha, 320, roi));
+
         assert_eq!(
             decode(&encoded_bytes),
             Err(Error::Unsupported("VarDCT alpha output"))
@@ -2144,7 +2445,7 @@ mod tests {
     }
 
     #[test]
-    fn decode_channels_rejects_generated_var_dct_extra_channels_until_reconstructed() {
+    fn decode_channels_rejects_unreconstructed_generated_var_dct_extra_channels() {
         let Some(cjxl) = reference_cjxl() else {
             eprintln!("skipping VarDCT extra-channel rejection; reference cjxl is not built");
             return;
@@ -2179,7 +2480,7 @@ mod tests {
 
         assert_eq!(
             decode_channels(&encoded_bytes),
-            Err(Error::Unsupported("VarDCT extra-channel output"))
+            Err(Error::Unsupported("VarDCT image reconstruction"))
         );
     }
 
@@ -3388,6 +3689,29 @@ mod tests {
             bytes.push((state >> 24) as u8);
         }
         std::fs::write(path, bytes).unwrap();
+    }
+
+    fn write_vardct_alpha_source_pam(path: &Path) -> Vec<u8> {
+        let width = 320u32;
+        let height = 192u32;
+        let mut alpha = Vec::with_capacity(width as usize * height as usize);
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+        )
+        .into_bytes();
+        for y in 0..height {
+            for x in 0..width {
+                let checker = (((x / 16) ^ (y / 16)) & 1) * 48;
+                bytes.push(((x * 255 / (width - 1)) ^ checker) as u8);
+                bytes.push(((y * 255 / (height - 1)) ^ checker) as u8);
+                bytes.push((((x + y) * 255 / (width + height - 2)) ^ checker) as u8);
+                let alpha_sample = ((x * 29 + y * 31 + 43) & 0xff) as u8;
+                bytes.push(alpha_sample);
+                alpha.push(alpha_sample);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+        alpha
     }
 
     fn write_rgb_depth_source_pam(path: &Path) {
