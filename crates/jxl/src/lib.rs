@@ -2269,6 +2269,78 @@ mod tests {
     }
 
     #[test]
+    fn decode_rgba8_expands_gray_alpha_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping grayscale-alpha RGBA8 comparison; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-rgba8-gray-alpha-source", "pam");
+        let encoded = unique_temp_path("jxl-rgba8-gray-alpha", "jxl");
+        let source = write_gray_alpha_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "0", "-m", "1", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, source.width);
+        assert_eq!(decoded.height, source.height);
+        assert_eq!(decoded.color_channels, 1);
+        assert_eq!(
+            decoded.alpha,
+            Some(AlphaInfo {
+                bit_depth: 8,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(decoded.bit_depth, 8);
+        let PixelData::U8(decoded_samples) = decoded.pixels else {
+            panic!("expected 8-bit grayscale-alpha samples");
+        };
+        assert_eq!(decoded_samples, source.gray_alpha);
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, source.width);
+        assert_eq!(channels.height, source.height);
+        assert_eq!(channels.color_channels, 1);
+        assert_eq!(channels.alpha, decoded.alpha);
+        assert_eq!(
+            channels
+                .channels
+                .iter()
+                .map(|channel| channel.bit_depth)
+                .collect::<Vec<_>>(),
+            vec![8, 8]
+        );
+        let ChannelData::U8(gray) = &channels.channels[0].samples else {
+            panic!("expected 8-bit gray channel");
+        };
+        assert_eq!(gray, &source.gray);
+        let ChannelData::U8(alpha) = &channels.channels[1].samples else {
+            panic!("expected 8-bit alpha channel");
+        };
+        assert_eq!(alpha, &source.alpha);
+
+        let rgba = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba.width, source.width);
+        assert_eq!(rgba.height, source.height);
+        assert_eq!(rgba.pixels, source.rgba);
+    }
+
+    #[test]
     fn decode_rgba8_converts_rgb_fixture() {
         let bytes = std::fs::read(workspace_path(
             "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
@@ -2311,6 +2383,78 @@ mod tests {
         };
         let gray = scale_sample_to_u16(u32::from(samples[0]), raw.bit_depth);
         assert_eq!(&rgba.pixels[..4], &[gray, gray, gray, u16::MAX]);
+    }
+
+    #[test]
+    fn decode_rgba16_expands_gray_alpha_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping grayscale-alpha RGBA16 comparison; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-rgba16-gray-alpha-source", "pam");
+        let encoded = unique_temp_path("jxl-rgba16-gray-alpha", "jxl");
+        let source = write_gray_alpha_source_pam16(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "0", "-m", "1", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, source.width);
+        assert_eq!(decoded.height, source.height);
+        assert_eq!(decoded.color_channels, 1);
+        assert_eq!(
+            decoded.alpha,
+            Some(AlphaInfo {
+                bit_depth: 16,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(decoded.bit_depth, 16);
+        let PixelData::U16(decoded_samples) = decoded.pixels else {
+            panic!("expected 16-bit grayscale-alpha samples");
+        };
+        assert_eq!(decoded_samples, source.gray_alpha);
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, source.width);
+        assert_eq!(channels.height, source.height);
+        assert_eq!(channels.color_channels, 1);
+        assert_eq!(channels.alpha, decoded.alpha);
+        assert_eq!(
+            channels
+                .channels
+                .iter()
+                .map(|channel| channel.bit_depth)
+                .collect::<Vec<_>>(),
+            vec![16, 16]
+        );
+        let ChannelData::U16(gray) = &channels.channels[0].samples else {
+            panic!("expected 16-bit gray channel");
+        };
+        assert_eq!(gray, &source.gray);
+        let ChannelData::U16(alpha) = &channels.channels[1].samples else {
+            panic!("expected 16-bit alpha channel");
+        };
+        assert_eq!(alpha, &source.alpha);
+
+        let rgba = decode_rgba16(&encoded_bytes).unwrap();
+        assert_eq!(rgba.width, source.width);
+        assert_eq!(rgba.height, source.height);
+        assert_eq!(rgba.pixels, source.rgba);
     }
 
     #[test]
@@ -2724,6 +2868,26 @@ mod tests {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
+    struct GrayAlphaPam {
+        width: u32,
+        height: u32,
+        gray_alpha: Vec<u8>,
+        gray: Vec<u8>,
+        alpha: Vec<u8>,
+        rgba: Vec<u8>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct GrayAlphaPam16 {
+        width: u32,
+        height: u32,
+        gray_alpha: Vec<u16>,
+        gray: Vec<u16>,
+        alpha: Vec<u16>,
+        rgba: Vec<u16>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
     struct Srgb8OracleMetrics {
         max_abs_error: u16,
         sum_abs_error: u64,
@@ -3106,6 +3270,74 @@ mod tests {
             bytes.push((state >> 24) as u8);
         }
         std::fs::write(path, bytes).unwrap();
+    }
+
+    fn write_gray_alpha_source_pam(path: &Path) -> GrayAlphaPam {
+        let width = 31u32;
+        let height = 17u32;
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 2\nMAXVAL 255\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n"
+        )
+        .into_bytes();
+        let mut gray_alpha = Vec::with_capacity(width as usize * height as usize * 2);
+        let mut gray = Vec::with_capacity(width as usize * height as usize);
+        let mut alpha = Vec::with_capacity(width as usize * height as usize);
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        for y in 0..height {
+            for x in 0..width {
+                let gray_sample = ((x * 13 + y * 7 + 5) & 0xff) as u8;
+                let alpha_sample = ((x * 29 + y * 31 + 43) & 0xff) as u8;
+                bytes.push(gray_sample);
+                bytes.push(alpha_sample);
+                gray_alpha.extend_from_slice(&[gray_sample, alpha_sample]);
+                gray.push(gray_sample);
+                alpha.push(alpha_sample);
+                rgba.extend_from_slice(&[gray_sample, gray_sample, gray_sample, alpha_sample]);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+        GrayAlphaPam {
+            width,
+            height,
+            gray_alpha,
+            gray,
+            alpha,
+            rgba,
+        }
+    }
+
+    fn write_gray_alpha_source_pam16(path: &Path) -> GrayAlphaPam16 {
+        let width = 29u32;
+        let height = 15u32;
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 2\nMAXVAL 65535\nTUPLTYPE GRAYSCALE_ALPHA\nENDHDR\n"
+        )
+        .into_bytes();
+        let mut gray_alpha = Vec::with_capacity(width as usize * height as usize * 2);
+        let mut gray = Vec::with_capacity(width as usize * height as usize);
+        let mut alpha = Vec::with_capacity(width as usize * height as usize);
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        for y in 0..height {
+            for x in 0..width {
+                let gray_sample = ((x * 3203 + y * 787 + 5) & 0xffff) as u16;
+                let alpha_sample = ((x * 1733 + y * 2411 + 43) & 0xffff) as u16;
+                bytes.extend_from_slice(&gray_sample.to_be_bytes());
+                bytes.extend_from_slice(&alpha_sample.to_be_bytes());
+                gray_alpha.extend_from_slice(&[gray_sample, alpha_sample]);
+                gray.push(gray_sample);
+                alpha.push(alpha_sample);
+                rgba.extend_from_slice(&[gray_sample, gray_sample, gray_sample, alpha_sample]);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+        GrayAlphaPam16 {
+            width,
+            height,
+            gray_alpha,
+            gray,
+            alpha,
+            rgba,
+        }
     }
 
     fn write_alpha_depth_source_pam(path: &Path) -> AlphaDepthPam {
