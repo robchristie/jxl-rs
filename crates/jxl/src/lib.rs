@@ -213,9 +213,11 @@ impl Decoder {
     /// Decodes an interleaved image.
     ///
     /// Modular still images return their decoded integer samples, preserving
-    /// the decoded sample bit depth. Supported VarDCT still images return 8-bit
-    /// sRGB RGB samples with no alpha channel. Pixel output applies JPEG XL
-    /// orientation metadata.
+    /// the decoded sample bit depth. The interleaved output includes color
+    /// channels plus the first alpha channel when present; other extra channels
+    /// remain available through [`Decoder::decode_channels`]. Supported VarDCT
+    /// still images return 8-bit sRGB RGB samples with no alpha channel. Pixel
+    /// output applies JPEG XL orientation metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management.
@@ -232,8 +234,9 @@ impl Decoder {
     /// Modular still images are decoded through the raw-channel path and then
     /// scaled or expanded to RGBA8. If the codestream marks alpha as
     /// associated/premultiplied, color samples are unpremultiplied for this
-    /// presentation output. Supported VarDCT still images return opaque sRGB
-    /// RGBA8. Pixel output applies JPEG XL orientation metadata.
+    /// presentation output. Non-alpha extra channels are ignored. Supported
+    /// VarDCT still images return opaque sRGB RGBA8. Pixel output applies JPEG
+    /// XL orientation metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management.
@@ -250,8 +253,9 @@ impl Decoder {
     /// Modular still images are decoded through the raw-channel path and then
     /// scaled or expanded to RGBA16. If the codestream marks alpha as
     /// associated/premultiplied, color samples are unpremultiplied for this
-    /// presentation output. Supported VarDCT still images return opaque sRGB
-    /// RGBA16. Pixel output applies JPEG XL orientation metadata.
+    /// presentation output. Non-alpha extra channels are ignored. Supported
+    /// VarDCT still images return opaque sRGB RGBA16. Pixel output applies JPEG
+    /// XL orientation metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management.
@@ -442,21 +446,24 @@ fn decode_buffered(
 
 fn decode_buffered_codestream(codestream: jxl_codec::Codestream) -> Result<DecodedImage> {
     let orientation = codestream.metadata.orientation;
+    let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
     let channels = decode_channels_codestream(codestream, None, None)?;
-    orient_decoded_image(decode_buffered_channels(channels)?, orientation)
+    orient_decoded_image(
+        decode_buffered_channels(channels, alpha_channel_index)?,
+        orientation,
+    )
 }
 
-fn decode_buffered_channels(channels: DecodedChannels) -> Result<DecodedImage> {
-    let alpha = decode_interleaved_alpha(&channels)?;
-    let output_channels = channels.color_channels + usize::from(alpha.is_some());
-    if channels.channels.len() != output_channels {
-        return Err(Error::Unsupported("non-color modular channel output"));
-    }
-    if channels
-        .channels
-        .iter()
-        .any(|channel| channel.width != channels.width || channel.height != channels.height)
-    {
+fn decode_buffered_channels(
+    channels: DecodedChannels,
+    alpha_channel_index: Option<usize>,
+) -> Result<DecodedImage> {
+    let alpha = decode_interleaved_alpha(&channels, alpha_channel_index)?;
+    let output_channel_indices = interleaved_channel_indices(&channels, alpha_channel_index)?;
+    if output_channel_indices.iter().any(|&index| {
+        channels.channels[index].width != channels.width
+            || channels.channels[index].height != channels.height
+    }) {
         return Err(Error::Unsupported("subsampled raw channel output"));
     }
 
@@ -467,7 +474,7 @@ fn decode_buffered_channels(channels: DecodedChannels) -> Result<DecodedImage> {
             color_channels: channels.color_channels,
             alpha,
             bit_depth: channels.bit_depth,
-            pixels: PixelData::U8(interleave_channel_u8(&channels)?),
+            pixels: PixelData::U8(interleave_channel_u8(&channels, &output_channel_indices)?),
         })
     } else {
         Ok(DecodedImage {
@@ -476,7 +483,7 @@ fn decode_buffered_channels(channels: DecodedChannels) -> Result<DecodedImage> {
             color_channels: channels.color_channels,
             alpha,
             bit_depth: channels.bit_depth,
-            pixels: PixelData::U16(interleave_channel_u16(&channels)?),
+            pixels: PixelData::U16(interleave_channel_u16(&channels, &output_channel_indices)?),
         })
     }
 }
@@ -928,37 +935,77 @@ fn vardct_srgb_sample_count(width: u32, height: u32) -> Result<usize> {
 }
 
 fn raw_alpha_info(metadata: &ImageMetadata) -> Result<Option<AlphaInfo>> {
-    let Some(alpha) = metadata
+    raw_alpha_channel_index_and_info(metadata).map(|alpha| alpha.map(|(_, alpha)| alpha))
+}
+
+fn raw_alpha_channel_index(metadata: &ImageMetadata) -> Result<Option<usize>> {
+    raw_alpha_channel_index_and_info(metadata).map(|alpha| alpha.map(|(index, _)| index))
+}
+
+fn raw_alpha_channel_index_and_info(
+    metadata: &ImageMetadata,
+) -> Result<Option<(usize, AlphaInfo)>> {
+    let Some((extra_index, alpha)) = metadata
         .extra_channels
         .iter()
-        .find(|channel| channel.channel_type == ExtraChannelType::Alpha)
+        .enumerate()
+        .find(|(_, channel)| channel.channel_type == ExtraChannelType::Alpha)
     else {
         return Ok(None);
     };
     if alpha.bit_depth.floating_point_sample {
         return Err(Error::Unsupported("floating-point alpha output"));
     }
-    Ok(Some(AlphaInfo {
-        bit_depth: alpha.bit_depth.bits_per_sample,
-        premultiplied: alpha.alpha_associated,
-    }))
+    Ok(Some((
+        metadata.num_color_channels() as usize + extra_index,
+        AlphaInfo {
+            bit_depth: alpha.bit_depth.bits_per_sample,
+            premultiplied: alpha.alpha_associated,
+        },
+    )))
 }
 
-fn decode_interleaved_alpha(channels: &DecodedChannels) -> Result<Option<AlphaInfo>> {
+fn decode_interleaved_alpha(
+    channels: &DecodedChannels,
+    alpha_channel_index: Option<usize>,
+) -> Result<Option<AlphaInfo>> {
     let alpha = channels.alpha;
     if let Some(alpha) = alpha {
+        let alpha_channel_index = alpha_channel_index.ok_or(Error::InvalidCodestream(
+            "decoded alpha metadata missing channel index",
+        ))?;
         if alpha.bit_depth != channels.bit_depth {
             return Err(Error::Unsupported("mixed bit-depth alpha output"));
         }
-        if channels.channels.len() <= channels.color_channels {
+        if channels.channels.len() <= alpha_channel_index {
             return Err(Error::Unsupported("missing alpha channel output"));
         }
-        let alpha_channel = &channels.channels[channels.color_channels];
+        let alpha_channel = &channels.channels[alpha_channel_index];
         if alpha_channel.hshift != 0 || alpha_channel.vshift != 0 {
             return Err(Error::Unsupported("subsampled alpha image decode"));
         }
+    } else if alpha_channel_index.is_some() {
+        return Err(Error::InvalidCodestream(
+            "decoded alpha channel index without alpha metadata",
+        ));
     }
     Ok(alpha)
+}
+
+fn interleaved_channel_indices(
+    channels: &DecodedChannels,
+    alpha_channel_index: Option<usize>,
+) -> Result<Vec<usize>> {
+    if channels.channels.len() < channels.color_channels {
+        return Err(Error::Unsupported("missing color channel output"));
+    }
+    let output_channels = channels.color_channels + usize::from(channels.alpha.is_some());
+    let mut indices = Vec::with_capacity(output_channels);
+    indices.extend(0..channels.color_channels);
+    if let Some(alpha_channel_index) = alpha_channel_index {
+        indices.push(alpha_channel_index);
+    }
+    Ok(indices)
 }
 
 fn decode_channel(
@@ -1025,15 +1072,16 @@ fn infer_shift(full: u32, shifted: u32) -> Result<i32> {
     Err(Error::Unsupported("non power-of-two channel geometry"))
 }
 
-fn interleave_channel_u8(image: &DecodedChannels) -> Result<Vec<u8>> {
-    let output_channels = channel_output_channels(image);
+fn interleave_channel_u8(image: &DecodedChannels, channel_indices: &[usize]) -> Result<Vec<u8>> {
+    let output_channels = channel_indices.len();
     let sample_count = decoded_channel_sample_count(image)?;
     let pixels = sample_count
         .checked_mul(output_channels)
         .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
     let mut output = Vec::with_capacity(pixels);
     for index in 0..sample_count {
-        for channel in &image.channels {
+        for &channel_index in channel_indices {
+            let channel = &image.channels[channel_index];
             let ChannelData::U8(samples) = &channel.samples else {
                 return Err(Error::InvalidCodestream(
                     "decoded channel bit-depth mismatch",
@@ -1045,15 +1093,16 @@ fn interleave_channel_u8(image: &DecodedChannels) -> Result<Vec<u8>> {
     Ok(output)
 }
 
-fn interleave_channel_u16(image: &DecodedChannels) -> Result<Vec<u16>> {
-    let output_channels = channel_output_channels(image);
+fn interleave_channel_u16(image: &DecodedChannels, channel_indices: &[usize]) -> Result<Vec<u16>> {
+    let output_channels = channel_indices.len();
     let sample_count = decoded_channel_sample_count(image)?;
     let pixels = sample_count
         .checked_mul(output_channels)
         .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
     let mut output = Vec::with_capacity(pixels);
     for index in 0..sample_count {
-        for channel in &image.channels {
+        for &channel_index in channel_indices {
+            let channel = &image.channels[channel_index];
             let ChannelData::U16(samples) = &channel.samples else {
                 return Err(Error::InvalidCodestream(
                     "decoded channel bit-depth mismatch",
@@ -1223,10 +1272,6 @@ fn append_rgba16_pixel(
         u16::MAX
     });
     Ok(())
-}
-
-fn channel_output_channels(image: &DecodedChannels) -> usize {
-    image.color_channels + usize::from(image.alpha.is_some())
 }
 
 fn decoded_channel_sample_count(image: &DecodedChannels) -> Result<usize> {
@@ -2262,6 +2307,68 @@ mod tests {
     }
 
     #[test]
+    fn decode_rgba8_ignores_non_alpha_extra_channels_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping extra-channel RGBA comparison; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-rgba8-alpha-depth-source", "pam");
+        let encoded = unique_temp_path("jxl-rgba8-alpha-depth", "jxl");
+        let source = write_alpha_depth_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "0", "-m", "1", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, source.width);
+        assert_eq!(decoded.height, source.height);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(
+            decoded.alpha,
+            Some(AlphaInfo {
+                bit_depth: 8,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(
+            decoded_samples_u16(&decoded),
+            source
+                .rgba
+                .iter()
+                .copied()
+                .map(u16::from)
+                .collect::<Vec<_>>()
+        );
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.channels.len(), 5);
+        assert_eq!(channels.alpha, decoded.alpha);
+        let ChannelData::U8(depth) = &channels.channels[3].samples else {
+            panic!("expected 8-bit depth extra channel");
+        };
+        assert_eq!(depth, &source.depth);
+
+        let rgba = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba.width, source.width);
+        assert_eq!(rgba.height, source.height);
+        assert_eq!(rgba.pixels, source.rgba);
+    }
+
+    #[test]
     fn decode_rgba8_unpremultiplies_associated_alpha_when_available() {
         let Some(cjxl) = reference_cjxl() else {
             eprintln!("skipping premultiplied alpha comparison; reference cjxl is not built");
@@ -2337,6 +2444,14 @@ mod tests {
         width: u32,
         height: u32,
         samples: Vec<u16>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct AlphaDepthPam {
+        width: u32,
+        height: u32,
+        rgba: Vec<u8>,
+        depth: Vec<u8>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2709,6 +2824,40 @@ mod tests {
             bytes.push((state >> 24) as u8);
         }
         std::fs::write(path, bytes).unwrap();
+    }
+
+    fn write_alpha_depth_source_pam(path: &Path) -> AlphaDepthPam {
+        let width = 23u32;
+        let height = 19u32;
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 5\nMAXVAL 255\nTUPLTYPE RGB\nTUPLTYPE Depth\nTUPLTYPE Alpha\nENDHDR\n"
+        )
+        .into_bytes();
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        let mut depth = Vec::with_capacity(width as usize * height as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = [
+                    ((x * 11 + y * 3 + 17) & 0xff) as u8,
+                    ((x * 7 + y * 13 + 29) & 0xff) as u8,
+                    ((x * 19 + y * 5 + 43) & 0xff) as u8,
+                    ((x * 23 + y * 31 + 61) & 0xff) as u8,
+                ];
+                let depth_sample = ((x * 37 + y * 41 + 73) & 0xff) as u8;
+                bytes.extend_from_slice(&pixel[..3]);
+                bytes.push(depth_sample);
+                bytes.push(pixel[3]);
+                rgba.extend_from_slice(&pixel);
+                depth.push(depth_sample);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+        AlphaDepthPam {
+            width,
+            height,
+            rgba,
+            depth,
+        }
     }
 
     fn write_premultiplied_alpha_source_pam(path: &Path) -> Vec<u8> {
