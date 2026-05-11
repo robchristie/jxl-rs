@@ -2317,6 +2317,101 @@ fn generated_vardct_alpha_exposes_modular_ac_channel_plans_when_available() {
 }
 
 #[test]
+fn generated_vardct_subsampled_alpha_stays_out_of_modular_ac_when_available() {
+    let Some(cjxl) = reference_cjxl() else {
+        eprintln!(
+            "skipping generated subsampled VarDCT alpha channel plan; reference cjxl is not built"
+        );
+        return;
+    };
+
+    let input = unique_temp_path("jxl-rs-vardct-alpha-subsampled-source", "pam");
+    let encoded = unique_temp_path("jxl-rs-vardct-alpha-subsampled", "jxl");
+    write_vardct_alpha_source_pam(&input);
+
+    let cjxl_output = Command::new(&cjxl)
+        .arg(&input)
+        .arg(&encoded)
+        .args([
+            "-d",
+            "1.0",
+            "-m",
+            "0",
+            "--container=0",
+            "--ec_resampling",
+            "2",
+            "--quiet",
+        ])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&input);
+    assert!(
+        cjxl_output.status.success(),
+        "reference cjxl failed: {}",
+        String::from_utf8_lossy(&cjxl_output.stderr)
+    );
+
+    let encoded_bytes = std::fs::read(&encoded).unwrap();
+    let _ = std::fs::remove_file(&encoded);
+    let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+    assert_eq!(codestream.metadata.extra_channels.len(), 1);
+    assert_eq!(
+        codestream
+            .first_frame
+            .as_ref()
+            .unwrap()
+            .extra_channel_upsampling,
+        vec![2]
+    );
+    let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+    assert_eq!(
+        plan.ac_group_payloads
+            .iter()
+            .map(|payload| (
+                payload.pass,
+                payload.group.group,
+                payload.modular_ac_stream_id,
+                payload.modular_ac_min_shift,
+                payload.modular_ac_max_shift,
+                payload
+                    .modular_ac_channels
+                    .iter()
+                    .map(|channel| (
+                        channel.channel_index,
+                        channel.width,
+                        channel.height,
+                        channel.x0,
+                        channel.y0,
+                        channel.hshift,
+                        channel.vshift,
+                    ))
+                    .collect::<Vec<_>>(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![(0, 0, 21, 0, 2, vec![]), (0, 1, 22, 0, 2, vec![])]
+    );
+    assert!(
+        plan.ac_group_metadata
+            .iter()
+            .all(|metadata| metadata.modular_ac_error.is_none())
+    );
+    assert_eq!(
+        plan.ac_group_metadata
+            .iter()
+            .map(|metadata| {
+                (
+                    metadata.payload.group.group,
+                    metadata.cursor.modular_ac_start_bits,
+                    metadata.cursor.modular_ac_end_bits,
+                    metadata.modular_ac.as_ref().map(|group| group.stream_id),
+                )
+            })
+            .collect::<Vec<_>>(),
+        vec![(0, Some(35936), None, None), (1, Some(8185), None, None)]
+    );
+}
+
+#[test]
 fn generated_vardct_xyb_inverse_variants_compare_against_oracle_when_available() {
     let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
         eprintln!("skipping generated VarDCT XYB inverse sweep; reference tools are not built");

@@ -6154,8 +6154,10 @@ fn vardct_modular_ac_channel_plan(
     max_shift: i32,
 ) -> Result<Vec<ModularGroupChannelPlan>> {
     let frame_upsampling_log = ceil_log2_nonzero(frame_header.upsampling as usize) as i32;
-    let mut channels = Vec::new();
-    for (extra_index, _) in metadata.extra_channels.iter().enumerate() {
+    let group_dim = frame_header.group_layout.group_dim;
+    let mut begin_extra_index = metadata.extra_channels.len();
+    let mut extra_channel_sizes = Vec::with_capacity(metadata.extra_channels.len());
+    for extra_index in 0..metadata.extra_channels.len() {
         let upsampling = *frame_header
             .extra_channel_upsampling
             .get(extra_index)
@@ -6165,13 +6167,30 @@ fn vardct_modular_ac_channel_plan(
         if upsampling == 0 {
             return Err(Error::InvalidCodestream("zero extra-channel upsampling"));
         }
+        let channel_width = frame_header.frame_size.width.div_ceil(upsampling);
+        let channel_height = frame_header.frame_size.height.div_ceil(upsampling);
+        if begin_extra_index == metadata.extra_channels.len()
+            && (channel_width > group_dim || channel_height > group_dim)
+        {
+            begin_extra_index = extra_index;
+        }
+        extra_channel_sizes.push((upsampling, channel_width, channel_height));
+    }
+
+    let mut channels = Vec::new();
+    for (extra_index, &(upsampling, channel_width, channel_height)) in extra_channel_sizes
+        .iter()
+        .enumerate()
+        .skip(begin_extra_index)
+    {
+        if extra_index >= metadata.extra_channels.len() {
+            break;
+        }
         let shift = ceil_log2_nonzero(upsampling as usize) as i32 - frame_upsampling_log;
         if shift < min_shift || shift > max_shift {
             continue;
         }
 
-        let channel_width = frame_header.frame_size.width.div_ceil(upsampling);
-        let channel_height = frame_header.frame_size.height.div_ceil(upsampling);
         let Some((x0, width)) =
             shifted_vardct_extra_axis(group.x, group.width, channel_width, shift)?
         else {
