@@ -1630,7 +1630,7 @@ fn validate_upsampled_channel_geometry(
     if (channel.hshift == 0) != (channel.vshift == 0) {
         return Err(Error::Unsupported("asymmetric alpha image decode"));
     }
-    if channel.hshift > 2 || channel.vshift > 2 {
+    if channel.hshift > 3 || channel.vshift > 3 {
         return Err(Error::Unsupported("subsampled alpha image decode"));
     }
     Ok(())
@@ -1865,7 +1865,7 @@ fn channel_sample_at(
     if channel.hshift == 0 && channel.vshift == 0 {
         return channel_sample(channel, unshifted_index);
     }
-    if channel.hshift == channel.vshift && matches!(channel.hshift, 1 | 2) {
+    if channel.hshift == channel.vshift && matches!(channel.hshift, 1 | 2 | 3) {
         return upsample_channel_sample(channel, image_width, x, y, channel.hshift as u32);
     }
     Err(Error::Unsupported("subsampled alpha image decode"))
@@ -1963,6 +1963,219 @@ const DEFAULT_UPSAMPLING4_WEIGHTS: [f32; 55] = [
     -0.0038452148,
 ];
 
+const DEFAULT_UPSAMPLING8_WEIGHTS: [f32; 210] = [
+    -0.029281616,
+    -0.03704834,
+    -0.037841797,
+    -0.033233643,
+    -0.0044746399,
+    -0.025192261,
+    -0.037536621,
+    -0.039001465,
+    -0.036621094,
+    -0.0064659119,
+    -0.0206604,
+    -0.038391113,
+    -0.040008545,
+    -0.039001465,
+    -0.0090179443,
+    -0.016265869,
+    -0.039550781,
+    -0.040466309,
+    -0.039794922,
+    -0.012245178,
+    0.29907227,
+    0.35766602,
+    -0.024475098,
+    -0.010818481,
+    -0.043151855,
+    0.23901367,
+    0.41113281,
+    -0.0057296753,
+    -0.014503479,
+    -0.042480469,
+    0.17565918,
+    0.45214844,
+    0.022872925,
+    -0.019363403,
+    -0.035827637,
+    0.11572266,
+    0.47412109,
+    0.062866211,
+    -0.026855469,
+    0.42724609,
+    -0.022491455,
+    -0.011550903,
+    -0.045623779,
+    0.28686523,
+    0.4909668,
+    -7.891655e-05,
+    -0.015457153,
+    -0.045623779,
+    0.21240234,
+    0.54003906,
+    0.033691406,
+    -0.020706177,
+    -0.038665771,
+    0.14233398,
+    0.56591797,
+    0.080444336,
+    -0.028884888,
+    -0.036804199,
+    -0.0054206848,
+    -0.029205322,
+    -0.027893066,
+    -0.021179199,
+    -0.039428711,
+    -0.0077552795,
+    -0.024337769,
+    -0.031951904,
+    -0.020309448,
+    -0.040435791,
+    -0.010742188,
+    -0.019302368,
+    -0.036193848,
+    -0.019744873,
+    -0.03918457,
+    -0.014564514,
+    -0.00045061111,
+    -0.0036010742,
+    -0.0102005,
+    -0.012321472,
+    -0.0063896179,
+    -0.00071573257,
+    -0.002790451,
+    -0.0095748901,
+    -0.012886047,
+    -0.00730896,
+    -0.001077652,
+    -0.0021018982,
+    -0.0089035034,
+    -0.013175964,
+    -0.008140564,
+    -0.001534462,
+    -0.021286011,
+    -0.041717529,
+    -0.048309326,
+    -0.032928467,
+    -0.0052528381,
+    -0.017196655,
+    -0.040527344,
+    -0.050445557,
+    -0.036071777,
+    -0.0073814392,
+    -0.013420105,
+    -0.039642334,
+    -0.051513672,
+    -0.038146973,
+    -0.010055542,
+    0.18969727,
+    0.33056641,
+    -0.013000488,
+    -0.01373291,
+    -0.040161133,
+    0.1373291,
+    0.36401367,
+    0.010276794,
+    -0.018325806,
+    -0.033660889,
+    0.087341309,
+    0.38183594,
+    0.043395996,
+    -0.025253296,
+    0.56396484,
+    0.0045852661,
+    -0.016479492,
+    -0.04888916,
+    0.24584961,
+    0.62011719,
+    0.043151855,
+    -0.022140503,
+    -0.041564941,
+    0.16638184,
+    0.65039062,
+    0.096191406,
+    -0.031021118,
+    -0.04083252,
+    -0.0090484619,
+    -0.027908325,
+    -0.021179199,
+    0.0079879761,
+    -0.03994751,
+    -0.012435913,
+    -0.022323608,
+    -0.029464722,
+    0.0099182129,
+    -0.036010742,
+    -0.016845703,
+    -0.0011167526,
+    -0.0041122437,
+    -0.012969971,
+    -0.017242432,
+    -0.010223389,
+    -0.0016527176,
+    -0.0031318665,
+    -0.012176514,
+    -0.01763916,
+    -0.011253357,
+    -0.0023174286,
+    -0.01374054,
+    -0.037963867,
+    -0.051422119,
+    -0.031173706,
+    -0.0058174133,
+    -0.010643005,
+    -0.036071777,
+    -0.052734375,
+    -0.033752441,
+    -0.0079574585,
+    0.096252441,
+    0.27124023,
+    -0.0035381317,
+    -0.017333984,
+    -0.031524658,
+    0.056854248,
+    0.28491211,
+    0.02230835,
+    -0.023742676,
+    0.68212891,
+    0.050170898,
+    -0.023208618,
+    -0.043823242,
+    0.18457031,
+    0.71533203,
+    0.10803223,
+    -0.032623291,
+    -0.036376953,
+    -0.013946533,
+    -0.025115967,
+    -0.017288208,
+    0.054077148,
+    -0.028671265,
+    -0.018936157,
+    -0.0024089813,
+    -0.0044670105,
+    -0.016357422,
+    -0.023773193,
+    -0.015228271,
+    -0.0033340454,
+    -0.0082015991,
+    -0.029647827,
+    -0.04498291,
+    -0.027450562,
+    -0.0061225891,
+    0.027267456,
+    0.19445801,
+    0.0015983582,
+    -0.022323608,
+    0.75,
+    0.11450195,
+    -0.033477783,
+    -0.016052246,
+    -0.020706177,
+    -0.0045814514,
+];
+
 fn upsample_channel_sample(
     channel: &DecodedChannel,
     image_width: u32,
@@ -2028,6 +2241,10 @@ fn upsampling_kernel(shift: u32, ox: usize, oy: usize, px: usize, py: usize) -> 
             .copied()
             .ok_or(Error::InvalidCodestream("invalid upsampling kernel index")),
         2 => DEFAULT_UPSAMPLING4_WEIGHTS
+            .get(index)
+            .copied()
+            .ok_or(Error::InvalidCodestream("invalid upsampling kernel index")),
+        3 => DEFAULT_UPSAMPLING8_WEIGHTS
             .get(index)
             .copied()
             .ok_or(Error::InvalidCodestream("invalid upsampling kernel index")),
@@ -3344,6 +3561,142 @@ mod tests {
             );
         } else {
             eprintln!("skipping 4x subsampled VarDCT alpha djxl comparison; tool is not built");
+        }
+
+        let _ = std::fs::remove_file(&encoded);
+        let _ = std::fs::remove_file(&reference_output);
+    }
+
+    #[test]
+    fn decode_outputs_eighth_resolution_var_dct_alpha_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping 8x subsampled VarDCT alpha decode; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-vardct-alpha-subsampled8-source", "pam");
+        let encoded = unique_temp_path("jxl-vardct-alpha-subsampled8", "jxl");
+        let reference_output = unique_temp_path("jxl-vardct-alpha-subsampled8-reference", "pam");
+        write_vardct_alpha_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args([
+                "-d",
+                "1.0",
+                "-m",
+                "0",
+                "--container=0",
+                "--ec_resampling",
+                "8",
+                "--quiet",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, 320);
+        assert_eq!(channels.height, 192);
+        assert_eq!(
+            channels.alpha,
+            Some(AlphaInfo {
+                bit_depth: 8,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(channels.channels.len(), 4);
+        let alpha_channel = &channels.channels[3];
+        assert_eq!(alpha_channel.width, 40);
+        assert_eq!(alpha_channel.height, 24);
+        assert_eq!(alpha_channel.hshift, 3);
+        assert_eq!(alpha_channel.vshift, 3);
+        let ChannelData::U8(alpha) = &alpha_channel.samples else {
+            panic!("expected 8-bit 8x subsampled VarDCT alpha channel");
+        };
+        assert_eq!(alpha.len(), 40 * 24);
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, 320);
+        assert_eq!(decoded.height, 192);
+        assert_eq!(decoded.alpha, channels.alpha);
+        let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba8.width, 320);
+        assert_eq!(rgba8.height, 192);
+        assert_eq!(rgba8.pixels.len(), 320 * 192 * 4);
+
+        let roi = Rect {
+            x: 17,
+            y: 19,
+            width: 37,
+            height: 29,
+        };
+        let roi_rgba8 = Decoder::new()
+            .roi(roi)
+            .decode_rgba8(&encoded_bytes)
+            .unwrap();
+        assert_eq!(roi_rgba8.width, roi.width);
+        assert_eq!(roi_rgba8.height, roi.height);
+        assert_eq!(
+            roi_rgba8.pixels.len(),
+            roi.width as usize * roi.height as usize * 4
+        );
+
+        if let Some(djxl) = reference_djxl() {
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&reference_output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed: {}",
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+
+            let reference = std::fs::read(&reference_output).unwrap();
+            let reference = parse_pam_rgba(&reference);
+            let reference_alpha = reference
+                .samples
+                .chunks_exact(4)
+                .map(|pixel| pixel[3] as u8)
+                .collect::<Vec<_>>();
+
+            let PixelData::U8(decoded_pixels) = &decoded.pixels else {
+                panic!("expected 8-bit 8x subsampled-alpha VarDCT image");
+            };
+            let decoded_alpha = decoded_pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(&decoded_alpha, &reference_alpha);
+
+            let rgba8_alpha = rgba8
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(&rgba8_alpha, &reference_alpha);
+
+            let roi_rgba8_alpha = roi_rgba8
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(
+                &roi_rgba8_alpha,
+                &window_u8(&reference_alpha, reference.width, roi),
+            );
+        } else {
+            eprintln!("skipping 8x subsampled VarDCT alpha djxl comparison; tool is not built");
         }
 
         let _ = std::fs::remove_file(&encoded);
