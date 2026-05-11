@@ -1630,7 +1630,7 @@ fn validate_upsampled_channel_geometry(
     if (channel.hshift == 0) != (channel.vshift == 0) {
         return Err(Error::Unsupported("asymmetric alpha image decode"));
     }
-    if channel.hshift > 1 || channel.vshift > 1 {
+    if channel.hshift > 2 || channel.vshift > 2 {
         return Err(Error::Unsupported("subsampled alpha image decode"));
     }
     Ok(())
@@ -1865,8 +1865,8 @@ fn channel_sample_at(
     if channel.hshift == 0 && channel.vshift == 0 {
         return channel_sample(channel, unshifted_index);
     }
-    if channel.hshift == 1 && channel.vshift == 1 {
-        return upsample2_channel_sample(channel, image_width, x, y);
+    if channel.hshift == channel.vshift && matches!(channel.hshift, 1 | 2) {
+        return upsample_channel_sample(channel, image_width, x, y, channel.hshift as u32);
     }
     Err(Error::Unsupported("subsampled alpha image decode"))
 }
@@ -1905,16 +1905,76 @@ const DEFAULT_UPSAMPLING2_WEIGHTS: [f32; 15] = [
     -0.0021362305,
 ];
 
-fn upsample2_channel_sample(
+const DEFAULT_UPSAMPLING4_WEIGHTS: [f32; 55] = [
+    -0.024185181,
+    -0.034912109,
+    -0.03692627,
+    -0.030944824,
+    -0.0052986145,
+    -0.01663208,
+    -0.035583496,
+    -0.038879395,
+    -0.03515625,
+    -0.0098953247,
+    0.23657227,
+    0.33398438,
+    -0.010734558,
+    -0.013130188,
+    -0.035552979,
+    0.13049316,
+    0.40112305,
+    0.039520264,
+    -0.020782471,
+    0.46923828,
+    -0.0020923615,
+    -0.014846802,
+    -0.040649414,
+    0.18945312,
+    0.56298828,
+    0.066772461,
+    -0.023361206,
+    -0.035522461,
+    -0.0075492859,
+    -0.022674561,
+    -0.023635864,
+    0.0031585693,
+    -0.033996582,
+    -0.013595581,
+    -0.00091648102,
+    -0.0033550262,
+    -0.011634827,
+    -0.016098022,
+    -0.0097427368,
+    -0.0019159317,
+    -0.010955811,
+    -0.031982422,
+    -0.044555664,
+    -0.027999878,
+    -0.0064582825,
+    0.063903809,
+    0.22961426,
+    0.0063095093,
+    -0.018966675,
+    0.67529297,
+    0.084838867,
+    -0.025344849,
+    -0.02204895,
+    -0.016677856,
+    -0.0038452148,
+];
+
+fn upsample_channel_sample(
     channel: &DecodedChannel,
     image_width: u32,
     x: u32,
     y: u32,
+    shift: u32,
 ) -> Result<(u32, u32)> {
-    let source_x = (x >> 1) as isize;
-    let source_y = (y >> 1) as isize;
-    let ox = (x & 1) as usize;
-    let oy = (y & 1) as usize;
+    let factor = 1u32 << shift;
+    let source_x = (x >> shift) as isize;
+    let source_y = (y >> shift) as isize;
+    let ox = (x & (factor - 1)) as usize;
+    let oy = (y & (factor - 1)) as usize;
     let mut min_sample = f32::INFINITY;
     let mut max_sample = f32::NEG_INFINITY;
     let mut acc0 = 0.0f32;
@@ -1931,7 +1991,7 @@ fn upsample2_channel_sample(
         )?;
         min_sample = min_sample.min(sample);
         max_sample = max_sample.max(sample);
-        let weight = upsampling2_kernel(ox, oy, px, py);
+        let weight = upsampling_kernel(shift, ox, oy, px, py)?;
         match i % 3 {
             0 => acc0 = sample.mul_add(weight, acc0),
             1 => acc1 = sample.mul_add(weight, acc1),
@@ -1943,19 +2003,36 @@ fn upsample2_channel_sample(
     let output = output.clamp(min_sample, max_sample).round();
     let max = max_sample_value(channel.bit_depth)? as f32;
     let sample = output.clamp(0.0, max) as u32;
-    let expected_width = image_width.div_ceil(2);
+    let expected_width = image_width.div_ceil(factor);
     if expected_width != channel.width {
         return Err(Error::Unsupported("non power-of-two channel geometry"));
     }
     Ok((sample, channel.bit_depth))
 }
 
-fn upsampling2_kernel(ox: usize, oy: usize, px: usize, py: usize) -> f32 {
-    let px = if ox == 0 { px } else { 4 - px };
-    let py = if oy == 0 { py } else { 4 - py };
-    let min = px.min(py);
-    let max = px.max(py);
-    DEFAULT_UPSAMPLING2_WEIGHTS[5 * min - min * min.saturating_sub(1) / 2 + max - min]
+fn upsampling_kernel(shift: u32, ox: usize, oy: usize, px: usize, py: usize) -> Result<f32> {
+    let factor = 1usize << shift;
+    let half = factor / 2;
+    let kernel_x = if ox < half { ox } else { factor - 1 - ox };
+    let kernel_y = if oy < half { oy } else { factor - 1 - oy };
+    let px = if ox < half { px } else { 4 - px };
+    let py = if oy < half { py } else { 4 - py };
+    let i = 5 * kernel_x + px;
+    let j = 5 * kernel_y + py;
+    let min = i.min(j);
+    let max = i.max(j);
+    let index = 5 * half * min - min * min.saturating_sub(1) / 2 + max - min;
+    match shift {
+        1 => DEFAULT_UPSAMPLING2_WEIGHTS
+            .get(index)
+            .copied()
+            .ok_or(Error::InvalidCodestream("invalid upsampling kernel index")),
+        2 => DEFAULT_UPSAMPLING4_WEIGHTS
+            .get(index)
+            .copied()
+            .ok_or(Error::InvalidCodestream("invalid upsampling kernel index")),
+        _ => Err(Error::Unsupported("subsampled alpha image decode")),
+    }
 }
 
 fn channel_sample_f32(channel: &DecodedChannel, x: isize, y: isize) -> Result<f32> {
@@ -3127,6 +3204,146 @@ mod tests {
             );
         } else {
             eprintln!("skipping subsampled VarDCT alpha djxl comparison; tool is not built");
+        }
+
+        let _ = std::fs::remove_file(&encoded);
+        let _ = std::fs::remove_file(&reference_output);
+    }
+
+    #[test]
+    fn decode_outputs_quarter_resolution_var_dct_alpha_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping 4x subsampled VarDCT alpha decode; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-vardct-alpha-subsampled4-source", "pam");
+        let encoded = unique_temp_path("jxl-vardct-alpha-subsampled4", "jxl");
+        let reference_output = unique_temp_path("jxl-vardct-alpha-subsampled4-reference", "pam");
+        write_vardct_alpha_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args([
+                "-d",
+                "1.0",
+                "-m",
+                "0",
+                "--container=0",
+                "--ec_resampling",
+                "4",
+                "--quiet",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, 320);
+        assert_eq!(channels.height, 192);
+        assert_eq!(
+            channels.alpha,
+            Some(AlphaInfo {
+                bit_depth: 8,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(channels.channels.len(), 4);
+        let alpha_channel = &channels.channels[3];
+        assert_eq!(alpha_channel.width, 80);
+        assert_eq!(alpha_channel.height, 48);
+        assert_eq!(alpha_channel.hshift, 2);
+        assert_eq!(alpha_channel.vshift, 2);
+        let ChannelData::U8(alpha) = &alpha_channel.samples else {
+            panic!("expected 8-bit 4x subsampled VarDCT alpha channel");
+        };
+        assert_eq!(alpha.len(), 80 * 48);
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, 320);
+        assert_eq!(decoded.height, 192);
+        assert_eq!(decoded.alpha, channels.alpha);
+        let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba8.width, 320);
+        assert_eq!(rgba8.height, 192);
+        assert_eq!(rgba8.pixels.len(), 320 * 192 * 4);
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        assert_eq!(rgba16.width, 320);
+        assert_eq!(rgba16.height, 192);
+        assert_eq!(rgba16.pixels.len(), 320 * 192 * 4);
+
+        let roi = Rect {
+            x: 17,
+            y: 19,
+            width: 37,
+            height: 29,
+        };
+        let roi_rgba8 = Decoder::new()
+            .roi(roi)
+            .decode_rgba8(&encoded_bytes)
+            .unwrap();
+        assert_eq!(roi_rgba8.width, roi.width);
+        assert_eq!(roi_rgba8.height, roi.height);
+        assert_eq!(
+            roi_rgba8.pixels.len(),
+            roi.width as usize * roi.height as usize * 4
+        );
+
+        if let Some(djxl) = reference_djxl() {
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&reference_output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed: {}",
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+
+            let reference = std::fs::read(&reference_output).unwrap();
+            let reference = parse_pam_rgba(&reference);
+            let reference_alpha = reference
+                .samples
+                .chunks_exact(4)
+                .map(|pixel| pixel[3] as u8)
+                .collect::<Vec<_>>();
+
+            let PixelData::U8(decoded_pixels) = &decoded.pixels else {
+                panic!("expected 8-bit 4x subsampled-alpha VarDCT image");
+            };
+            let decoded_alpha = decoded_pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(&decoded_alpha, &reference_alpha);
+
+            let rgba8_alpha = rgba8
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(&rgba8_alpha, &reference_alpha);
+
+            let roi_rgba8_alpha = roi_rgba8
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(
+                &roi_rgba8_alpha,
+                &window_u8(&reference_alpha, reference.width, roi),
+            );
+        } else {
+            eprintln!("skipping 4x subsampled VarDCT alpha djxl comparison; tool is not built");
         }
 
         let _ = std::fs::remove_file(&encoded);
