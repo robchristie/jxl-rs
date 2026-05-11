@@ -227,11 +227,13 @@ impl Decoder {
         decode_buffered(input, self.codec_config(), self.options.vardct_pass)
     }
 
-    /// Decodes to interleaved RGBA8.
+    /// Decodes to interleaved straight-alpha RGBA8.
     ///
     /// Modular still images are decoded through the raw-channel path and then
-    /// scaled or expanded to RGBA8. Supported VarDCT still images return opaque
-    /// sRGB RGBA8. Pixel output applies JPEG XL orientation metadata.
+    /// scaled or expanded to RGBA8. If the codestream marks alpha as
+    /// associated/premultiplied, color samples are unpremultiplied for this
+    /// presentation output. Supported VarDCT still images return opaque sRGB
+    /// RGBA8. Pixel output applies JPEG XL orientation metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management.
@@ -243,11 +245,13 @@ impl Decoder {
         decode_rgba8_buffered(input, self.codec_config(), self.options.vardct_pass)
     }
 
-    /// Decodes to interleaved RGBA16.
+    /// Decodes to interleaved straight-alpha RGBA16.
     ///
     /// Modular still images are decoded through the raw-channel path and then
-    /// scaled or expanded to RGBA16. Supported VarDCT still images return opaque
-    /// sRGB RGBA16. Pixel output applies JPEG XL orientation metadata.
+    /// scaled or expanded to RGBA16. If the codestream marks alpha as
+    /// associated/premultiplied, color samples are unpremultiplied for this
+    /// presentation output. Supported VarDCT still images return opaque sRGB
+    /// RGBA16. Pixel output applies JPEG XL orientation metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management.
@@ -1088,8 +1092,9 @@ fn rgba8_from_u8(image: &DecodedImage, samples: &[u8]) -> Result<Vec<u8>> {
         append_rgba8_pixel(
             &mut rgba,
             image.color_channels,
-            image.alpha.is_some(),
-            |index| scale_sample_to_u8(u32::from(pixel[index]), image.bit_depth),
+            image.alpha,
+            image.bit_depth,
+            |index| u32::from(pixel[index]),
         )?;
     }
     Ok(rgba)
@@ -1106,8 +1111,9 @@ fn rgba8_from_u16(image: &DecodedImage, samples: &[u16]) -> Result<Vec<u8>> {
         append_rgba8_pixel(
             &mut rgba,
             image.color_channels,
-            image.alpha.is_some(),
-            |index| scale_sample_to_u8(u32::from(pixel[index]), image.bit_depth),
+            image.alpha,
+            image.bit_depth,
+            |index| u32::from(pixel[index]),
         )?;
     }
     Ok(rgba)
@@ -1124,8 +1130,9 @@ fn rgba16_from_u8(image: &DecodedImage, samples: &[u8]) -> Result<Vec<u16>> {
         append_rgba16_pixel(
             &mut rgba,
             image.color_channels,
-            image.alpha.is_some(),
-            |index| scale_sample_to_u16(u32::from(pixel[index]), image.bit_depth),
+            image.alpha,
+            image.bit_depth,
+            |index| u32::from(pixel[index]),
         )?;
     }
     Ok(rgba)
@@ -1142,8 +1149,9 @@ fn rgba16_from_u16(image: &DecodedImage, samples: &[u16]) -> Result<Vec<u16>> {
         append_rgba16_pixel(
             &mut rgba,
             image.color_channels,
-            image.alpha.is_some(),
-            |index| scale_sample_to_u16(u32::from(pixel[index]), image.bit_depth),
+            image.alpha,
+            image.bit_depth,
+            |index| u32::from(pixel[index]),
         )?;
     }
     Ok(rgba)
@@ -1152,21 +1160,31 @@ fn rgba16_from_u16(image: &DecodedImage, samples: &[u16]) -> Result<Vec<u16>> {
 fn append_rgba8_pixel(
     rgba: &mut Vec<u8>,
     color_channels: usize,
-    has_alpha: bool,
-    sample: impl Fn(usize) -> u8,
+    alpha: Option<AlphaInfo>,
+    bit_depth: u32,
+    sample: impl Fn(usize) -> u32,
 ) -> Result<()> {
+    let alpha_sample = alpha.map(|_| sample(color_channels));
+    let color_sample = |index| {
+        let value = sample(index);
+        if alpha.is_some_and(|alpha| alpha.premultiplied) {
+            unpremultiply_sample_to(value, alpha_sample.unwrap_or(0), u8::MAX as u32) as u8
+        } else {
+            scale_sample_to_u8(value, bit_depth)
+        }
+    };
     match color_channels {
         1 => {
-            let gray = sample(0);
+            let gray = color_sample(0);
             rgba.extend_from_slice(&[gray, gray, gray]);
         }
         3 => {
-            rgba.extend_from_slice(&[sample(0), sample(1), sample(2)]);
+            rgba.extend_from_slice(&[color_sample(0), color_sample(1), color_sample(2)]);
         }
         _ => return Err(Error::Unsupported("unsupported color channel count")),
     }
-    rgba.push(if has_alpha {
-        sample(color_channels)
+    rgba.push(if let Some(alpha_sample) = alpha_sample {
+        scale_sample_to_u8(alpha_sample, bit_depth)
     } else {
         255
     });
@@ -1176,21 +1194,31 @@ fn append_rgba8_pixel(
 fn append_rgba16_pixel(
     rgba: &mut Vec<u16>,
     color_channels: usize,
-    has_alpha: bool,
-    sample: impl Fn(usize) -> u16,
+    alpha: Option<AlphaInfo>,
+    bit_depth: u32,
+    sample: impl Fn(usize) -> u32,
 ) -> Result<()> {
+    let alpha_sample = alpha.map(|_| sample(color_channels));
+    let color_sample = |index| {
+        let value = sample(index);
+        if alpha.is_some_and(|alpha| alpha.premultiplied) {
+            unpremultiply_sample_to(value, alpha_sample.unwrap_or(0), u16::MAX as u32) as u16
+        } else {
+            scale_sample_to_u16(value, bit_depth)
+        }
+    };
     match color_channels {
         1 => {
-            let gray = sample(0);
+            let gray = color_sample(0);
             rgba.extend_from_slice(&[gray, gray, gray]);
         }
         3 => {
-            rgba.extend_from_slice(&[sample(0), sample(1), sample(2)]);
+            rgba.extend_from_slice(&[color_sample(0), color_sample(1), color_sample(2)]);
         }
         _ => return Err(Error::Unsupported("unsupported color channel count")),
     }
-    rgba.push(if has_alpha {
-        sample(color_channels)
+    rgba.push(if let Some(alpha_sample) = alpha_sample {
+        scale_sample_to_u16(alpha_sample, bit_depth)
     } else {
         u16::MAX
     });
@@ -1228,6 +1256,14 @@ fn scale_sample_to_u16(sample: u32, bit_depth: u32) -> u16 {
 fn scale_sample_to(sample: u32, bit_depth: u32, output_max: u32) -> u32 {
     let max = (1u32 << bit_depth) - 1;
     ((sample * output_max + max / 2) / max).min(output_max)
+}
+
+fn unpremultiply_sample_to(sample: u32, alpha: u32, output_max: u32) -> u32 {
+    if alpha == 0 {
+        return if sample == 0 { 0 } else { output_max };
+    }
+    (((u64::from(sample) * u64::from(output_max)) + u64::from(alpha / 2)) / u64::from(alpha))
+        .min(u64::from(output_max)) as u32
 }
 
 #[cfg(test)]
@@ -2226,6 +2262,55 @@ mod tests {
     }
 
     #[test]
+    fn decode_rgba8_unpremultiplies_associated_alpha_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping premultiplied alpha comparison; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-rgba8-premul-alpha-source", "pam");
+        let encoded = unique_temp_path("jxl-rgba8-premul-alpha", "jxl");
+        let expected_rgba = write_premultiplied_alpha_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args([
+                "-d",
+                "0",
+                "-m",
+                "1",
+                "--container=0",
+                "--premultiply=1",
+                "--quiet",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let decoded = decode(&encoded_bytes).unwrap();
+
+        assert_eq!(
+            decoded.alpha,
+            Some(AlphaInfo {
+                bit_depth: 8,
+                premultiplied: true,
+            })
+        );
+        let rgba = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba.width, decoded.width);
+        assert_eq!(rgba.height, decoded.height);
+        assert_eq!(rgba.pixels, expected_rgba);
+    }
+
+    #[test]
     fn scales_samples_to_u8_with_rounding() {
         assert_eq!(scale_sample_to_u8(0, 16), 0);
         assert_eq!(scale_sample_to_u8(65_535, 16), 255);
@@ -2236,6 +2321,15 @@ mod tests {
         assert_eq!(scale_sample_to_u16(65_535, 16), 65_535);
         assert_eq!(scale_sample_to_u16(128, 8), 32_896);
         assert_eq!(scale_sample_to_u16(1, 1), 65_535);
+    }
+
+    #[test]
+    fn unpremultiplies_associated_alpha_with_rounding_and_clamping() {
+        assert_eq!(unpremultiply_sample_to(0, 0, 255), 0);
+        assert_eq!(unpremultiply_sample_to(7, 0, 255), 255);
+        assert_eq!(unpremultiply_sample_to(64, 128, 255), 128);
+        assert_eq!(unpremultiply_sample_to(200, 128, 255), 255);
+        assert_eq!(unpremultiply_sample_to(128, 255, 65_535), 32_896);
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2615,6 +2709,48 @@ mod tests {
             bytes.push((state >> 24) as u8);
         }
         std::fs::write(path, bytes).unwrap();
+    }
+
+    fn write_premultiplied_alpha_source_pam(path: &Path) -> Vec<u8> {
+        let width = 17u32;
+        let height = 11u32;
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+        )
+        .into_bytes();
+        let mut expected_rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        for y in 0..height {
+            for x in 0..width {
+                let alpha = match (x + y * 3) % 9 {
+                    0 => 0,
+                    1 => 1,
+                    2 => 17,
+                    3 => 64,
+                    4 => 128,
+                    5 => 191,
+                    6 => 254,
+                    _ => 255,
+                };
+                let straight = [
+                    ((x * 23 + y * 7 + 11) & 0xff) as u8,
+                    ((x * 5 + y * 29 + 37) & 0xff) as u8,
+                    ((x * 13 + y * 17 + 91) & 0xff) as u8,
+                ];
+                for sample in straight {
+                    let premultiplied = ((u32::from(sample) * alpha + 127) / 255) as u8;
+                    bytes.push(premultiplied);
+                    expected_rgba.push(unpremultiply_sample_to(
+                        u32::from(premultiplied),
+                        alpha,
+                        u8::MAX as u32,
+                    ) as u8);
+                }
+                bytes.push(alpha as u8);
+                expected_rgba.push(alpha as u8);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+        expected_rgba
     }
 
     fn workspace_path(relative: impl AsRef<Path>) -> PathBuf {
