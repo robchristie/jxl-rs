@@ -2446,6 +2446,25 @@ mod tests {
             String::from_utf8_lossy(&cjxl_output.stderr)
         );
 
+        let reference = reference_djxl().map(|djxl| {
+            let output = unique_temp_path("jxl-vardct-alpha-reference", "pam");
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed: {}",
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+
+            let reference = std::fs::read(&output).unwrap();
+            let _ = std::fs::remove_file(&output);
+            parse_pam_rgba(&reference)
+        });
+
         let encoded_bytes = std::fs::read(&encoded).unwrap();
         let _ = std::fs::remove_file(&encoded);
         let info = inspect(&encoded_bytes).unwrap();
@@ -2481,6 +2500,20 @@ mod tests {
             panic!("expected 8-bit VarDCT alpha channel");
         };
         assert_eq!(alpha, &expected_alpha);
+        if let Some(reference) = &reference {
+            assert_eq!(reference.width, channels.width);
+            assert_eq!(reference.height, channels.height);
+            assert_eq!(
+                reference
+                    .samples
+                    .chunks_exact(4)
+                    .map(|pixel| pixel[3] as u8)
+                    .collect::<Vec<_>>(),
+                alpha.clone()
+            );
+        } else {
+            eprintln!("skipping VarDCT alpha djxl comparison; tool is not built");
+        }
 
         let roi = Rect {
             x: 17,
