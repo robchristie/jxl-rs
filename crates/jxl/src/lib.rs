@@ -213,7 +213,8 @@ impl Decoder {
     ///
     /// Modular still images return decoded integer channels. Supported VarDCT
     /// still images return reconstructed 8-bit sRGB RGB channels, not original
-    /// codestream channels.
+    /// codestream channels. VarDCT images with extra channels are rejected
+    /// until VarDCT extra-channel reconstruction is implemented.
     pub fn decode_channels(&self, input: &[u8]) -> Result<DecodedChannels> {
         self.validate_shared_options()?;
         decode_channels_buffered(input, self.codec_config(), self.options.vardct_pass)
@@ -225,8 +226,10 @@ impl Decoder {
     /// the decoded sample bit depth. The interleaved output includes color
     /// channels plus the first alpha channel when present; other extra channels
     /// remain available through [`Decoder::decode_channels`]. Supported VarDCT
-    /// still images return 8-bit sRGB RGB samples with no alpha channel. Pixel
-    /// output applies JPEG XL orientation metadata.
+    /// still images return 8-bit sRGB RGB samples when no alpha channel is
+    /// present; VarDCT alpha output is rejected until extra-channel
+    /// reconstruction is implemented. Pixel output applies JPEG XL orientation
+    /// metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management.
@@ -244,8 +247,10 @@ impl Decoder {
     /// scaled or expanded to RGBA8. If the codestream marks alpha as
     /// associated/premultiplied, color samples are unpremultiplied for this
     /// presentation output. Non-alpha extra channels are ignored. Supported
-    /// VarDCT still images return opaque sRGB RGBA8. Pixel output applies JPEG
-    /// XL orientation metadata.
+    /// VarDCT still images return opaque sRGB RGBA8 when no alpha channel is
+    /// present; VarDCT alpha output is rejected until extra-channel
+    /// reconstruction is implemented. Pixel output applies JPEG XL orientation
+    /// metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management.
@@ -263,8 +268,10 @@ impl Decoder {
     /// scaled or expanded to RGBA16. If the codestream marks alpha as
     /// associated/premultiplied, color samples are unpremultiplied for this
     /// presentation output. Non-alpha extra channels are ignored. Supported
-    /// VarDCT still images return opaque sRGB RGBA16. Pixel output applies JPEG
-    /// XL orientation metadata.
+    /// VarDCT still images return opaque sRGB RGBA16 when no alpha channel is
+    /// present; VarDCT alpha output is rejected until extra-channel
+    /// reconstruction is implemented. Pixel output applies JPEG XL orientation
+    /// metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management.
@@ -390,7 +397,7 @@ fn decode_channels_codestream(
     vardct_pass: Option<usize>,
 ) -> Result<DecodedChannels> {
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
-        reject_vardct_alpha_output(&codestream.metadata)?;
+        reject_vardct_extra_channel_output(&codestream.metadata)?;
         let orientation = codestream.metadata.orientation;
         let image = vardct_srgb8_image_from_codestream(&codestream, region, vardct_pass)?;
         return decoded_channels_from_vardct_srgb8(image, orientation);
@@ -744,6 +751,13 @@ fn reject_vardct_pass_for_non_vardct(pass: Option<usize>) -> Result<()> {
 fn reject_vardct_alpha_output(metadata: &ImageMetadata) -> Result<()> {
     if raw_alpha_channel_index(metadata)?.is_some() {
         return Err(Error::Unsupported("VarDCT alpha output"));
+    }
+    Ok(())
+}
+
+fn reject_vardct_extra_channel_output(metadata: &ImageMetadata) -> Result<()> {
+    if !metadata.extra_channels.is_empty() {
+        return Err(Error::Unsupported("VarDCT extra-channel output"));
     }
     Ok(())
 }
@@ -2113,7 +2127,7 @@ mod tests {
         );
         assert_eq!(
             decode_channels(&encoded_bytes),
-            Err(Error::Unsupported("VarDCT alpha output"))
+            Err(Error::Unsupported("VarDCT extra-channel output"))
         );
         assert_eq!(
             decode(&encoded_bytes),
@@ -2126,6 +2140,46 @@ mod tests {
         assert_eq!(
             decode_rgba16(&encoded_bytes),
             Err(Error::Unsupported("VarDCT alpha output"))
+        );
+    }
+
+    #[test]
+    fn decode_channels_rejects_generated_var_dct_extra_channels_until_reconstructed() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping VarDCT extra-channel rejection; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-vardct-depth-source", "pam");
+        let encoded = unique_temp_path("jxl-vardct-depth", "jxl");
+        write_rgb_depth_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert!(info.first_frame_vardct.is_some());
+        assert_eq!(info.metadata.extra_channels.len(), 1);
+        assert_eq!(
+            info.metadata.extra_channels[0].channel_type,
+            ExtraChannelType::Depth
+        );
+
+        assert_eq!(
+            decode_channels(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT extra-channel output"))
         );
     }
 
@@ -3332,6 +3386,24 @@ mod tests {
         for _ in 0..width * height * 4 {
             state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             bytes.push((state >> 24) as u8);
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn write_rgb_depth_source_pam(path: &Path) {
+        let width = 35u32;
+        let height = 21u32;
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB\nTUPLTYPE Depth\nENDHDR\n"
+        )
+        .into_bytes();
+        for y in 0..height {
+            for x in 0..width {
+                bytes.push(((x * 11 + y * 3 + 17) & 0xff) as u8);
+                bytes.push(((x * 7 + y * 13 + 29) & 0xff) as u8);
+                bytes.push(((x * 19 + y * 5 + 43) & 0xff) as u8);
+                bytes.push(((x * 37 + y * 41 + 73) & 0xff) as u8);
+            }
         }
         std::fs::write(path, bytes).unwrap();
     }
