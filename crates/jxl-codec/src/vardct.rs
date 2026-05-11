@@ -14,7 +14,7 @@ use crate::metadata::ImageMetadata;
 use crate::metadata::unpack_signed;
 use crate::modular::{
     MaTreeLeafProbe, ModularDecodedGroup, ModularGroupChannelPlan, ModularGroupHeader,
-    ModularPredictor, ModularTreeCoding, decode_modular_stream_from_reader,
+    ModularPredictor, ModularTreeCoding, ModularTreeCodingProbe, decode_modular_stream_from_reader,
     probe_modular_global_tree_coding, read_modular_global_tree_coding,
     read_modular_group_header_metadata,
 };
@@ -23,10 +23,302 @@ use std::ops::Range;
 
 const NUM_QUANT_TABLES: usize = 17;
 
+const DEFAULT_UPSAMPLING2_WEIGHTS: [f32; 15] = [
+    -0.017166138,
+    -0.03451538,
+    -0.040222168,
+    -0.029205322,
+    -0.0062446594,
+    0.14111328,
+    0.2890625,
+    0.0027866364,
+    -0.016098022,
+    0.56640625,
+    0.03778076,
+    -0.019866943,
+    -0.031433105,
+    -0.01184845,
+    -0.0021362305,
+];
+
+const DEFAULT_UPSAMPLING4_WEIGHTS: [f32; 55] = [
+    -0.024185181,
+    -0.034912109,
+    -0.03692627,
+    -0.030944824,
+    -0.0052986145,
+    -0.01663208,
+    -0.035583496,
+    -0.038879395,
+    -0.03515625,
+    -0.0098953247,
+    0.23657227,
+    0.33398438,
+    -0.010734558,
+    -0.013130188,
+    -0.035552979,
+    0.13049316,
+    0.40112305,
+    0.039520264,
+    -0.020782471,
+    0.46923828,
+    -0.0020923615,
+    -0.014846802,
+    -0.040649414,
+    0.18945312,
+    0.56298828,
+    0.066772461,
+    -0.023361206,
+    -0.035522461,
+    -0.0075492859,
+    -0.022674561,
+    -0.023635864,
+    0.0031585693,
+    -0.033996582,
+    -0.013595581,
+    -0.00091648102,
+    -0.0033550262,
+    -0.011634827,
+    -0.016098022,
+    -0.0097427368,
+    -0.0019159317,
+    -0.010955811,
+    -0.031982422,
+    -0.044555664,
+    -0.027999878,
+    -0.0064582825,
+    0.063903809,
+    0.22961426,
+    0.0063095093,
+    -0.018966675,
+    0.67529297,
+    0.084838867,
+    -0.025344849,
+    -0.02204895,
+    -0.016677856,
+    -0.0038452148,
+];
+
+const DEFAULT_UPSAMPLING8_WEIGHTS: [f32; 210] = [
+    -0.029281616,
+    -0.03704834,
+    -0.037841797,
+    -0.033233643,
+    -0.0044746399,
+    -0.025192261,
+    -0.037536621,
+    -0.039001465,
+    -0.036621094,
+    -0.0064659119,
+    -0.0206604,
+    -0.038391113,
+    -0.040008545,
+    -0.039001465,
+    -0.0090179443,
+    -0.016265869,
+    -0.039550781,
+    -0.040466309,
+    -0.039794922,
+    -0.012245178,
+    0.29907227,
+    0.35766602,
+    -0.024475098,
+    -0.010818481,
+    -0.043151855,
+    0.23901367,
+    0.41113281,
+    -0.0057296753,
+    -0.014503479,
+    -0.042480469,
+    0.17565918,
+    0.45214844,
+    0.022872925,
+    -0.019363403,
+    -0.035827637,
+    0.11572266,
+    0.47412109,
+    0.062866211,
+    -0.026855469,
+    0.42724609,
+    -0.022491455,
+    -0.011550903,
+    -0.045623779,
+    0.28686523,
+    0.4909668,
+    -7.891655e-05,
+    -0.015457153,
+    -0.045623779,
+    0.21240234,
+    0.54003906,
+    0.033691406,
+    -0.020706177,
+    -0.038665771,
+    0.14233398,
+    0.56591797,
+    0.080444336,
+    -0.028884888,
+    -0.036804199,
+    -0.0054206848,
+    -0.029205322,
+    -0.027893066,
+    -0.021179199,
+    -0.039428711,
+    -0.0077552795,
+    -0.024337769,
+    -0.031951904,
+    -0.020309448,
+    -0.040435791,
+    -0.010742188,
+    -0.019302368,
+    -0.036193848,
+    -0.019744873,
+    -0.03918457,
+    -0.014564514,
+    -0.00045061111,
+    -0.0036010742,
+    -0.0102005,
+    -0.012321472,
+    -0.0063896179,
+    -0.00071573257,
+    -0.002790451,
+    -0.0095748901,
+    -0.012886047,
+    -0.00730896,
+    -0.001077652,
+    -0.0021018982,
+    -0.0089035034,
+    -0.013175964,
+    -0.008140564,
+    -0.001534462,
+    -0.021286011,
+    -0.041717529,
+    -0.048309326,
+    -0.032928467,
+    -0.0052528381,
+    -0.017196655,
+    -0.040527344,
+    -0.050445557,
+    -0.036071777,
+    -0.0073814392,
+    -0.013420105,
+    -0.039642334,
+    -0.051513672,
+    -0.038146973,
+    -0.010055542,
+    0.18969727,
+    0.33056641,
+    -0.013000488,
+    -0.01373291,
+    -0.040161133,
+    0.1373291,
+    0.36401367,
+    0.010276794,
+    -0.018325806,
+    -0.033660889,
+    0.087341309,
+    0.38183594,
+    0.043395996,
+    -0.025253296,
+    0.56396484,
+    0.0045852661,
+    -0.016479492,
+    -0.04888916,
+    0.24584961,
+    0.62011719,
+    0.043151855,
+    -0.022140503,
+    -0.041564941,
+    0.16638184,
+    0.65039062,
+    0.096191406,
+    -0.031021118,
+    -0.04083252,
+    -0.0090484619,
+    -0.027908325,
+    -0.021179199,
+    0.0079879761,
+    -0.03994751,
+    -0.012435913,
+    -0.022323608,
+    -0.029464722,
+    0.0099182129,
+    -0.036010742,
+    -0.016845703,
+    -0.0011167526,
+    -0.0041122437,
+    -0.012969971,
+    -0.017242432,
+    -0.010223389,
+    -0.0016527176,
+    -0.0031318665,
+    -0.012176514,
+    -0.01763916,
+    -0.011253357,
+    -0.0023174286,
+    -0.01374054,
+    -0.037963867,
+    -0.051422119,
+    -0.031173706,
+    -0.0058174133,
+    -0.010643005,
+    -0.036071777,
+    -0.052734375,
+    -0.033752441,
+    -0.0079574585,
+    0.096252441,
+    0.27124023,
+    -0.0035381317,
+    -0.017333984,
+    -0.031524658,
+    0.056854248,
+    0.28491211,
+    0.02230835,
+    -0.023742676,
+    0.68212891,
+    0.050170898,
+    -0.023208618,
+    -0.043823242,
+    0.18457031,
+    0.71533203,
+    0.10803223,
+    -0.032623291,
+    -0.036376953,
+    -0.013946533,
+    -0.025115967,
+    -0.017288208,
+    0.054077148,
+    -0.028671265,
+    -0.018936157,
+    -0.0024089813,
+    -0.0044670105,
+    -0.016357422,
+    -0.023773193,
+    -0.015228271,
+    -0.0033340454,
+    -0.0082015991,
+    -0.029647827,
+    -0.04498291,
+    -0.027450562,
+    -0.0061225891,
+    0.027267456,
+    0.19445801,
+    0.0015983582,
+    -0.022323608,
+    0.75,
+    0.11450195,
+    -0.033477783,
+    -0.016052246,
+    -0.020706177,
+    -0.0045814514,
+];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarDctFrameMetadata {
     pub width: u32,
     pub height: u32,
+    pub coded_width: u32,
+    pub coded_height: u32,
+    pub upsampling: u32,
     pub group_dim: u32,
     pub groups_x: u32,
     pub groups_y: u32,
@@ -474,6 +766,7 @@ pub struct VarDctDecodePlan {
     pub frame: VarDctFrameMetadata,
     pub loop_filter: LoopFilter,
     pub opsin_params: VarDctOpsinParams,
+    pub transform_data: CustomTransformData,
     pub epf_metadata: Option<VarDctEpfMetadata>,
     pub global: Option<VarDctGlobalMetadata>,
     pub modular_global_tree_payload_start_bits: Option<usize>,
@@ -649,7 +942,9 @@ pub fn assemble_vardct_xyb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDc
             }
         }
     }
-    Ok(image)
+    image
+        .map(|image| upsample_vardct_xyb_image_to_display(image, plan))
+        .transpose()
 }
 
 /// Assembles available VarDCT XYB data for exactly one AC pass.
@@ -676,7 +971,9 @@ pub fn assemble_vardct_xyb_image_for_pass(
             }
         }
     }
-    Ok(image)
+    image
+        .map(|image| upsample_vardct_xyb_image_to_display(image, plan))
+        .transpose()
 }
 
 /// Assembles a DC-only VarDCT XYB image.
@@ -694,7 +991,9 @@ pub fn assemble_vardct_dc_xyb_image(plan: &VarDctDecodePlan) -> Result<Option<Va
             }
         }
     }
-    Ok(image)
+    image
+        .map(|image| upsample_vardct_xyb_image_to_display(image, plan))
+        .transpose()
 }
 
 /// Assembles available VarDCT XYB data and converts it to linear RGB.
@@ -1339,12 +1638,12 @@ fn assemble_vardct_xyb_image_from_groups_with_mode(
 }
 
 fn assemble_vardct_xyb_image_final(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
-    let sample_len = (plan.frame.width as usize)
-        .checked_mul(plan.frame.height as usize)
+    let sample_len = (plan.frame.coded_width as usize)
+        .checked_mul(plan.frame.coded_height as usize)
         .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
     let mut image = VarDctXybImage {
-        width: plan.frame.width,
-        height: plan.frame.height,
+        width: plan.frame.coded_width,
+        height: plan.frame.coded_height,
         groups_assembled: 0,
         groups_missing: 0,
         channels: [
@@ -1377,12 +1676,12 @@ fn assemble_vardct_xyb_image_dc_only(
     plan: &VarDctDecodePlan,
     dc_multiplier: f32,
 ) -> Result<Option<VarDctXybImage>> {
-    let sample_len = (plan.frame.width as usize)
-        .checked_mul(plan.frame.height as usize)
+    let sample_len = (plan.frame.coded_width as usize)
+        .checked_mul(plan.frame.coded_height as usize)
         .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
     let mut image = VarDctXybImage {
-        width: plan.frame.width,
-        height: plan.frame.height,
+        width: plan.frame.coded_width,
+        height: plan.frame.coded_height,
         groups_assembled: 0,
         groups_missing: 0,
         channels: [
@@ -1616,6 +1915,187 @@ fn copy_vardct_spatial_group_to_image(
         }
     }
     Ok(())
+}
+
+fn upsample_vardct_xyb_image_to_display(
+    image: VarDctXybImage,
+    plan: &VarDctDecodePlan,
+) -> Result<VarDctXybImage> {
+    if plan.frame.upsampling == 1 {
+        if image.width != plan.frame.width || image.height != plan.frame.height {
+            return Err(Error::InvalidCodestream(
+                "invalid VarDCT reconstruction size",
+            ));
+        }
+        return Ok(image);
+    }
+
+    let shift = ceil_log2_nonzero(plan.frame.upsampling as usize) as u32;
+    let factor = 1u32 << shift;
+    if factor != plan.frame.upsampling
+        || image.width != plan.frame.coded_width
+        || image.height != plan.frame.coded_height
+        || image.width != plan.frame.width.div_ceil(factor)
+        || image.height != plan.frame.height.div_ceil(factor)
+    {
+        return Err(Error::InvalidCodestream(
+            "invalid VarDCT upsampling geometry",
+        ));
+    }
+
+    let sample_len = (plan.frame.width as usize)
+        .checked_mul(plan.frame.height as usize)
+        .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
+    let mut output = VarDctXybImage {
+        width: plan.frame.width,
+        height: plan.frame.height,
+        groups_assembled: image.groups_assembled,
+        groups_missing: image.groups_missing,
+        channels: [
+            vec![0.0; sample_len],
+            vec![0.0; sample_len],
+            vec![0.0; sample_len],
+        ],
+    };
+
+    for channel in 0..3 {
+        for y in 0..plan.frame.height {
+            for x in 0..plan.frame.width {
+                let index = y as usize * plan.frame.width as usize + x as usize;
+                output.channels[channel][index] = upsample_vardct_plane_sample(
+                    &image.channels[channel],
+                    image.width,
+                    image.height,
+                    x,
+                    y,
+                    shift,
+                    &plan.transform_data,
+                )?;
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+fn upsample_vardct_plane_sample(
+    plane: &[f32],
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    shift: u32,
+    transform_data: &CustomTransformData,
+) -> Result<f32> {
+    let factor = 1u32 << shift;
+    let source_x = (x >> shift) as isize;
+    let source_y = (y >> shift) as isize;
+    let ox = (x & (factor - 1)) as usize;
+    let oy = (y & (factor - 1)) as usize;
+    let mut min_sample = f32::INFINITY;
+    let mut max_sample = f32::NEG_INFINITY;
+    let mut acc0 = 0.0f32;
+    let mut acc1 = 0.0f32;
+    let mut acc2 = 0.0f32;
+
+    for i in 0..25 {
+        let px = i % 5;
+        let py = i / 5;
+        let sample = vardct_plane_sample_f32(
+            plane,
+            width,
+            height,
+            source_x + px as isize - 2,
+            source_y + py as isize - 2,
+        )?;
+        min_sample = min_sample.min(sample);
+        max_sample = max_sample.max(sample);
+        let weight = upsampling_kernel(shift, ox, oy, px, py, transform_data)?;
+        match i % 3 {
+            0 => acc0 = sample.mul_add(weight, acc0),
+            1 => acc1 = sample.mul_add(weight, acc1),
+            _ => acc2 = sample.mul_add(weight, acc2),
+        }
+    }
+
+    Ok(((acc1 + acc2) + acc0).clamp(min_sample, max_sample))
+}
+
+fn vardct_plane_sample_f32(
+    plane: &[f32],
+    width: u32,
+    height: u32,
+    x: isize,
+    y: isize,
+) -> Result<f32> {
+    let x = mirror_coordinate(x, width as usize);
+    let y = mirror_coordinate(y, height as usize);
+    let index = y
+        .checked_mul(width as usize)
+        .and_then(|index| index.checked_add(x))
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    plane
+        .get(index)
+        .copied()
+        .ok_or(Error::InvalidCodestream("invalid VarDCT upsampling sample"))
+}
+
+fn upsampling_kernel(
+    shift: u32,
+    ox: usize,
+    oy: usize,
+    px: usize,
+    py: usize,
+    transform_data: &CustomTransformData,
+) -> Result<f32> {
+    let factor = 1usize << shift;
+    let half = factor / 2;
+    let kernel_x = if ox < half { ox } else { factor - 1 - ox };
+    let kernel_y = if oy < half { oy } else { factor - 1 - oy };
+    let px = if ox < half { px } else { 4 - px };
+    let py = if oy < half { py } else { 4 - py };
+    let i = 5 * kernel_x + px;
+    let j = 5 * kernel_y + py;
+    let min = i.min(j);
+    let max = i.max(j);
+    let index = 5 * half * min - min * min.saturating_sub(1) / 2 + max - min;
+    upsampling_weights(shift, transform_data)?
+        .get(index)
+        .copied()
+        .ok_or(Error::InvalidCodestream("invalid upsampling kernel index"))
+}
+
+fn upsampling_weights<'a>(
+    shift: u32,
+    transform_data: &'a CustomTransformData,
+) -> Result<&'a [f32]> {
+    let weights = match shift {
+        1 => transform_data
+            .upsampling2_weights
+            .as_deref()
+            .unwrap_or(&DEFAULT_UPSAMPLING2_WEIGHTS),
+        2 => transform_data
+            .upsampling4_weights
+            .as_deref()
+            .unwrap_or(&DEFAULT_UPSAMPLING4_WEIGHTS),
+        3 => transform_data
+            .upsampling8_weights
+            .as_deref()
+            .unwrap_or(&DEFAULT_UPSAMPLING8_WEIGHTS),
+        _ => return Err(Error::Unsupported("VarDCT frame upsampling")),
+    };
+    let expected_len = match shift {
+        1 => 15,
+        2 => 55,
+        3 => 210,
+        _ => unreachable!(),
+    };
+    if weights.len() != expected_len {
+        return Err(Error::InvalidCodestream(
+            "invalid custom upsampling weight count",
+        ));
+    }
+    Ok(weights)
 }
 
 fn apply_vardct_gaborish(image: &mut VarDctXybImage, loop_filter: &LoopFilter) {
@@ -2264,6 +2744,7 @@ struct VarDctSectionBuckets {
 
 impl VarDctFrameMetadata {
     pub fn ac_groups_intersecting_region(&self, region: ImageRegion) -> Vec<usize> {
+        let region = self.coded_region_for_display_region(region);
         self.ac_groups
             .iter()
             .filter(|group| group_intersects_region(group, region))
@@ -2278,6 +2759,7 @@ impl VarDctFrameMetadata {
         if self.is_combined {
             return Vec::new();
         }
+        let region = self.coded_region_for_display_region(region);
         self.ac_group_sections
             .iter()
             .filter(|section| group_intersects_region(&section.group, region))
@@ -2288,10 +2770,29 @@ impl VarDctFrameMetadata {
         if self.is_combined {
             return Vec::new();
         }
+        let region = self.coded_region_for_display_region(region);
         self.dc_group_sections
             .iter()
             .filter(|section| group_intersects_region(&section.group, region))
             .collect()
+    }
+
+    fn coded_region_for_display_region(&self, region: ImageRegion) -> ImageRegion {
+        if self.upsampling <= 1 {
+            return region;
+        }
+
+        let factor = self.upsampling;
+        let x0 = region.x / factor;
+        let y0 = region.y / factor;
+        let x1 = region.x.saturating_add(region.width).div_ceil(factor);
+        let y1 = region.y.saturating_add(region.height).div_ceil(factor);
+        ImageRegion {
+            x: x0,
+            y: y0,
+            width: x1.saturating_sub(x0),
+            height: y1.saturating_sub(y0),
+        }
     }
 }
 
@@ -2314,25 +2815,36 @@ pub fn read_vardct_frame_metadata(
             payload_size: section.size,
         })
         .collect::<Vec<_>>();
+    let coded_width = frame_header
+        .frame_size
+        .width
+        .div_ceil(frame_header.upsampling);
+    let coded_height = frame_header
+        .frame_size
+        .height
+        .div_ceil(frame_header.upsampling);
     let ac_groups = group_metadata(
         frame_header.group_layout.groups_x,
         frame_header.group_layout.groups_y,
         frame_header.group_layout.group_dim,
-        frame_header.frame_size.width,
-        frame_header.frame_size.height,
+        coded_width,
+        coded_height,
     );
     let dc_groups = group_metadata(
         frame_header.group_layout.dc_groups_x,
         frame_header.group_layout.dc_groups_y,
         frame_header.group_layout.dc_group_dim,
-        frame_header.frame_size.width,
-        frame_header.frame_size.height,
+        coded_width,
+        coded_height,
     );
     let buckets = classify_vardct_sections(&sections, &ac_groups, &dc_groups);
 
     Some(VarDctFrameMetadata {
         width: frame_header.frame_size.width,
         height: frame_header.frame_size.height,
+        coded_width,
+        coded_height,
+        upsampling: frame_header.upsampling,
         group_dim: frame_header.group_layout.group_dim,
         groups_x: frame_header.group_layout.groups_x,
         groups_y: frame_header.group_layout.groups_y,
@@ -2359,6 +2871,17 @@ pub fn read_vardct_decode_plan(
     let Some(frame) = read_vardct_frame_metadata(frame_header, frame_data) else {
         return Ok(None);
     };
+
+    if frame.is_combined && frame.ac_groups.len() == 1 && frame.dc_groups.len() == 1 {
+        return read_single_section_vardct_decode_plan(
+            codestream,
+            metadata,
+            transform_data,
+            frame_header,
+            frame_data,
+            frame,
+        );
+    }
 
     let global_payload = frame
         .global_section
@@ -2638,6 +3161,7 @@ pub fn read_vardct_decode_plan(
         frame,
         loop_filter: frame_header.loop_filter.clone(),
         opsin_params: vardct_opsin_params(metadata, transform_data),
+        transform_data: transform_data.clone(),
         epf_metadata,
         global,
         modular_global_tree_payload_start_bits,
@@ -2703,6 +3227,289 @@ pub fn read_vardct_decode_plan(
     }))
 }
 
+fn read_single_section_vardct_decode_plan(
+    codestream: &[u8],
+    metadata: &ImageMetadata,
+    transform_data: &CustomTransformData,
+    frame_header: &FrameHeader,
+    frame_data: &FrameData,
+    frame: VarDctFrameMetadata,
+) -> Result<Option<VarDctDecodePlan>> {
+    if frame_header.passes.num_passes != 1 {
+        return Err(Error::Unsupported("combined multi-pass VarDCT section"));
+    }
+    let section = frame
+        .global_section
+        .as_ref()
+        .ok_or(Error::InvalidCodestream("missing combined VarDCT section"))?;
+    let global_payload = section_payload_metadata(codestream, frame_data, section)?;
+    let bytes = codestream
+        .get(global_payload.payload_range.clone())
+        .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
+    let mut reader = BitReader::new(bytes);
+
+    let global = read_vardct_global_metadata_from_reader(&mut reader, &global_payload)?;
+    let modular_global_tree_payload_start_bits = global_payload.payload_range.start.checked_mul(8);
+    let modular_global_tree_payload_len_bits = global_payload.payload_range.len().checked_mul(8);
+    let modular_global_tree_payload_end_bits = modular_global_tree_payload_start_bits
+        .zip(modular_global_tree_payload_len_bits)
+        .and_then(|(start, len)| start.checked_add(len));
+    let absolute_bits = |relative_bits: Option<usize>| {
+        modular_global_tree_payload_start_bits
+            .zip(relative_bits)
+            .and_then(|(start, bits)| start.checked_add(bits))
+    };
+    let remaining_bits = |relative_bits: Option<usize>| {
+        modular_global_tree_payload_len_bits
+            .zip(relative_bits)
+            .and_then(|(len, bits)| len.checked_sub(bits))
+    };
+
+    let (
+        global_tree,
+        modular_global_tree_direct_start_bits,
+        modular_global_tree_direct_tree_end_bits,
+        modular_global_tree_direct_tree_node_count,
+        modular_global_tree_direct_tree_leaf_count,
+        modular_global_tree_direct_tree_leaves,
+        modular_global_tree_direct_error_bits,
+        modular_global_tree_direct_residual_context_count,
+        modular_global_tree_direct_residual_histogram_count,
+        modular_global_tree_direct_residual_context_map_entries,
+        modular_global_tree_direct_residual_context_map_raw_entries,
+        modular_global_tree_direct_residual_context_map_distinct_entries,
+        modular_global_tree_direct_residual_context_map_histogram_usage_counts,
+        modular_global_tree_direct_residual_context_map_max_entry,
+        modular_global_tree_direct_residual_context_map_symbol_entries,
+        modular_global_tree_direct_residual_lz77_end_bits,
+        modular_global_tree_direct_residual_context_map_end_bits,
+        modular_global_tree_direct_residual_entropy_mode_end_bits,
+        modular_global_tree_direct_residual_log_alpha_size_end_bits,
+        modular_global_tree_direct_residual_uint_config_end_bits_by_histogram,
+        modular_global_tree_direct_residual_uint_config_end_bits,
+        modular_global_tree_direct_residual_use_prefix_code,
+        modular_global_tree_direct_residual_log_alpha_size,
+        modular_global_tree_direct_residual_failed_histogram_index,
+        modular_global_tree_direct_residual_error_stage,
+        modular_global_tree_direct_residual_ans_histograms,
+        modular_global_tree_start_bits,
+        modular_global_tree_direct_error,
+        modular_global_tree_error,
+    ) = match read_vardct_modular_global_tree_from_reader(&mut reader, metadata, frame_header) {
+        Ok(result) => (
+            Some(result.tree),
+            Some(result.direct_start_bits),
+            result.direct_tree_end_bits,
+            result.direct_tree_node_count,
+            result.direct_tree_leaf_count,
+            result.direct_tree_leaves,
+            result.direct_error_bits,
+            result.direct_residual_context_count,
+            result.direct_residual_histogram_count,
+            result.direct_residual_context_map_entries,
+            result.direct_residual_context_map_raw_entries,
+            result.direct_residual_context_map_distinct_entries,
+            result.direct_residual_context_map_histogram_usage_counts,
+            result.direct_residual_context_map_max_entry,
+            result.direct_residual_context_map_symbol_entries,
+            result.direct_residual_lz77_end_bits,
+            result.direct_residual_context_map_end_bits,
+            result.direct_residual_entropy_mode_end_bits,
+            result.direct_residual_log_alpha_size_end_bits,
+            result.direct_residual_uint_config_end_bits_by_histogram,
+            result.direct_residual_uint_config_end_bits,
+            result.direct_residual_use_prefix_code,
+            result.direct_residual_log_alpha_size,
+            result.direct_residual_failed_histogram_index,
+            result.direct_residual_error_stage,
+            result.direct_residual_ans_histograms,
+            Some(result.tree_start_bits),
+            result.direct_error,
+            None,
+        ),
+        Err(error) => (
+            None,
+            Some(global.bits_consumed),
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            Vec::new(),
+            None,
+            None,
+            Some(error),
+        ),
+    };
+    let (modular_global, modular_global_error) = match global_tree.as_ref() {
+        Some(tree) => match read_vardct_global_modular_stream_from_reader(
+            &mut reader,
+            metadata,
+            frame_header,
+            &global_payload,
+            tree,
+        ) {
+            Ok(decoded) => (decoded, None),
+            Err(error) => (None, Some(error)),
+        },
+        None => (None, modular_global_tree_error.clone()),
+    };
+
+    let dc_group_payload = VarDctDcGroupPayloadMetadata {
+        section: global_payload.clone(),
+        group: frame.dc_groups[0],
+        var_dct_dc_stream_id: 1,
+        modular_dc_stream_id: 1 + frame.dc_groups.len(),
+        ac_metadata_stream_id: 1 + 2 * frame.dc_groups.len(),
+    };
+    let dc_group_metadata = vec![read_vardct_dc_group_metadata_from_reader(
+        &mut reader,
+        frame_header,
+        dc_group_payload.clone(),
+        global_tree.as_ref(),
+        modular_global_tree_error.as_ref(),
+    )?];
+
+    let used_acs = used_acs_from_dc_group_metadata(&dc_group_metadata);
+    let ac_global_payload = global_payload.clone();
+    let mut ac_global_metadata_reader = reader.clone();
+    let ac_global_metadata = read_vardct_ac_global_metadata_from_reader(
+        &mut ac_global_metadata_reader,
+        frame_header,
+        &ac_global_payload,
+        &global,
+        used_acs,
+    )?;
+    let ac_global_entropy = if ac_global_metadata.parse_error.is_none() {
+        Some(read_vardct_ac_global_entropy_tables_from_reader(
+            &mut reader,
+            frame_header,
+            &global,
+        )?)
+    } else {
+        reader = ac_global_metadata_reader;
+        None
+    };
+
+    let (modular_ac_min_shift, modular_ac_max_shift) =
+        frame_header.passes.downsampling_bracket(0)?;
+    let ac_group_payload = VarDctPassGroupPayloadMetadata {
+        section: global_payload.clone(),
+        pass: 0,
+        group: frame.ac_groups[0],
+        modular_ac_stream_id: 1 + 3 * frame.dc_groups.len() + NUM_QUANT_TABLES,
+        modular_ac_min_shift,
+        modular_ac_max_shift,
+        modular_ac_channels: vardct_modular_ac_channel_plan(
+            metadata,
+            frame_header,
+            frame.ac_groups[0],
+            modular_ac_min_shift,
+            modular_ac_max_shift,
+        )?,
+    };
+    let ac_group_metadata = vec![read_vardct_ac_group_metadata_from_reader(
+        &mut reader,
+        frame_header,
+        ac_group_payload.clone(),
+        global_tree.as_ref(),
+        Some(&global),
+        Some(&ac_global_metadata),
+        ac_global_entropy.as_deref(),
+        &dc_group_metadata,
+    )?];
+    let epf_metadata = (frame_header.loop_filter.epf_iters > 0)
+        .then(|| vardct_epf_metadata(frame_header, &frame, Some(&global), &dc_group_metadata))
+        .transpose()?;
+
+    Ok(Some(VarDctDecodePlan {
+        frame,
+        loop_filter: frame_header.loop_filter.clone(),
+        opsin_params: vardct_opsin_params(metadata, transform_data),
+        transform_data: transform_data.clone(),
+        epf_metadata,
+        global: Some(global),
+        modular_global_tree_payload_start_bits,
+        modular_global_tree_payload_end_bits,
+        modular_global_tree_payload_len_bits,
+        modular_global_tree_direct_start_bits,
+        modular_global_tree_direct_start_absolute_bits: absolute_bits(
+            modular_global_tree_direct_start_bits,
+        ),
+        modular_global_tree_direct_start_remaining_bits: remaining_bits(
+            modular_global_tree_direct_start_bits,
+        ),
+        modular_global_tree_direct_tree_end_bits,
+        modular_global_tree_direct_tree_end_absolute_bits: absolute_bits(
+            modular_global_tree_direct_tree_end_bits,
+        ),
+        modular_global_tree_direct_tree_end_remaining_bits: remaining_bits(
+            modular_global_tree_direct_tree_end_bits,
+        ),
+        modular_global_tree_direct_tree_node_count,
+        modular_global_tree_direct_tree_leaf_count,
+        modular_global_tree_direct_tree_leaves,
+        modular_global_tree_direct_error_bits,
+        modular_global_tree_direct_error_absolute_bits: absolute_bits(
+            modular_global_tree_direct_error_bits,
+        ),
+        modular_global_tree_direct_error_remaining_bits: remaining_bits(
+            modular_global_tree_direct_error_bits,
+        ),
+        modular_global_tree_direct_residual_context_count,
+        modular_global_tree_direct_residual_histogram_count,
+        modular_global_tree_direct_residual_context_map_entries,
+        modular_global_tree_direct_residual_context_map_raw_entries,
+        modular_global_tree_direct_residual_context_map_distinct_entries,
+        modular_global_tree_direct_residual_context_map_histogram_usage_counts,
+        modular_global_tree_direct_residual_context_map_max_entry,
+        modular_global_tree_direct_residual_context_map_symbol_entries,
+        modular_global_tree_direct_residual_lz77_end_bits,
+        modular_global_tree_direct_residual_context_map_end_bits,
+        modular_global_tree_direct_residual_entropy_mode_end_bits,
+        modular_global_tree_direct_residual_log_alpha_size_end_bits,
+        modular_global_tree_direct_residual_uint_config_end_bits_by_histogram,
+        modular_global_tree_direct_residual_uint_config_end_bits,
+        modular_global_tree_direct_residual_use_prefix_code,
+        modular_global_tree_direct_residual_log_alpha_size,
+        modular_global_tree_direct_residual_failed_histogram_index,
+        modular_global_tree_direct_residual_error_stage,
+        modular_global_tree_direct_residual_ans_histograms,
+        modular_global_tree_start_bits,
+        modular_global_tree_start_absolute_bits: absolute_bits(modular_global_tree_start_bits),
+        modular_global_tree_start_remaining_bits: remaining_bits(modular_global_tree_start_bits),
+        modular_global_tree_direct_error,
+        modular_global_tree_error,
+        modular_global,
+        modular_global_error,
+        global_payload: Some(global_payload.clone()),
+        ac_global_payload: Some(ac_global_payload),
+        ac_global_metadata: Some(ac_global_metadata),
+        ac_group_payloads: vec![ac_group_payload],
+        ac_group_metadata,
+        dc_group_payloads: vec![dc_group_payload],
+        dc_group_metadata,
+    }))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct VarDctEpfFirstBlock {
     x: usize,
@@ -2717,8 +3524,8 @@ fn vardct_epf_metadata(
     global: Option<&VarDctGlobalMetadata>,
     dc_groups: &[VarDctDcGroupMetadata],
 ) -> Result<VarDctEpfMetadata> {
-    let width_blocks = frame.width.div_ceil(8) as usize;
-    let height_blocks = frame.height.div_ceil(8) as usize;
+    let width_blocks = frame.coded_width.div_ceil(8) as usize;
+    let height_blocks = frame.coded_height.div_ceil(8) as usize;
     let sample_count = width_blocks
         .checked_mul(height_blocks)
         .ok_or(Error::InvalidCodestream("VarDCT EPF metadata is too large"))?;
@@ -2974,7 +3781,33 @@ fn read_vardct_ac_group_metadata(
         .get(payload.section.payload_range.clone())
         .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
     let mut reader = BitReader::new(bytes);
-    let payload_end_bits = bytes
+    read_vardct_ac_group_metadata_from_reader(
+        &mut reader,
+        frame_header,
+        payload,
+        global_tree,
+        global,
+        ac_global,
+        ac_global_entropy,
+        dc_groups,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_vardct_ac_group_metadata_from_reader(
+    mut reader: &mut BitReader<'_>,
+    frame_header: &FrameHeader,
+    payload: VarDctPassGroupPayloadMetadata,
+    global_tree: Option<&ModularTreeCoding>,
+    global: Option<&VarDctGlobalMetadata>,
+    ac_global: Option<&VarDctAcGlobalMetadata>,
+    ac_global_entropy: Option<&[Option<VarDctAcPassEntropy>]>,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<VarDctAcGroupMetadata> {
+    let start_bits = reader.bits_consumed();
+    let payload_end_bits = payload
+        .section
+        .payload_range
         .len()
         .checked_mul(8)
         .ok_or(Error::InvalidCodestream("AC group payload too large"))?;
@@ -2988,9 +3821,9 @@ fn read_vardct_ac_group_metadata(
     let mut metadata = VarDctAcGroupMetadata {
         payload,
         cursor: VarDctAcGroupCursorMetadata {
-            payload_start_bits: 0,
+            payload_start_bits: start_bits,
             payload_end_bits,
-            histogram_selector_start_bits: 0,
+            histogram_selector_start_bits: start_bits,
             histogram_selector_end_bits: None,
             ans_state_start_bits: None,
             ans_state_end_bits: None,
@@ -3107,8 +3940,7 @@ fn read_vardct_ac_group_metadata(
                                 metadata.cursor.modular_ac_start_bits =
                                     Some(reader.bits_consumed());
                                 if !metadata.payload.modular_ac_channels.is_empty() {
-                                    let mut modular_ac_reader = BitReader::new(bytes);
-                                    modular_ac_reader.skip_bits(reader.bits_consumed())?;
+                                    let mut modular_ac_reader = reader.clone();
                                     match decode_modular_stream_from_reader(
                                         &mut modular_ac_reader,
                                         metadata.payload.section.section.section_physical_index,
@@ -3119,6 +3951,7 @@ fn read_vardct_ac_group_metadata(
                                         Ok((_, decoded)) => {
                                             metadata.cursor.modular_ac_end_bits =
                                                 Some(modular_ac_reader.bits_consumed());
+                                            *reader = modular_ac_reader;
                                             metadata.modular_ac = Some(decoded);
                                         }
                                         Err(error) => {
@@ -3185,6 +4018,14 @@ fn read_vardct_ac_global_entropy_tables(
         .get(payload.payload_range.clone())
         .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
     let mut reader = BitReader::new(bytes);
+    read_vardct_ac_global_entropy_tables_from_reader(&mut reader, frame_header, global)
+}
+
+fn read_vardct_ac_global_entropy_tables_from_reader(
+    mut reader: &mut BitReader<'_>,
+    frame_header: &FrameHeader,
+    global: &VarDctGlobalMetadata,
+) -> Result<Vec<Option<VarDctAcPassEntropy>>> {
     let all_default_quant_matrices = reader.read_bool()?;
     if !all_default_quant_matrices {
         return Err(Error::Unsupported("custom VarDCT AC quant matrices"));
@@ -4004,11 +4845,17 @@ fn spatial_transform_for_strategy(raw_strategy: usize) -> Option<SpatialTransfor
         1 => (8, 8, SpatialTransformKind::Identity),
         2 => (2, 2, SpatialTransformKind::Dct),
         4 => (16, 16, SpatialTransformKind::Dct),
+        5 => (32, 32, SpatialTransformKind::Dct),
         6 => (8, 16, SpatialTransformKind::Dct),
         7 => (16, 8, SpatialTransformKind::Dct),
+        8 => (8, 32, SpatialTransformKind::Dct),
+        9 => (32, 8, SpatialTransformKind::Dct),
+        10 => (16, 32, SpatialTransformKind::Dct),
+        11 => (32, 16, SpatialTransformKind::Dct),
         12 => (4, 8, SpatialTransformKind::Dct),
         13 => (8, 4, SpatialTransformKind::Dct),
         14..=17 => (8, 8, SpatialTransformKind::Afv(raw_strategy - 14)),
+        18 => (64, 64, SpatialTransformKind::Dct),
         _ => return None,
     };
     Some(SpatialTransform {
@@ -4302,28 +5149,45 @@ fn inverse_dct_rect(width: usize, height: usize, coefficients: &[f32]) -> Result
     if width == 0 || height == 0 || coefficients.len() != width * height {
         return Err(Error::InvalidCodestream("invalid DCT dimensions"));
     }
-    let mut output = vec![0.0f32; width * height];
     let inv_sqrt_2 = std::f32::consts::FRAC_1_SQRT_2;
+    let cos_x = dct_cos_table(width);
+    let cos_y = dct_cos_table(height);
+    let mut temp = vec![0.0f32; width * height];
+    for v in 0..height {
+        for x in 0..width {
+            let mut sum = 0.0f32;
+            for u in 0..width {
+                let cu = if u == 0 { inv_sqrt_2 } else { 1.0 };
+                sum += cu * coefficients[v * width + u] * cos_x[x * width + u];
+            }
+            temp[v * width + x] = sum;
+        }
+    }
+
+    let mut output = vec![0.0f32; width * height];
+    let scale = 2.0 / ((width * height) as f32).sqrt();
     for y in 0..height {
         for x in 0..width {
             let mut sum = 0.0f32;
             for v in 0..height {
                 let cv = if v == 0 { inv_sqrt_2 } else { 1.0 };
-                let cos_y = (((2 * y + 1) as f32 * v as f32 * std::f32::consts::PI)
-                    / (2 * height) as f32)
-                    .cos();
-                for u in 0..width {
-                    let cu = if u == 0 { inv_sqrt_2 } else { 1.0 };
-                    let cos_x = (((2 * x + 1) as f32 * u as f32 * std::f32::consts::PI)
-                        / (2 * width) as f32)
-                        .cos();
-                    sum += cu * cv * coefficients[v * width + u] * cos_x * cos_y;
-                }
+                sum += cv * temp[v * width + x] * cos_y[y * height + v];
             }
-            output[y * width + x] = 2.0 / ((width * height) as f32).sqrt() * sum;
+            output[y * width + x] = scale * sum;
         }
     }
     Ok(output)
+}
+
+fn dct_cos_table(size: usize) -> Vec<f32> {
+    let mut table = vec![0.0f32; size * size];
+    for x in 0..size {
+        for u in 0..size {
+            table[x * size + u] =
+                (((2 * x + 1) as f32 * u as f32 * std::f32::consts::PI) / (2 * size) as f32).cos();
+        }
+    }
+    table
 }
 
 fn inverse_afv_8x8(kind: usize, coefficients: &[f32]) -> Result<Vec<f32>> {
@@ -4621,9 +5485,13 @@ fn default_dequant_matrix(raw_strategy: usize, channel: usize) -> Result<Vec<f32
         1 => default_identity_quant_weights(channel),
         2 => default_dct2_quant_weights(channel),
         4 => default_dct_quant_weights(width, height, DCT16_QUANT_BANDS, 7, channel)?,
+        5 => default_dct_quant_weights(width, height, DCT32_QUANT_BANDS, 8, channel)?,
         6 | 7 => default_dct_quant_weights(width, height, DCT8X16_QUANT_BANDS, 7, channel)?,
+        8 | 9 => default_dct_quant_weights(width, height, DCT8X32_QUANT_BANDS, 8, channel)?,
+        10 | 11 => default_dct_quant_weights(width, height, DCT16X32_QUANT_BANDS, 8, channel)?,
         12 | 13 => default_dct4x8_quant_weights(width, height, channel)?,
         14..=17 => default_afv_quant_weights(channel)?,
+        18 => default_dct_quant_weights(width, height, DCT64_QUANT_BANDS, 8, channel)?,
         _ => {
             return Err(Error::Unsupported(
                 "default dequant matrix for VarDCT AC strategy",
@@ -4865,10 +5733,99 @@ const DCT16_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
         1157.504, -2.0531423, -1.4, -0.5068713, -0.4270873, -1.4856834, -4.920914, 0.0,
     ],
 ]];
+const DCT32_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [
+        15718.408,
+        -1.025,
+        -0.98,
+        -0.9012,
+        -0.4,
+        -0.48819396,
+        -0.421064,
+        -0.27,
+    ],
+    [
+        7305.7637,
+        -0.8041958,
+        -0.76330364,
+        -0.5566038,
+        -0.49785304,
+        -0.43699592,
+        -0.40180868,
+        -0.27321684,
+    ],
+    [
+        3803.5317,
+        -3.0607336,
+        -2.041327,
+        -2.023565,
+        -0.54953897,
+        -0.4,
+        -0.4,
+        -0.3,
+    ],
+]];
 const DCT8X16_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
     [7240.7734, -0.7, -0.7, -0.2, -0.2, -0.2, -0.5, 0.0],
     [1448.1547, -0.5, -0.5, -0.5, -0.2, -0.2, -0.2, 0.0],
     [506.85413, -1.4, -0.2, -0.5, -0.5, -1.5, -3.6, 0.0],
+]];
+const DCT8X32_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [
+        16283.249, -1.7812846, -1.6309059, -1.0382179, -0.85, -0.7, -0.9, -1.2360638,
+    ],
+    [
+        5089.1577, -0.3200494, -0.3536285, -0.3034, -0.61, -0.5, -0.5, -0.6,
+    ],
+    [
+        3397.7761,
+        -0.32132736,
+        -0.3450762,
+        -0.7034,
+        -0.9,
+        -1.0,
+        -1.0,
+        -1.1754606,
+    ],
+]];
+const DCT16X32_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [
+        13844.971, -0.971138, -0.658, -0.42026, -0.22712, -0.2206, -0.226, -0.6,
+    ],
+    [
+        4798.964,
+        -0.6112531,
+        -0.8377079,
+        -0.7901486,
+        -0.26927274,
+        -0.38272768,
+        -0.22924222,
+        -0.20719099,
+    ],
+    [1807.237, -1.2, -1.2, -0.7, -0.7, -0.7, -0.4, -0.5],
+]];
+const DCT64_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
+    [
+        0.9 * 26629.074,
+        -1.025,
+        -0.78,
+        -0.65012,
+        -0.19041574,
+        -0.20819396,
+        -0.421064,
+        -0.32733846,
+    ],
+    [
+        0.9 * 9311.323,
+        -0.30419582,
+        -0.36330366,
+        -0.3566038,
+        -0.34430745,
+        -0.33699593,
+        -0.30180866,
+        -0.27321684,
+    ],
+    [0.9 * 4992.2485, -1.2, -1.2, -0.8, -0.7, -0.7, -0.4, -0.5],
 ]];
 const DCT4X8_QUANT_BANDS: [[[f32; 8]; 3]; 1] = [[
     [
@@ -5317,6 +6274,23 @@ fn read_vardct_dc_group_metadata(
         .get(payload.section.payload_range.clone())
         .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
     let mut reader = BitReader::new(bytes);
+    read_vardct_dc_group_metadata_from_reader(
+        &mut reader,
+        frame_header,
+        payload,
+        global_tree,
+        global_tree_error,
+    )
+}
+
+fn read_vardct_dc_group_metadata_from_reader(
+    mut reader: &mut BitReader<'_>,
+    frame_header: &FrameHeader,
+    payload: VarDctDcGroupPayloadMetadata,
+    global_tree: Option<&ModularTreeCoding>,
+    global_tree_error: Option<&Error>,
+) -> Result<VarDctDcGroupMetadata> {
+    let start_bits = reader.bits_consumed();
     let extra_precision_result = reader.read_bits(2).map(|bits| bits as u8);
     let extra_precision_end = extra_precision_result
         .as_ref()
@@ -5372,8 +6346,11 @@ fn read_vardct_dc_group_metadata(
         .filter(|_| var_dct_dc_header.is_some());
     let (modular_dc, modular_dc_error, modular_dc_end) = match var_dct_dc_end {
         Some(start_bits) => {
-            let mut modular_dc_reader = BitReader::new(bytes);
-            modular_dc_reader.skip_bits(start_bits)?;
+            let mut modular_dc_reader = reader.clone();
+            let current_bits = modular_dc_reader.bits_consumed();
+            if start_bits > current_bits {
+                modular_dc_reader.skip_bits(start_bits - current_bits)?;
+            }
             let decoded = ModularDecodedGroup {
                 section_physical_index: payload.section.section.section_physical_index,
                 stream_id: payload.modular_dc_stream_id,
@@ -5387,8 +6364,11 @@ fn read_vardct_dc_group_metadata(
     let (ac_metadata_count, ac_metadata, ac_metadata_error, ac_metadata_end) = match modular_dc_end
     {
         Some(start_bits) => {
-            let mut ac_reader = BitReader::new(bytes);
-            ac_reader.skip_bits(start_bits)?;
+            let mut ac_reader = reader.clone();
+            let current_bits = ac_reader.bits_consumed();
+            if start_bits > current_bits {
+                ac_reader.skip_bits(start_bits - current_bits)?;
+            }
             match read_vardct_ac_metadata_count(&mut ac_reader, &payload) {
                 Ok(count) => {
                     let channels = vardct_ac_metadata_channel_plan(&payload, count);
@@ -5413,10 +6393,21 @@ fn read_vardct_dc_group_metadata(
         }
         None => (None, None, None, None),
     };
+    if let Some(end_bits) = ac_metadata_end
+        .or(modular_dc_end)
+        .or(var_dct_dc_end)
+        .or(header_end)
+        .or(extra_precision_end)
+    {
+        let current_bits = reader.bits_consumed();
+        if end_bits > current_bits {
+            reader.skip_bits(end_bits - current_bits)?;
+        }
+    }
     Ok(VarDctDcGroupMetadata {
         payload,
         cursor: VarDctDcGroupCursorMetadata {
-            extra_precision_start_bits: 0,
+            extra_precision_start_bits: start_bits,
             extra_precision_end_bits: extra_precision_end,
             var_dct_dc_start_bits: extra_precision_end,
             var_dct_dc_header_end_bits: header_end,
@@ -5449,6 +6440,16 @@ fn read_vardct_ac_global_metadata(
         .get(payload.payload_range.clone())
         .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
     let mut reader = BitReader::new(bytes);
+    read_vardct_ac_global_metadata_from_reader(&mut reader, frame_header, payload, global, used_acs)
+}
+
+fn read_vardct_ac_global_metadata_from_reader(
+    mut reader: &mut BitReader<'_>,
+    frame_header: &FrameHeader,
+    payload: &VarDctSectionPayloadMetadata,
+    global: &VarDctGlobalMetadata,
+    used_acs: Option<u32>,
+) -> Result<VarDctAcGlobalMetadata> {
     let all_default_quant_matrices = match reader.read_bool() {
         Ok(value) => value,
         Err(error) => {
@@ -6138,6 +7139,182 @@ fn read_vardct_global_modular_stream(
     Ok(Some(decoded))
 }
 
+fn read_vardct_modular_global_tree_from_reader(
+    reader: &mut BitReader<'_>,
+    metadata: &ImageMetadata,
+    frame_header: &FrameHeader,
+) -> Result<VarDctModularGlobalTreeRead> {
+    let direct_start_bits = reader.bits_consumed();
+    let start_reader = reader.clone();
+    let mut direct_probe_reader = start_reader.clone();
+    let direct_probe =
+        probe_modular_global_tree_coding(&mut direct_probe_reader, metadata, frame_header);
+    match read_modular_global_tree_coding(reader, metadata, frame_header) {
+        Ok(tree) => Ok(vardct_modular_global_tree_read_from_probe(
+            direct_start_bits,
+            direct_start_bits,
+            &direct_probe,
+            None,
+            tree,
+        )),
+        Err(error) => {
+            let end = direct_start_bits + 64;
+            for offset in direct_start_bits..end {
+                let mut probe = start_reader.clone();
+                probe.skip_bits(offset.saturating_sub(direct_start_bits))?;
+                if let Ok(tree) =
+                    read_modular_global_tree_coding(&mut probe, metadata, frame_header)
+                {
+                    *reader = probe;
+                    return Ok(vardct_modular_global_tree_read_from_probe(
+                        direct_start_bits,
+                        offset,
+                        &direct_probe,
+                        Some(error.clone()),
+                        tree,
+                    ));
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+fn vardct_modular_global_tree_read_from_probe(
+    direct_start_bits: usize,
+    tree_start_bits: usize,
+    direct_probe: &ModularTreeCodingProbe,
+    direct_error: Option<Error>,
+    tree: ModularTreeCoding,
+) -> VarDctModularGlobalTreeRead {
+    VarDctModularGlobalTreeRead {
+        direct_start_bits,
+        direct_tree_end_bits: direct_probe.tree_end_bits,
+        direct_tree_node_count: direct_probe.tree_node_count,
+        direct_tree_leaf_count: direct_probe.tree_leaf_count,
+        direct_tree_leaves: direct_probe
+            .tree_leaves
+            .iter()
+            .map(VarDctMaTreeLeafProbe::from)
+            .collect(),
+        direct_error_bits: direct_probe.error_bits,
+        direct_residual_context_count: direct_probe.residual_context_count,
+        direct_residual_histogram_count: direct_probe.residual_histogram_count,
+        direct_residual_context_map_entries: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .map(|probe| probe.context_map_entries.clone())
+            .unwrap_or_default(),
+        direct_residual_context_map_raw_entries: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .map(|probe| probe.context_map_raw_entries.clone())
+            .unwrap_or_default(),
+        direct_residual_context_map_distinct_entries: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .map(|probe| probe.context_map_distinct_entries.clone())
+            .unwrap_or_default(),
+        direct_residual_context_map_histogram_usage_counts: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .map(|probe| probe.context_map_histogram_usage_counts.clone())
+            .unwrap_or_default(),
+        direct_residual_context_map_max_entry: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .and_then(|probe| probe.context_map_max_entry),
+        direct_residual_context_map_symbol_entries: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .map(|probe| {
+                probe
+                    .context_map_symbol_entries
+                    .iter()
+                    .map(VarDctContextMapSymbolProbe::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        direct_residual_lz77_end_bits: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .and_then(|probe| probe.lz77_end_bits),
+        direct_residual_context_map_end_bits: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .and_then(|probe| probe.context_map_end_bits),
+        direct_residual_entropy_mode_end_bits: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .and_then(|probe| probe.entropy_mode_end_bits),
+        direct_residual_log_alpha_size_end_bits: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .and_then(|probe| probe.log_alpha_size_end_bits),
+        direct_residual_uint_config_end_bits_by_histogram: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .map(|probe| probe.uint_config_end_bits_by_histogram.clone())
+            .unwrap_or_default(),
+        direct_residual_uint_config_end_bits: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .and_then(|probe| probe.uint_config_end_bits),
+        direct_residual_use_prefix_code: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .and_then(|probe| probe.use_prefix_code),
+        direct_residual_log_alpha_size: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .and_then(|probe| probe.log_alpha_size),
+        direct_residual_failed_histogram_index: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .and_then(|probe| probe.failed_histogram_index),
+        direct_residual_error_stage: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .and_then(|probe| probe.error_stage)
+            .map(VarDctHistogramProbeStage::from),
+        direct_residual_ans_histograms: direct_probe
+            .residual_histogram_probe
+            .as_ref()
+            .map(|probe| {
+                probe
+                    .ans_histograms
+                    .iter()
+                    .map(VarDctAnsHistogramProbe::from)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        tree_start_bits,
+        direct_error,
+        tree,
+    }
+}
+
+fn read_vardct_global_modular_stream_from_reader(
+    reader: &mut BitReader<'_>,
+    metadata: &ImageMetadata,
+    frame_header: &FrameHeader,
+    payload: &VarDctSectionPayloadMetadata,
+    global_tree: &ModularTreeCoding,
+) -> Result<Option<ModularDecodedGroup>> {
+    let channels = vardct_global_modular_channel_plan(metadata, frame_header)?;
+    if channels.is_empty() {
+        return Ok(None);
+    }
+    let (_, decoded) = decode_modular_stream_from_reader(
+        reader,
+        payload.section.section_physical_index,
+        0,
+        &channels,
+        Some(global_tree),
+    )?;
+    Ok(Some(decoded))
+}
+
 fn vardct_global_modular_channel_plan(
     metadata: &ImageMetadata,
     frame_header: &FrameHeader,
@@ -6416,6 +7593,13 @@ fn read_vardct_global_metadata(
         .get(section.payload_range.clone())
         .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
     let mut reader = BitReader::new(payload);
+    read_vardct_global_metadata_from_reader(&mut reader, section)
+}
+
+fn read_vardct_global_metadata_from_reader(
+    mut reader: &mut BitReader<'_>,
+    section: &VarDctSectionPayloadMetadata,
+) -> Result<VarDctGlobalMetadata> {
     let dc_dequant = read_vardct_dc_dequant(&mut reader)?;
     let dc_dequant_end_bits = reader.bits_consumed();
     let quantizer = read_vardct_quantizer(&mut reader)?;
@@ -6885,6 +8069,9 @@ mod tests {
         let metadata = VarDctFrameMetadata {
             width: 256,
             height: 128,
+            coded_width: 256,
+            coded_height: 128,
+            upsampling: 1,
             group_dim: 128,
             groups_x: 2,
             groups_y: 1,
@@ -7351,6 +8538,7 @@ mod tests {
                 ..LoopFilter::default()
             },
             opsin_params: default_vardct_opsin_params(),
+            transform_data: CustomTransformData::default(),
             epf_metadata: None,
             global: None,
             modular_global_tree_payload_start_bits: None,
@@ -7900,6 +9088,9 @@ mod tests {
         VarDctFrameMetadata {
             width,
             height,
+            coded_width: width,
+            coded_height: height,
+            upsampling: 1,
             group_dim: 256,
             groups_x: width.div_ceil(256),
             groups_y: height.div_ceil(256),

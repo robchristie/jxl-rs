@@ -3088,8 +3088,8 @@ mod tests {
                 metrics,
                 Srgb8OracleMetrics {
                     max_abs_error: 255,
-                    sum_abs_error: 13_423_127,
-                    checksum: 15_223_620_237_915_187_279,
+                    sum_abs_error: 13_423_128,
+                    checksum: 16_085_799_772_372_920_399,
                     anchors: vec![3, 40, 0],
                     reference_anchors: vec![0, 21, 255],
                 }
@@ -3189,6 +3189,143 @@ mod tests {
             missing_pass_decoder.decode_rgba16(&encoded_bytes),
             Err(Error::Unsupported("VarDCT image reconstruction"))
         );
+    }
+
+    #[test]
+    fn decode_supports_resampled_generated_var_dct_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping resampled VarDCT decode; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-rgba-vardct-resampled-source", "ppm");
+        let encoded = unique_temp_path("jxl-rgba-vardct-resampled", "jxl");
+        write_resampled_vardct_source_ppm(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args([
+                "-d",
+                "1.0",
+                "-m",
+                "0",
+                "--container=0",
+                "--resampling",
+                "2",
+                "--quiet",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let reference = reference_djxl().map(|djxl| {
+            let output = unique_temp_path("jxl-rgba-vardct-resampled-reference", "ppm");
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed: {}",
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+
+            let reference = std::fs::read(&output).unwrap();
+            let _ = std::fs::remove_file(&output);
+            parse_ppm_rgb(&reference)
+        });
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        let vardct = info.first_frame_vardct.as_ref().unwrap();
+        assert_eq!(vardct.width, 96);
+        assert_eq!(vardct.height, 64);
+        assert_eq!(vardct.coded_width, 48);
+        assert_eq!(vardct.coded_height, 32);
+        assert_eq!(vardct.upsampling, 2);
+        assert!(vardct.is_combined);
+
+        let roi = Rect {
+            x: 13,
+            y: 11,
+            width: 29,
+            height: 23,
+        };
+        let decoded_channels = decode_channels(&encoded_bytes).unwrap();
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        let decoded = decode(&encoded_bytes).unwrap();
+        let rgba = decode_rgba8(&encoded_bytes).unwrap();
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        let roi_decoded = Decoder::new().roi(roi).decode(&encoded_bytes).unwrap();
+        let roi_rgba = Decoder::new()
+            .roi(roi)
+            .decode_rgba8(&encoded_bytes)
+            .unwrap();
+        assert_eq!(decoded.width, 96);
+        assert_eq!(decoded.height, 64);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.alpha, None);
+        assert_eq!(decoded.bit_depth, 8);
+        let PixelData::U8(decoded_pixels) = &decoded.pixels else {
+            panic!("expected resampled VarDCT decode to return 8-bit RGB");
+        };
+        assert_eq!(decoded_pixels.len(), 96 * 64 * 3);
+        assert!(
+            decoded_pixels
+                .chunks_exact(3)
+                .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
+        );
+        assert_decoded_channels_match_image(&decoded_channels, &decoded);
+        assert_roi_matches_full_channels(&roi_channels, &decoded_channels, roi);
+        assert_roi_matches_full_image(&roi_decoded, &decoded, roi);
+
+        assert_eq!(rgba.width, 96);
+        assert_eq!(rgba.height, 64);
+        assert_eq!(rgba.pixels.len(), 96 * 64 * 4);
+        assert!(rgba.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        assert_roi_matches_full_rgba8(&roi_rgba, &rgba, roi);
+
+        assert_eq!(rgba16.width, 96);
+        assert_eq!(rgba16.height, 64);
+        assert_eq!(rgba16.pixels.len(), 96 * 64 * 4);
+        assert!(
+            rgba16
+                .pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel[3] == u16::MAX)
+        );
+
+        if let Some(reference) = &reference {
+            let metrics = srgb8_oracle_metrics(
+                &decoded,
+                reference,
+                &[0, decoded_pixels.len() / 2, decoded_pixels.len() - 1],
+            );
+            assert_eq!(
+                metrics,
+                Srgb8OracleMetrics {
+                    max_abs_error: 249,
+                    sum_abs_error: 1_864_842,
+                    checksum: 3_383_233_688_300_954_244,
+                    anchors: vec![14, 15, 0],
+                    reference_anchors: vec![6, 1, 249],
+                }
+            );
+        } else {
+            eprintln!("skipping resampled VarDCT djxl comparison; tool is not built");
+        }
     }
 
     #[test]
@@ -4180,15 +4317,15 @@ mod tests {
     }
 
     #[test]
-    fn decode_channels_rejects_unreconstructed_generated_var_dct_extra_channels() {
+    fn decode_channels_exposes_combined_generated_var_dct_depth_when_available() {
         let Some(cjxl) = reference_cjxl() else {
-            eprintln!("skipping VarDCT extra-channel rejection; reference cjxl is not built");
+            eprintln!("skipping combined VarDCT depth decode; reference cjxl is not built");
             return;
         };
 
         let input = unique_temp_path("jxl-vardct-depth-source", "pam");
         let encoded = unique_temp_path("jxl-vardct-depth", "jxl");
-        write_rgb_depth_source_pam(&input);
+        let expected_depth = write_rgb_depth_source_pam(&input);
 
         let cjxl_output = Command::new(&cjxl)
             .arg(&input)
@@ -4213,10 +4350,23 @@ mod tests {
             ExtraChannelType::Depth
         );
 
-        assert_eq!(
-            decode_channels(&encoded_bytes),
-            Err(Error::Unsupported("VarDCT image reconstruction"))
-        );
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, 35);
+        assert_eq!(channels.height, 21);
+        assert_eq!(channels.color_channels, 3);
+        assert_eq!(channels.alpha, None);
+        assert_eq!(channels.bit_depth, 8);
+        assert_eq!(channels.channels.len(), 4);
+        let depth_channel = &channels.channels[3];
+        assert_eq!(depth_channel.width, 35);
+        assert_eq!(depth_channel.height, 21);
+        assert_eq!(depth_channel.hshift, 0);
+        assert_eq!(depth_channel.vshift, 0);
+        assert_eq!(depth_channel.bit_depth, 8);
+        let ChannelData::U8(depth) = &depth_channel.samples else {
+            panic!("expected 8-bit combined VarDCT depth channel");
+        };
+        assert_eq!(depth, &expected_depth);
     }
 
     #[test]
@@ -5483,6 +5633,20 @@ mod tests {
         std::fs::write(path, bytes).unwrap();
     }
 
+    fn write_resampled_vardct_source_ppm(path: &Path) {
+        let width = 96u32;
+        let height = 64u32;
+        let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
+        for y in 0..height {
+            for x in 0..width {
+                bytes.push((x * 255 / (width - 1)) as u8);
+                bytes.push((y * 255 / (height - 1)) as u8);
+                bytes.push(((x + y) * 255 / (width + height - 2)) as u8);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+    }
+
     fn write_roi_source_pgm(path: &Path) {
         let width = 64u32;
         let height = 64u32;
@@ -5612,9 +5776,10 @@ mod tests {
         }
     }
 
-    fn write_rgb_depth_source_pam(path: &Path) {
+    fn write_rgb_depth_source_pam(path: &Path) -> Vec<u8> {
         let width = 35u32;
         let height = 21u32;
+        let mut depth = Vec::with_capacity(width as usize * height as usize);
         let mut bytes = format!(
             "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB\nTUPLTYPE Depth\nENDHDR\n"
         )
@@ -5624,10 +5789,13 @@ mod tests {
                 bytes.push(((x * 11 + y * 3 + 17) & 0xff) as u8);
                 bytes.push(((x * 7 + y * 13 + 29) & 0xff) as u8);
                 bytes.push(((x * 19 + y * 5 + 43) & 0xff) as u8);
-                bytes.push(((x * 37 + y * 41 + 73) & 0xff) as u8);
+                let depth_sample = ((x * 37 + y * 41 + 73) & 0xff) as u8;
+                bytes.push(depth_sample);
+                depth.push(depth_sample);
             }
         }
         std::fs::write(path, bytes).unwrap();
+        depth
     }
 
     fn write_gray_alpha_source_pam(path: &Path) -> GrayAlphaPam {
