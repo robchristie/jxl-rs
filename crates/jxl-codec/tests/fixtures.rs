@@ -10,9 +10,10 @@ use jxl_codec::{
     TransferFunction, TransformId, VarDctSrgb8Image, VarDctXybInverseVariant,
     assemble_vardct_dc_srgb8_image, assemble_vardct_dc_srgb8_image_with_multiplier,
     assemble_vardct_dc_xyb_image, assemble_vardct_linear_rgb_image, assemble_vardct_srgb8_image,
-    assemble_vardct_srgb8_image_for_pass, assemble_vardct_xyb_image, parse_file,
-    parse_file_with_config, vardct_dc_coefficient_diagnostics,
-    vardct_xyb_inverse_variant_diagnostics, vardct_xyb_rgb_diagnostics,
+    assemble_vardct_srgb8_image_for_pass, assemble_vardct_xyb_image,
+    assemble_vardct_ycbcr_srgb8_image, parse_file, parse_file_with_config,
+    vardct_dc_coefficient_diagnostics, vardct_xyb_inverse_variant_diagnostics,
+    vardct_xyb_rgb_diagnostics,
 };
 
 #[test]
@@ -1587,8 +1588,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .map(|channel| (channel.nonzero_coefficients, channel.coefficient_checksum))
             .collect::<Vec<_>>(),
         vec![
-            (1754, 7421052046372908028),
-            (5649, 16759939757032862422),
+            (1754, 5770451372084002304),
+            (5649, 1707784363914388770),
             (1868, 1782002988502924811),
         ]
     );
@@ -3327,6 +3328,148 @@ fn generated_vardct_nondefault_qf_context_map_decodes_coefficients_when_availabl
     assert_eq!(metrics.checksum, 7585262771943461864);
     assert_eq!(metrics.anchors, vec![44, 255, 164, 0]);
     assert_eq!(metrics.reference_anchors, vec![77, 133, 52, 100]);
+}
+
+#[test]
+fn generated_vardct_ycbcr_420_decodes_shifted_dc_and_ac_metadata_when_available() {
+    let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+        eprintln!("skipping generated VarDCT YCbCr 4:2:0 fixture; reference tools are not built");
+        return;
+    };
+
+    let input = workspace_path("reference/libjxl/testdata/jxl/flower/flower.png.im_q85_420.jpg");
+    let encoded = unique_temp_path("jxl-rs-vardct-ycbcr-420", "jxl");
+    let reference_output = unique_temp_path("jxl-rs-vardct-ycbcr-420-reference", "ppm");
+    let cjxl_output = Command::new(&cjxl)
+        .arg(&input)
+        .arg(&encoded)
+        .args(["--allow_jpeg_reconstruction=0", "--container=0", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(
+        cjxl_output.status.success(),
+        "reference cjxl failed for YCbCr 4:2:0: {}",
+        String::from_utf8_lossy(&cjxl_output.stderr)
+    );
+    let djxl_output = Command::new(&djxl)
+        .arg(&encoded)
+        .arg(&reference_output)
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        djxl_output.status.success(),
+        "reference djxl failed for YCbCr 4:2:0: {}",
+        String::from_utf8_lossy(&djxl_output.stderr)
+    );
+    let reference = std::fs::read(&reference_output).unwrap();
+    let _ = std::fs::remove_file(&reference_output);
+    let reference = parse_ppm_rgb(&reference);
+
+    let encoded_bytes = std::fs::read(&encoded).unwrap();
+    let _ = std::fs::remove_file(&encoded);
+    let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+    let frame = codestream.first_frame.as_ref().unwrap();
+    assert_eq!(frame.color_transform, ColorTransform::YCbCr);
+    assert_eq!(frame.chroma_subsampling.channel_mode, [0, 1, 0]);
+    assert_eq!(frame.chroma_subsampling.h_shift(0), Some(1));
+    assert_eq!(frame.chroma_subsampling.v_shift(0), Some(1));
+    assert_eq!(frame.chroma_subsampling.h_shift(1), Some(0));
+    assert_eq!(frame.chroma_subsampling.v_shift(1), Some(0));
+    assert_eq!(frame.chroma_subsampling.h_shift(2), Some(1));
+    assert_eq!(frame.chroma_subsampling.v_shift(2), Some(1));
+
+    let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+    assert_eq!(plan.frame.dc_groups[0].height, 1520);
+    assert_eq!(plan.dc_group_metadata[0].parse_error, None);
+    let dc = plan.dc_group_metadata[0].var_dct_dc.as_ref().unwrap();
+    assert_eq!(
+        dc.channels
+            .iter()
+            .map(|channel| (channel.channel_index, channel.width, channel.height))
+            .collect::<Vec<_>>(),
+        vec![(0, 256, 190), (1, 128, 95), (2, 128, 95)]
+    );
+    assert!(
+        plan.ac_group_metadata
+            .iter()
+            .all(|metadata| metadata.parse_error.is_none())
+    );
+
+    let first_group = plan
+        .ac_group_metadata
+        .iter()
+        .find(|metadata| metadata.payload.group.group == 0)
+        .unwrap();
+    let summary = first_group.coefficient_summary.as_ref().unwrap();
+    assert_eq!(summary.blocks_decoded, 1536);
+    assert!(summary.per_channel[1].blocks_decoded > summary.per_channel[0].blocks_decoded);
+    assert_eq!(
+        summary.per_channel[0].blocks_decoded,
+        summary.per_channel[2].blocks_decoded
+    );
+    assert_eq!(summary.per_channel[0].nonzero_coefficients, 493);
+    assert_eq!(summary.per_channel[1].nonzero_coefficients, 8765);
+    assert_eq!(summary.per_channel[2].nonzero_coefficients, 397);
+
+    let dequantized = first_group.dequantized_grid.as_ref().unwrap();
+    assert_eq!(
+        (
+            dequantized.per_channel[0].nonzero_coefficients,
+            dequantized.per_channel[0].coefficient_checksum,
+            dequantized.per_channel[1].nonzero_coefficients,
+            dequantized.per_channel[1].coefficient_checksum,
+            dequantized.per_channel[2].nonzero_coefficients,
+            dequantized.per_channel[2].coefficient_checksum,
+        ),
+        (
+            493,
+            11923958664917341227,
+            8765,
+            8427230122138932486,
+            397,
+            6074806915173417110,
+        )
+    );
+    let spatial = first_group.spatial_with_dc_grid.as_ref().unwrap();
+    assert_eq!(spatial.blocks_attempted, 1024);
+    assert_eq!(spatial.blocks_transformed, 1024);
+    assert_eq!(spatial.blocks_skipped, 0);
+    assert_eq!(
+        (
+            spatial.per_channel[0].nonzero_samples,
+            spatial.per_channel[0].sample_checksum,
+            spatial.per_channel[1].nonzero_samples,
+            spatial.per_channel[1].sample_checksum,
+            spatial.per_channel[2].nonzero_samples,
+            spatial.per_channel[2].sample_checksum,
+        ),
+        (
+            16320,
+            15455056007317735985,
+            65536,
+            3972177796210465690,
+            16379,
+            15597547991056472905,
+        )
+    );
+
+    let srgb = assemble_vardct_ycbcr_srgb8_image(plan).unwrap().unwrap();
+    let width = srgb.width as usize;
+    let height = srgb.height as usize;
+    let center = (height / 2 * width + width / 2) * 3;
+    let anchor_indices = [
+        0,
+        center,
+        center + 1,
+        ((height - 1) * width + width - 1) * 3 + 2,
+    ];
+    let metrics = srgb8_oracle_metrics(&srgb, &reference, &anchor_indices);
+    assert_eq!(metrics.max_abs_error, 176);
+    assert_eq!(metrics.sum_abs_error, 83_724_650);
+    assert_eq!(metrics.checksum, 12962029519371309851);
+    assert_eq!(metrics.anchors, vec![115, 113, 72, 64]);
+    assert_eq!(metrics.reference_anchors, vec![111, 126, 51, 67]);
 }
 
 #[test]

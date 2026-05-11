@@ -197,6 +197,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("First frame flags: 0x{:x}", frame.flags);
             println!("First frame color transform: {}", frame.color_transform);
             println!(
+                "First frame chroma subsampling: modes={:?} shifts={:?}",
+                frame.chroma_subsampling.channel_mode,
+                (0..3)
+                    .map(|channel| {
+                        (
+                            frame.chroma_subsampling.h_shift(channel).unwrap_or(0),
+                            frame.chroma_subsampling.v_shift(channel).unwrap_or(0),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            );
+            println!(
                 "First frame upsampling: color={}, extra={:?}",
                 frame.upsampling, frame.extra_channel_upsampling
             );
@@ -707,6 +719,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(plan) = &info.first_frame_vardct_plan {
                 for group in &plan.dc_group_metadata {
                     println!(
+                        "First frame VarDCT DC cursor group {}: extra={:?} header={:?} dc_end={:?} modular_end={:?} ac_meta_end={:?}",
+                        group.payload.group.group,
+                        group.cursor.extra_precision_end_bits,
+                        group.cursor.var_dct_dc_header_end_bits,
+                        group.cursor.var_dct_dc_end_bits,
+                        group.cursor.modular_dc_end_bits,
+                        group.cursor.ac_metadata_end_bits
+                    );
+                    println!(
                         "First frame VarDCT DC stream group {}: stream_id={} bits={} channels={} error={:?}",
                         group.payload.group.group,
                         group.payload.var_dct_dc_stream_id,
@@ -718,6 +739,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             .unwrap_or_default(),
                         group.parse_error
                     );
+                    if let Some(header) = &group.var_dct_dc_header {
+                        println!(
+                            "First frame VarDCT DC header group {}: global_tree={} transforms={} wp_default={}",
+                            group.payload.group.group,
+                            header.use_global_tree,
+                            header.transforms.len(),
+                            header.weighted_predictor.all_default
+                        );
+                    }
                     if let Some(decoded) = &group.var_dct_dc {
                         for channel in &decoded.channels {
                             let min = channel.samples.iter().min().copied().unwrap_or_default();

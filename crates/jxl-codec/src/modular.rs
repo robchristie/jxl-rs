@@ -163,6 +163,8 @@ pub struct ModularDecodedChannel {
     pub y0: u32,
     pub width: u32,
     pub height: u32,
+    pub hshift: i32,
+    pub vshift: i32,
     pub samples: Vec<i32>,
 }
 
@@ -3470,6 +3472,8 @@ fn inverse_group_transforms(
                 y0: plan.y0,
                 width: channel.width,
                 height: channel.height,
+                hshift: plan.hshift,
+                vshift: plan.vshift,
                 samples: channel.samples,
             })
         })
@@ -3539,6 +3543,8 @@ fn decode_channel_residuals(
         y0: channel.y0,
         width: channel.width,
         height: channel.height,
+        hshift: channel.hshift,
+        vshift: channel.vshift,
         samples,
     })
 }
@@ -4898,6 +4904,8 @@ mod tests {
                 y0: 0,
                 width: 1,
                 height: 1,
+                hshift: 1,
+                vshift: 0,
                 samples: vec![10],
             },
             ModularDecodedChannel {
@@ -4906,6 +4914,8 @@ mod tests {
                 y0: 0,
                 width: 1,
                 height: 1,
+                hshift: 1,
+                vshift: 0,
                 samples: vec![0],
             },
         ];
@@ -4920,6 +4930,8 @@ mod tests {
                 y0: 1,
                 width: 2,
                 height: 1,
+                hshift: 0,
+                vshift: 0,
                 samples: vec![10, 10],
             }]
         );
@@ -5604,6 +5616,8 @@ mod tests {
             y0,
             width,
             height,
+            hshift: 0,
+            vshift: 0,
             samples,
         }
     }
@@ -5623,6 +5637,8 @@ mod tests {
             y0,
             width,
             height,
+            hshift: 0,
+            vshift: 0,
             samples: samples.to_vec(),
         }
     }

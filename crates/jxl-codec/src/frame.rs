@@ -163,6 +163,22 @@ impl YCbCrChromaSubsampling {
             max_v_shift,
         }
     }
+
+    pub fn h_shift(&self, channel: usize) -> Option<u8> {
+        const H_SHIFT: [u8; 4] = [0, 1, 1, 0];
+        let mode = *self.channel_mode.get(channel)? as usize;
+        Some(self.max_h_shift.checked_sub(*H_SHIFT.get(mode)?)?)
+    }
+
+    pub fn v_shift(&self, channel: usize) -> Option<u8> {
+        const V_SHIFT: [u8; 4] = [0, 1, 0, 1];
+        let mode = *self.channel_mode.get(channel)? as usize;
+        Some(self.max_v_shift.checked_sub(*V_SHIFT.get(mode)?)?)
+    }
+
+    pub fn is_444(&self) -> bool {
+        (0..3).all(|channel| self.h_shift(channel) == Some(0) && self.v_shift(channel) == Some(0))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

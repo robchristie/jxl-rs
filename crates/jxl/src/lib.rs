@@ -1172,13 +1172,10 @@ fn vardct_srgb8_image_from_codestream(
             Some(pass) => jxl_codec::assemble_vardct_srgb8_image_for_pass(plan, pass)?,
             None => jxl_codec::assemble_vardct_srgb8_image(plan)?,
         },
-        jxl_codec::ColorTransform::YCbCr => {
-            ensure_vardct_ycbcr_444(codestream)?;
-            match pass {
-                Some(pass) => jxl_codec::assemble_vardct_ycbcr_srgb8_image_for_pass(plan, pass)?,
-                None => jxl_codec::assemble_vardct_ycbcr_srgb8_image(plan)?,
-            }
-        }
+        jxl_codec::ColorTransform::YCbCr => match pass {
+            Some(pass) => jxl_codec::assemble_vardct_ycbcr_srgb8_image_for_pass(plan, pass)?,
+            None => jxl_codec::assemble_vardct_ycbcr_srgb8_image(plan)?,
+        },
         jxl_codec::ColorTransform::None => {
             return Err(Error::Unsupported("VarDCT non-XYB color transform"));
         }
@@ -1307,13 +1304,10 @@ fn vardct_srgb16_image_from_codestream(
             Some(pass) => jxl_codec::assemble_vardct_srgb16_image_for_pass(plan, pass)?,
             None => jxl_codec::assemble_vardct_srgb16_image(plan)?,
         },
-        jxl_codec::ColorTransform::YCbCr => {
-            ensure_vardct_ycbcr_444(codestream)?;
-            match pass {
-                Some(pass) => jxl_codec::assemble_vardct_ycbcr_srgb16_image_for_pass(plan, pass)?,
-                None => jxl_codec::assemble_vardct_ycbcr_srgb16_image(plan)?,
-            }
-        }
+        jxl_codec::ColorTransform::YCbCr => match pass {
+            Some(pass) => jxl_codec::assemble_vardct_ycbcr_srgb16_image_for_pass(plan, pass)?,
+            None => jxl_codec::assemble_vardct_ycbcr_srgb16_image(plan)?,
+        },
         jxl_codec::ColorTransform::None => {
             return Err(Error::Unsupported("VarDCT non-XYB color transform"));
         }
@@ -1323,17 +1317,6 @@ fn vardct_srgb16_image_from_codestream(
         image = crop_vardct_srgb16(image, region)?;
     }
     Ok(image)
-}
-
-fn ensure_vardct_ycbcr_444(codestream: &jxl_codec::Codestream) -> Result<()> {
-    let frame = codestream
-        .first_frame
-        .as_ref()
-        .ok_or(Error::Unsupported("image has no decoded frame"))?;
-    if frame.chroma_subsampling.max_h_shift != 0 || frame.chroma_subsampling.max_v_shift != 0 {
-        return Err(Error::Unsupported("VarDCT YCbCr chroma subsampling"));
-    }
-    Ok(())
 }
 
 fn reject_vardct_pass_for_non_vardct(pass: Option<usize>) -> Result<()> {
@@ -3276,6 +3259,91 @@ mod tests {
                 width: 1,
                 height: 1,
                 pixels: vec![u16::MAX, u16::MAX, u16::MAX, u16::MAX],
+            }
+        );
+    }
+
+    #[test]
+    fn decode_supports_generated_ycbcr_420_var_dct_when_available() {
+        let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+            eprintln!("skipping public YCbCr 4:2:0 VarDCT decode; reference tools are not built");
+            return;
+        };
+
+        let input =
+            workspace_path("reference/libjxl/testdata/jxl/flower/flower.png.im_q85_420.jpg");
+        let encoded = unique_temp_path("jxl-ycbcr-420-vardct", "jxl");
+        let reference_output = unique_temp_path("jxl-ycbcr-420-vardct-reference", "ppm");
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["--allow_jpeg_reconstruction=0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed for public YCbCr 4:2:0 VarDCT: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+        let djxl_output = Command::new(&djxl)
+            .arg(&encoded)
+            .arg(&reference_output)
+            .arg("--quiet")
+            .output()
+            .unwrap();
+        assert!(
+            djxl_output.status.success(),
+            "reference djxl failed for public YCbCr 4:2:0 VarDCT: {}",
+            String::from_utf8_lossy(&djxl_output.stderr)
+        );
+        let reference = std::fs::read(&reference_output).unwrap();
+        let _ = std::fs::remove_file(&reference_output);
+        let reference = parse_ppm_rgb(&reference);
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        let frame = info.first_frame.as_ref().unwrap();
+        assert_eq!(frame.color_transform, jxl_codec::ColorTransform::YCbCr);
+        assert!(!frame.chroma_subsampling.is_444());
+        assert_eq!(frame.chroma_subsampling.h_shift(0), Some(1));
+        assert_eq!(frame.chroma_subsampling.v_shift(0), Some(1));
+        assert_eq!(frame.chroma_subsampling.h_shift(1), Some(0));
+        assert_eq!(frame.chroma_subsampling.v_shift(1), Some(0));
+        assert_eq!(frame.chroma_subsampling.h_shift(2), Some(1));
+        assert_eq!(frame.chroma_subsampling.v_shift(2), Some(1));
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, reference.width);
+        assert_eq!(decoded.height, reference.height);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.bit_depth, 8);
+        let rgba = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba.width, decoded.width);
+        assert_eq!(rgba.height, decoded.height);
+        assert!(rgba.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+
+        let width = decoded.width as usize;
+        let height = decoded.height as usize;
+        let center = (height / 2 * width + width / 2) * 3;
+        let metrics = srgb8_oracle_metrics(
+            &decoded,
+            &reference,
+            &[
+                0,
+                center,
+                center + 1,
+                ((height - 1) * width + width - 1) * 3 + 2,
+            ],
+        );
+        assert_eq!(
+            metrics,
+            Srgb8OracleMetrics {
+                max_abs_error: 176,
+                sum_abs_error: 83_724_650,
+                checksum: 783408327537764352,
+                anchors: vec![115, 113, 72, 64],
+                reference_anchors: vec![111, 126, 51, 67],
             }
         );
     }
