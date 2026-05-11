@@ -3059,6 +3059,28 @@ mod tests {
     }
 
     #[test]
+    fn rejects_public_spline_rendering_until_supported() {
+        let bytes =
+            std::fs::read(workspace_path("reference/libjxl/testdata/jxl/splines.jxl")).unwrap();
+        let info = inspect(&bytes).unwrap();
+        let modular = info.first_frame_modular.as_ref().unwrap();
+        assert!(modular.global.features.splines.is_some());
+        assert_eq!(decode(&bytes), Err(Error::Unsupported("spline rendering")));
+        assert_eq!(
+            decode_channels(&bytes),
+            Err(Error::Unsupported("spline rendering"))
+        );
+        assert_eq!(
+            decode_rgba8(&bytes),
+            Err(Error::Unsupported("spline rendering"))
+        );
+        assert_eq!(
+            decode_rgba16(&bytes),
+            Err(Error::Unsupported("spline rendering"))
+        );
+    }
+
+    #[test]
     fn decode_rgba_supports_generated_var_dct_when_available() {
         let Some(cjxl) = reference_cjxl() else {
             eprintln!("skipping public VarDCT rgba decode; reference cjxl is not built");

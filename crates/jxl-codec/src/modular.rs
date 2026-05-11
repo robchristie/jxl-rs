@@ -36,7 +36,19 @@ const WP_DIV_LOOKUP: [u32; 64] = [
 const FLAG_NOISE: u64 = 1;
 const FLAG_PATCHES: u64 = 2;
 const FLAG_SPLINES: u64 = 16;
-const UNSUPPORTED_DC_GLOBAL_FEATURES: u64 = FLAG_NOISE | FLAG_PATCHES | FLAG_SPLINES;
+const UNSUPPORTED_DC_GLOBAL_FEATURES: u64 = FLAG_NOISE | FLAG_PATCHES;
+const SPLINE_CONTEXTS: usize = 6;
+const SPLINE_QUANTIZATION_ADJUSTMENT_CONTEXT: usize = 0;
+const SPLINE_STARTING_POSITION_CONTEXT: usize = 1;
+const SPLINE_NUM_SPLINES_CONTEXT: usize = 2;
+const SPLINE_NUM_CONTROL_POINTS_CONTEXT: usize = 3;
+const SPLINE_CONTROL_POINTS_CONTEXT: usize = 4;
+const SPLINE_DCT_CONTEXT: usize = 5;
+const SPLINE_DCT_SIZE: usize = 32;
+const MAX_SPLINE_CONTROL_POINTS: usize = 1 << 20;
+const MAX_SPLINE_CONTROL_POINTS_PER_PIXEL_RATIO: usize = 2;
+const SPLINE_POS_LIMIT: i32 = 1 << 23;
+const SPLINE_DELTA_LIMIT: i32 = 1 << 30;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModularFrameMetadata {
@@ -168,12 +180,39 @@ pub struct ModularGroupChannelPlan {
 pub struct ModularGlobalSection {
     pub section_logical_id: usize,
     pub section_kind: FrameSectionKind,
+    pub features: FrameFeatureMetadata,
     pub has_global_tree: bool,
     pub global_tree: Option<MaTree>,
     pub global_tree_contexts: Option<usize>,
     pub global_tree_context_map_size: Option<usize>,
     pub group_header: ModularGroupHeader,
     pub bits_consumed: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FrameFeatureMetadata {
+    pub splines: Option<SplineFrameMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplineFrameMetadata {
+    pub quantization_adjustment: i32,
+    pub starting_points: Vec<SplinePoint>,
+    pub splines: Vec<QuantizedSplineMetadata>,
+    pub bits_consumed: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplinePoint {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuantizedSplineMetadata {
+    pub control_points: Vec<(i32, i32)>,
+    pub color_dct: [[i32; SPLINE_DCT_SIZE]; 3],
+    pub sigma_dct: [i32; SPLINE_DCT_SIZE],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,6 +429,12 @@ pub fn read_modular_frame_metadata(
         Some(Err(error)) => (None, Some(error)),
         None => (None, None),
     };
+    let feature_image_error = plan
+        .global
+        .features
+        .splines
+        .is_some()
+        .then_some(Error::Unsupported("spline rendering"));
     let decode_region = region_plan
         .as_ref()
         .map(|region_plan| region_plan.decode_rect);
@@ -413,6 +458,9 @@ pub fn read_modular_frame_metadata(
         }
         None => None,
     };
+    if image_error.is_none() {
+        image_error = feature_image_error;
+    }
     let image = if image_error.is_none() {
         residuals.as_ref().and_then(|residuals| {
             let result = match &region_plan {
@@ -476,12 +524,206 @@ fn read_modular_decode_plan(
     })
 }
 
+fn read_dc_global_features(
+    reader: &mut BitReader<'_>,
+    frame_header: &FrameHeader,
+) -> Result<FrameFeatureMetadata> {
+    let splines = if frame_header.flags & FLAG_SPLINES != 0 {
+        Some(read_spline_frame_metadata(reader, frame_header)?)
+    } else {
+        None
+    };
+    Ok(FrameFeatureMetadata { splines })
+}
+
+fn read_spline_frame_metadata(
+    reader: &mut BitReader<'_>,
+    frame_header: &FrameHeader,
+) -> Result<SplineFrameMetadata> {
+    let (code, context_map) = decode_histograms(reader, SPLINE_CONTEXTS, false)?;
+    let mut symbol_reader = AnsSymbolReader::new(code, reader, 0)?;
+    let encoded_num_splines =
+        symbol_reader.read_hybrid_uint(SPLINE_NUM_SPLINES_CONTEXT, reader, &context_map)? as usize;
+    let num_splines = encoded_num_splines
+        .checked_add(1)
+        .ok_or(Error::InvalidCodestream("too many splines"))?;
+    let max_control_points = max_spline_control_points(frame_header)?;
+    if num_splines > max_control_points || num_splines + 1 > max_control_points {
+        return Err(Error::InvalidCodestream("too many splines"));
+    }
+
+    let starting_points =
+        read_spline_starting_points(reader, &mut symbol_reader, &context_map, num_splines)?;
+    let quantization_adjustment = unpack_signed(symbol_reader.read_hybrid_uint(
+        SPLINE_QUANTIZATION_ADJUSTMENT_CONTEXT,
+        reader,
+        &context_map,
+    )?);
+
+    let mut splines = Vec::with_capacity(num_splines);
+    let mut total_control_points = num_splines;
+    for _ in 0..num_splines {
+        splines.push(read_quantized_spline_metadata(
+            reader,
+            &mut symbol_reader,
+            &context_map,
+            max_control_points,
+            &mut total_control_points,
+        )?);
+    }
+    if !symbol_reader.check_final_state() {
+        return Err(Error::InvalidCodestream("invalid spline entropy stream"));
+    }
+    Ok(SplineFrameMetadata {
+        quantization_adjustment,
+        starting_points,
+        splines,
+        bits_consumed: reader.bits_consumed(),
+    })
+}
+
+fn max_spline_control_points(frame_header: &FrameHeader) -> Result<usize> {
+    let num_pixels = (frame_header.frame_size.width as usize)
+        .checked_mul(frame_header.frame_size.height as usize)
+        .ok_or(Error::InvalidCodestream("spline frame is too large"))?;
+    Ok(MAX_SPLINE_CONTROL_POINTS.min(num_pixels / MAX_SPLINE_CONTROL_POINTS_PER_PIXEL_RATIO))
+}
+
+fn read_spline_starting_points(
+    reader: &mut BitReader<'_>,
+    symbol_reader: &mut AnsSymbolReader,
+    context_map: &[u8],
+    num_splines: usize,
+) -> Result<Vec<SplinePoint>> {
+    let mut points = Vec::with_capacity(num_splines);
+    let mut last_x = 0i32;
+    let mut last_y = 0i32;
+    for index in 0..num_splines {
+        let dx = symbol_reader.read_hybrid_uint(
+            SPLINE_STARTING_POSITION_CONTEXT,
+            reader,
+            context_map,
+        )?;
+        let dy = symbol_reader.read_hybrid_uint(
+            SPLINE_STARTING_POSITION_CONTEXT,
+            reader,
+            context_map,
+        )?;
+        let (x, y) = if index == 0 {
+            (
+                i32::try_from(dx)
+                    .map_err(|_| Error::InvalidCodestream("spline coordinate out of bounds"))?,
+                i32::try_from(dy)
+                    .map_err(|_| Error::InvalidCodestream("spline coordinate out of bounds"))?,
+            )
+        } else {
+            (
+                checked_spline_pos_add(last_x, unpack_signed(dx))?,
+                checked_spline_pos_add(last_y, unpack_signed(dy))?,
+            )
+        };
+        validate_spline_point_pos(x, y)?;
+        points.push(SplinePoint { x, y });
+        last_x = x;
+        last_y = y;
+    }
+    Ok(points)
+}
+
+fn checked_spline_pos_add(base: i32, delta: i32) -> Result<i32> {
+    base.checked_add(delta)
+        .ok_or(Error::InvalidCodestream("spline coordinate out of bounds"))
+}
+
+fn validate_spline_point_pos(x: i32, y: i32) -> Result<()> {
+    if !(-SPLINE_POS_LIMIT + 1..SPLINE_POS_LIMIT).contains(&x)
+        || !(-SPLINE_POS_LIMIT + 1..SPLINE_POS_LIMIT).contains(&y)
+    {
+        return Err(Error::InvalidCodestream("spline coordinate out of bounds"));
+    }
+    Ok(())
+}
+
+fn read_quantized_spline_metadata(
+    reader: &mut BitReader<'_>,
+    symbol_reader: &mut AnsSymbolReader,
+    context_map: &[u8],
+    max_control_points: usize,
+    total_control_points: &mut usize,
+) -> Result<QuantizedSplineMetadata> {
+    let num_control_points =
+        symbol_reader.read_hybrid_uint(SPLINE_NUM_CONTROL_POINTS_CONTEXT, reader, context_map)?
+            as usize;
+    if num_control_points > max_control_points {
+        return Err(Error::InvalidCodestream("too many spline control points"));
+    }
+    *total_control_points = total_control_points
+        .checked_add(num_control_points)
+        .ok_or(Error::InvalidCodestream("too many spline control points"))?;
+    if *total_control_points > max_control_points {
+        return Err(Error::InvalidCodestream("too many spline control points"));
+    }
+
+    let mut control_points = Vec::with_capacity(num_control_points);
+    for _ in 0..num_control_points {
+        let x = unpack_signed(symbol_reader.read_hybrid_uint(
+            SPLINE_CONTROL_POINTS_CONTEXT,
+            reader,
+            context_map,
+        )?);
+        let y = unpack_signed(symbol_reader.read_hybrid_uint(
+            SPLINE_CONTROL_POINTS_CONTEXT,
+            reader,
+            context_map,
+        )?);
+        if !(-SPLINE_DELTA_LIMIT + 1..SPLINE_DELTA_LIMIT).contains(&x)
+            || !(-SPLINE_DELTA_LIMIT + 1..SPLINE_DELTA_LIMIT).contains(&y)
+        {
+            return Err(Error::InvalidCodestream("spline delta-delta out of bounds"));
+        }
+        control_points.push((x, y));
+    }
+
+    let mut color_dct = [[0i32; SPLINE_DCT_SIZE]; 3];
+    for channel in &mut color_dct {
+        read_spline_dct(reader, symbol_reader, context_map, channel)?;
+    }
+    let mut sigma_dct = [0i32; SPLINE_DCT_SIZE];
+    read_spline_dct(reader, symbol_reader, context_map, &mut sigma_dct)?;
+
+    Ok(QuantizedSplineMetadata {
+        control_points,
+        color_dct,
+        sigma_dct,
+    })
+}
+
+fn read_spline_dct(
+    reader: &mut BitReader<'_>,
+    symbol_reader: &mut AnsSymbolReader,
+    context_map: &[u8],
+    dct: &mut [i32; SPLINE_DCT_SIZE],
+) -> Result<()> {
+    for value in dct {
+        *value = unpack_signed(symbol_reader.read_hybrid_uint(
+            SPLINE_DCT_CONTEXT,
+            reader,
+            context_map,
+        )?);
+        if *value == i32::MIN {
+            return Err(Error::InvalidCodestream("invalid spline DCT coefficient"));
+        }
+    }
+    Ok(())
+}
+
 fn read_global_section(
     reader: &mut BitReader<'_>,
     metadata: &ImageMetadata,
     frame_header: &FrameHeader,
     section: &FrameSection,
 ) -> Result<ModularGlobalSection> {
+    let features = read_dc_global_features(reader, frame_header)?;
     skip_dc_dequant_matrices(reader)?;
     let has_global_tree = reader.read_bool()?;
     let global_tree_metadata = if has_global_tree {
@@ -502,6 +744,7 @@ fn read_global_section(
     Ok(ModularGlobalSection {
         section_logical_id: section.logical_id,
         section_kind: section.kind,
+        features,
         has_global_tree,
         global_tree: global_tree_metadata
             .as_ref()
@@ -972,6 +1215,7 @@ fn decode_global_residuals(
         ))?;
     let payload = section_payload(codestream, section)?;
     let mut reader = BitReader::new(payload);
+    read_dc_global_features(&mut reader, frame_header)?;
     skip_dc_dequant_matrices(&mut reader)?;
     if !reader.read_bool()? {
         return Err(Error::InvalidCodestream("modular frame has no global tree"));
@@ -3919,6 +4163,7 @@ mod tests {
             global: ModularGlobalSection {
                 section_logical_id: 0,
                 section_kind: FrameSectionKind::Combined,
+                features: FrameFeatureMetadata::default(),
                 has_global_tree: true,
                 global_tree: None,
                 global_tree_contexts: None,

@@ -4314,7 +4314,58 @@ fn parses_checked_in_fixture_modular_global_metadata() {
     assert_eq!(image.channels[2].samples.iter().max(), Some(&14045));
 
     let splines = parse_fixture("reference/libjxl/testdata/jxl/splines.jxl");
-    assert!(splines.first_frame_modular.is_none());
+    let modular = splines.first_frame_modular.as_ref().unwrap();
+    let spline_metadata = modular.global.features.splines.as_ref().unwrap();
+    assert_eq!(spline_metadata.quantization_adjustment, 0);
+    assert_eq!(spline_metadata.bits_consumed, 423);
+    assert_eq!(
+        spline_metadata.starting_points,
+        vec![jxl_codec::SplinePoint { x: 64, y: 378 }]
+    );
+    assert_eq!(spline_metadata.splines.len(), 1);
+    let spline = &spline_metadata.splines[0];
+    assert_eq!(
+        spline.control_points,
+        vec![
+            (762, 735),
+            (-909, -1792),
+            (-462, 1281),
+            (2079, -379),
+            (-1470, 1950),
+            (-1120, -2175),
+        ]
+    );
+    assert_eq!(spline.color_dct[0][0..2], [168, 119]);
+    assert_eq!(spline.color_dct[1][0], 14);
+    assert_eq!(spline.color_dct[1][30], 3);
+    assert_eq!(spline.color_dct[2][0..3], [-15, 7, 8]);
+    assert_eq!(spline.color_dct[2][30], -3);
+    assert_eq!(spline.sigma_dct[0], 51);
+    assert_eq!(spline.sigma_dct[7], 12);
+    assert_eq!(spline.sigma_dct[31], 21);
+    assert_eq!(
+        modular.image_error,
+        Some(jxl_codec::Error::Unsupported("spline rendering"))
+    );
+    let residuals = modular.residuals.as_ref().unwrap();
+    assert!(residuals.global.is_none());
+    assert_eq!(residuals.groups.len(), 4);
+    for (index, group) in residuals.groups.iter().enumerate() {
+        assert_eq!(group.section_physical_index, index + 3);
+        assert_eq!(group.stream_id, index + 21);
+        assert_eq!(group.bits_consumed, 4);
+        assert_eq!(group.channels.len(), 3);
+        for (channel_index, channel) in group.channels.iter().enumerate() {
+            assert_eq!(channel.channel_index, channel_index);
+            assert_eq!(channel.width, 1024);
+            assert_eq!(channel.height, 1024);
+            assert_eq!(channel.x0, if index % 2 == 0 { 0 } else { 1024 });
+            assert_eq!(channel.y0, if index < 2 { 0 } else { 1024 });
+            assert_eq!(channel.samples.len(), 1024 * 1024);
+            assert!(channel.samples.iter().all(|sample| *sample == 0));
+        }
+    }
+    assert!(modular.image.is_none());
 }
 
 #[test]
