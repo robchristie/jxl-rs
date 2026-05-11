@@ -17,6 +17,11 @@ pub struct Codestream {
     pub metadata: ImageMetadata,
     pub transform_data: CustomTransformData,
     pub icc_profile: Option<Vec<u8>>,
+    pub frames: Vec<FrameHeader>,
+    pub frame_data: Vec<FrameData>,
+    pub modular_frames: Vec<Option<ModularFrameMetadata>>,
+    pub vardct_plans: Vec<Option<VarDctDecodePlan>>,
+    pub vardct_frames: Vec<Option<VarDctFrameMetadata>>,
     pub first_frame: Option<FrameHeader>,
     pub first_frame_data: Option<FrameData>,
     pub first_frame_modular: Option<ModularFrameMetadata>,
@@ -73,34 +78,49 @@ pub fn parse_codestream_with_config(input: &[u8], config: DecodeConfig) -> Resul
         None
     };
     reader.jump_to_byte_boundary()?;
-    let first_frame = Some(read_frame_header(
-        &mut reader,
-        size.width,
-        size.height,
-        &metadata,
-    )?);
-    let header_bits_consumed = CODESTREAM_SIGNATURE.len() * 8 + reader.bits_consumed();
-    let first_frame_data = if let Some(frame) = &first_frame {
-        Some(read_frame_data(
-            &mut reader,
-            frame,
-            CODESTREAM_SIGNATURE.len(),
-        )?)
-    } else {
-        None
-    };
-    let first_frame_modular = match (&first_frame, &first_frame_data) {
-        (Some(frame), Some(frame_data)) => {
-            read_modular_frame_metadata(input, &metadata, frame, frame_data, config)?
+
+    let mut frames = Vec::new();
+    let mut frame_data = Vec::new();
+    let mut header_bits_consumed = None;
+    loop {
+        let frame = read_frame_header(&mut reader, size.width, size.height, &metadata)?;
+        if header_bits_consumed.is_none() {
+            header_bits_consumed = Some(CODESTREAM_SIGNATURE.len() * 8 + reader.bits_consumed());
         }
-        _ => None,
-    };
-    let first_frame_vardct_plan = match (&first_frame, &first_frame_data) {
-        (Some(frame), Some(frame_data)) => {
-            read_vardct_decode_plan(input, &metadata, &transform_data, frame, frame_data)?
+        let is_last = frame.is_last;
+        let data = read_frame_data(&mut reader, &frame, CODESTREAM_SIGNATURE.len())?;
+        frames.push(frame);
+        frame_data.push(data);
+        if is_last {
+            break;
         }
-        _ => None,
-    };
+    }
+
+    let header_bits_consumed = header_bits_consumed.unwrap_or(CODESTREAM_SIGNATURE.len() * 8);
+    let first_frame = frames.first().cloned();
+    let first_frame_data = frame_data.first().cloned();
+
+    let modular_frames = frames
+        .iter()
+        .zip(&frame_data)
+        .map(|(frame, frame_data)| {
+            read_modular_frame_metadata(input, &metadata, frame, frame_data, config)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let vardct_plans = frames
+        .iter()
+        .zip(&frame_data)
+        .map(|(frame, frame_data)| {
+            read_vardct_decode_plan(input, &metadata, &transform_data, frame, frame_data)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let vardct_frames = vardct_plans
+        .iter()
+        .map(|plan| plan.as_ref().map(|plan| plan.frame.clone()))
+        .collect::<Vec<_>>();
+
+    let first_frame_modular = modular_frames.first().cloned().flatten();
+    let first_frame_vardct_plan = vardct_plans.first().cloned().flatten();
     let first_frame_vardct = first_frame_vardct_plan
         .as_ref()
         .map(|plan| plan.frame.clone());
@@ -137,6 +157,11 @@ pub fn parse_codestream_with_config(input: &[u8], config: DecodeConfig) -> Resul
         metadata,
         transform_data,
         icc_profile,
+        frames,
+        frame_data,
+        modular_frames,
+        vardct_plans,
+        vardct_frames,
         first_frame,
         first_frame_data,
         first_frame_modular,

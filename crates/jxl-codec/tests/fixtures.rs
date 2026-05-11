@@ -4682,12 +4682,36 @@ fn parses_checked_in_fixture_first_frame_headers() {
     let animation =
         parse_fixture("reference/libjxl/testdata/jxl/blending/cropped_traffic_light.jxl");
     let frame = animation.first_frame.as_ref().unwrap();
+    assert_eq!(animation.frames.len(), 4);
+    assert_eq!(animation.frame_data.len(), 4);
+    assert_eq!(animation.modular_frames.len(), 4);
+    assert_eq!(animation.vardct_plans.len(), 4);
+    assert_eq!(animation.vardct_frames.len(), 4);
+    assert!(animation.modular_frames.iter().all(Option::is_some));
+    assert!(animation.vardct_plans.iter().all(Option::is_none));
+    assert!(animation.vardct_frames.iter().all(Option::is_none));
     assert_eq!(frame.encoding, FrameEncoding::Modular);
     assert_eq!(frame.frame_size.width, 60);
     assert_eq!(frame.frame_size.height, 105);
     assert_eq!(frame.extra_channel_upsampling, vec![1]);
     assert_eq!(frame.extra_channel_blending_info.len(), 1);
     assert_eq!(frame.animation_frame.duration, 300);
+    assert_eq!(
+        animation
+            .frames
+            .iter()
+            .map(|frame| frame.animation_frame.duration)
+            .collect::<Vec<_>>(),
+        vec![300, 100, 300, 100]
+    );
+    assert_eq!(
+        animation
+            .frames
+            .iter()
+            .map(|frame| frame.is_last)
+            .collect::<Vec<_>>(),
+        vec![false, false, false, true]
+    );
 
     let container =
         parse_fixture("reference/libjxl/testdata/jxl/boxes/square-extended-size-container.jxl");
@@ -4727,6 +4751,14 @@ fn parses_checked_in_fixture_first_frame_toc() {
     let container =
         parse_fixture("reference/libjxl/testdata/jxl/boxes/square-extended-size-container.jxl");
     let frame_data = container.first_frame_data.as_ref().unwrap();
+    assert_eq!(container.frames.len(), 1);
+    assert_eq!(container.frame_data.len(), 1);
+    assert_eq!(container.modular_frames.len(), 1);
+    assert_eq!(container.vardct_plans.len(), 1);
+    assert_eq!(container.vardct_frames.len(), 1);
+    assert!(container.modular_frames[0].is_none());
+    assert!(container.vardct_plans[0].is_some());
+    assert!(container.vardct_frames[0].is_some());
     assert_eq!(frame_data.toc.entries.len(), 1);
     assert_eq!(frame_data.sections[0].kind, FrameSectionKind::Combined);
     assert_eq!(frame_data.payload_size, 45);

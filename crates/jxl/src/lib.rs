@@ -34,6 +34,11 @@ pub struct ImageInfo {
     pub metadata: ImageMetadata,
     pub transform_data: CustomTransformData,
     pub icc_profile: Option<Vec<u8>>,
+    pub frames: Vec<FrameHeader>,
+    pub frame_data: Vec<FrameData>,
+    pub modular_frames: Vec<Option<ModularFrameMetadata>>,
+    pub vardct_plans: Vec<Option<VarDctDecodePlan>>,
+    pub vardct_frames: Vec<Option<VarDctFrameMetadata>>,
     pub first_frame: Option<FrameHeader>,
     pub first_frame_data: Option<FrameData>,
     pub first_frame_modular: Option<ModularFrameMetadata>,
@@ -94,6 +99,15 @@ pub struct Rgba16Image {
     pub width: u32,
     pub height: u32,
     pub pixels: Vec<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RgbaFrame {
+    pub x: i32,
+    pub y: i32,
+    pub duration: u32,
+    pub timecode: u32,
+    pub image: RgbaImage,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -338,6 +352,43 @@ impl Decoder {
         Ok(image)
     }
 
+    /// Decodes each frame rectangle to interleaved straight-alpha RGBA8.
+    ///
+    /// This is a raw frame-sequence API: frames are returned with their
+    /// codestream origin, duration, and timecode, but are not composited with
+    /// previous frames. Blended animation output is not implemented yet.
+    ///
+    /// Non-animated images return a single frame at origin `(0, 0)`.
+    pub fn decode_rgba8_frames(&self, input: &[u8]) -> Result<Vec<RgbaFrame>> {
+        self.validate_shared_options()?;
+        let frames =
+            decode_rgba8_frames_buffered(input, self.codec_config(), self.options.vardct_pass)?;
+        let required = frames.iter().try_fold(0usize, |sum, frame| {
+            sum.checked_add(frame.image.pixels.len())
+                .ok_or(Error::InvalidCodestream("decoded image size overflow"))
+        })?;
+        enforce_memory_limit(required, self.options.memory_limit)?;
+        Ok(frames)
+    }
+
+    /// Decodes an animation to composited full-canvas RGBA8 frames.
+    ///
+    /// This currently supports modular frame sequences using `Replace` and
+    /// source-over `Blend` against the previous canvas. Other blend modes
+    /// return [`Error::Unsupported`] until their compositing rules are
+    /// implemented.
+    pub fn decode_rgba8_animation(&self, input: &[u8]) -> Result<Vec<RgbaFrame>> {
+        self.validate_shared_options()?;
+        let frames =
+            decode_rgba8_animation_buffered(input, self.codec_config(), self.options.vardct_pass)?;
+        let required = frames.iter().try_fold(0usize, |sum, frame| {
+            sum.checked_add(frame.image.pixels.len())
+                .ok_or(Error::InvalidCodestream("decoded image size overflow"))
+        })?;
+        enforce_memory_limit(required, self.options.memory_limit)?;
+        Ok(frames)
+    }
+
     /// Decodes color to interleaved linear RGB `f32` samples.
     ///
     /// XYB images are converted with the JPEG XL inverse opsin path. Non-XYB
@@ -408,6 +459,11 @@ pub fn inspect(input: &[u8]) -> Result<ImageInfo> {
         metadata: codestream.metadata,
         transform_data: codestream.transform_data,
         icc_profile: codestream.icc_profile,
+        frames: codestream.frames,
+        frame_data: codestream.frame_data,
+        modular_frames: codestream.modular_frames,
+        vardct_plans: codestream.vardct_plans,
+        vardct_frames: codestream.vardct_frames,
         first_frame: codestream.first_frame,
         first_frame_data: codestream.first_frame_data,
         first_frame_modular: codestream.first_frame_modular,
@@ -438,6 +494,14 @@ pub fn decode_rgba8(input: &[u8]) -> Result<RgbaImage> {
 
 pub fn decode_rgba16(input: &[u8]) -> Result<Rgba16Image> {
     Decoder::new().decode_rgba16(input)
+}
+
+pub fn decode_rgba8_frames(input: &[u8]) -> Result<Vec<RgbaFrame>> {
+    Decoder::new().decode_rgba8_frames(input)
+}
+
+pub fn decode_rgba8_animation(input: &[u8]) -> Result<Vec<RgbaFrame>> {
+    Decoder::new().decode_rgba8_animation(input)
 }
 
 pub fn decode_linear_rgb(input: &[u8]) -> Result<LinearRgbImage> {
@@ -507,6 +571,14 @@ fn decode_channels_codestream(
         .first_frame_modular
         .as_ref()
         .ok_or(Error::Unsupported("modular image metadata"))?;
+    decoded_channels_from_modular_frame(&codestream.metadata, modular, region)
+}
+
+fn decoded_channels_from_modular_frame(
+    metadata: &ImageMetadata,
+    modular: &ModularFrameMetadata,
+    region: Option<jxl_codec::ImageRegion>,
+) -> Result<DecodedChannels> {
     if let Some(error) = &modular.image_error {
         return Err(error.clone());
     }
@@ -520,15 +592,15 @@ fn decode_channels_codestream(
             }));
         }
     };
-    let color_channels = codestream.metadata.num_color_channels() as usize;
-    let bit_depth = codestream.metadata.bit_depth.bits_per_sample;
-    if codestream.metadata.bit_depth.floating_point_sample {
+    let color_channels = metadata.num_color_channels() as usize;
+    let bit_depth = metadata.bit_depth.bits_per_sample;
+    if metadata.bit_depth.floating_point_sample {
         return Err(Error::Unsupported("floating-point sample output"));
     }
     if bit_depth > 16 {
         return Err(Error::Unsupported("integer sample depths above 16 bits"));
     }
-    let channel_bit_depths = decoded_channel_bit_depths(&codestream.metadata, color_channels)?;
+    let channel_bit_depths = decoded_channel_bit_depths(metadata, color_channels)?;
     let channels = image
         .channels
         .iter()
@@ -555,7 +627,7 @@ fn decode_channels_codestream(
         width: image.width,
         height: image.height,
         color_channels,
-        alpha: raw_alpha_info(&codestream.metadata)?,
+        alpha: raw_alpha_info(metadata)?,
         bit_depth,
         channels,
     })
@@ -754,6 +826,242 @@ fn decode_rgba8_buffered(
     }
 
     rgba8_from_modular_codestream(codestream, config.region)
+}
+
+fn decode_rgba8_frames_buffered(
+    input: &[u8],
+    config: jxl_codec::DecodeConfig,
+    vardct_pass: Option<usize>,
+) -> Result<Vec<RgbaFrame>> {
+    if config.region.is_some() {
+        return Err(Error::Unsupported("region-of-interest frame decode"));
+    }
+    reject_vardct_pass_for_non_vardct(vardct_pass)?;
+    let (_, codestream) = jxl_codec::parse_file(input)?;
+    if codestream.frames.is_empty() {
+        return Err(Error::Unsupported("image has no decoded frame"));
+    }
+    if codestream.frames.len() == 1 && codestream.frames[0].encoding == FrameEncoding::VarDct {
+        let image = decode_rgba8(input)?;
+        return Ok(vec![RgbaFrame {
+            x: 0,
+            y: 0,
+            duration: codestream.frames[0].animation_frame.duration,
+            timecode: codestream.frames[0].animation_frame.timecode,
+            image,
+        }]);
+    }
+
+    let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
+    let transform_data = codestream.transform_data.clone();
+    let mut frames = Vec::with_capacity(codestream.frames.len());
+    for (frame, modular) in codestream.frames.iter().zip(&codestream.modular_frames) {
+        if frame.encoding != FrameEncoding::Modular {
+            return Err(Error::Unsupported("VarDCT frame sequence decode"));
+        }
+        if frame.color_transform == jxl_codec::ColorTransform::Xyb {
+            return Err(Error::Unsupported("XYB frame sequence decode"));
+        }
+        let modular = modular
+            .as_ref()
+            .ok_or(Error::Unsupported("modular frame metadata"))?;
+        let channels = decoded_channels_from_modular_frame(&codestream.metadata, modular, None)?;
+        let image = rgba8_from_decoded_channels_with_transform_data(
+            &channels,
+            alpha_channel_index,
+            Some(&transform_data),
+        )?;
+        frames.push(RgbaFrame {
+            x: frame.frame_origin.x0,
+            y: frame.frame_origin.y0,
+            duration: frame.animation_frame.duration,
+            timecode: frame.animation_frame.timecode,
+            image,
+        });
+    }
+    Ok(frames)
+}
+
+fn decode_rgba8_animation_buffered(
+    input: &[u8],
+    config: jxl_codec::DecodeConfig,
+    vardct_pass: Option<usize>,
+) -> Result<Vec<RgbaFrame>> {
+    if config.region.is_some() {
+        return Err(Error::Unsupported("region-of-interest animation decode"));
+    }
+    reject_vardct_pass_for_non_vardct(vardct_pass)?;
+    let (_, codestream) = jxl_codec::parse_file(input)?;
+    if !codestream.basic_info.have_animation {
+        let image = decode_rgba8(input)?;
+        return Ok(vec![RgbaFrame {
+            x: 0,
+            y: 0,
+            duration: codestream
+                .first_frame
+                .as_ref()
+                .map(|frame| frame.animation_frame.duration)
+                .unwrap_or(0),
+            timecode: codestream
+                .first_frame
+                .as_ref()
+                .map(|frame| frame.animation_frame.timecode)
+                .unwrap_or(0),
+            image,
+        }]);
+    }
+
+    let raw_frames = decode_rgba8_frames_buffered(input, config, vardct_pass)?;
+    let canvas_width = codestream.basic_info.width;
+    let canvas_height = codestream.basic_info.height;
+    let canvas_len = (canvas_width as usize)
+        .checked_mul(canvas_height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let mut canvas = vec![0u8; canvas_len];
+    let mut output = Vec::with_capacity(raw_frames.len());
+    for (raw_frame, frame_header) in raw_frames.into_iter().zip(&codestream.frames) {
+        match frame_header.blending_info.mode {
+            BlendMode::Replace => {
+                composite_replace_rgba8(&mut canvas, canvas_width, canvas_height, &raw_frame)?;
+            }
+            BlendMode::Blend => {
+                if frame_header.blending_info.source != 1 {
+                    return Err(Error::Unsupported("animated blend source"));
+                }
+                if frame_header.blending_info.alpha_channel != 0 || frame_header.blending_info.clamp
+                {
+                    return Err(Error::Unsupported("animated blend parameters"));
+                }
+                composite_blend_rgba8(&mut canvas, canvas_width, canvas_height, &raw_frame)?;
+            }
+            _ => return Err(Error::Unsupported("animated blend mode")),
+        }
+        output.push(RgbaFrame {
+            x: 0,
+            y: 0,
+            duration: raw_frame.duration,
+            timecode: raw_frame.timecode,
+            image: RgbaImage {
+                width: canvas_width,
+                height: canvas_height,
+                pixels: canvas.clone(),
+            },
+        });
+    }
+    Ok(output)
+}
+
+fn composite_replace_rgba8(
+    canvas: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    frame: &RgbaFrame,
+) -> Result<()> {
+    let region = compositing_region(canvas, canvas_width, canvas_height, frame)?;
+    if region.dst_x0 >= region.dst_x1 || region.dst_y0 >= region.dst_y1 {
+        return Ok(());
+    }
+    let copy_width = (region.dst_x1 - region.dst_x0) as usize * 4;
+    for dst_y in region.dst_y0..region.dst_y1 {
+        let src_x = (region.dst_x0 as i32 - frame.x) as u32;
+        let src_y = (dst_y as i32 - frame.y) as u32;
+        let src_start = (src_y as usize * frame.image.width as usize + src_x as usize) * 4;
+        let dst_start = (dst_y as usize * canvas_width as usize + region.dst_x0 as usize) * 4;
+        canvas[dst_start..dst_start + copy_width]
+            .copy_from_slice(&frame.image.pixels[src_start..src_start + copy_width]);
+    }
+    Ok(())
+}
+
+fn composite_blend_rgba8(
+    canvas: &mut [u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    frame: &RgbaFrame,
+) -> Result<()> {
+    let region = compositing_region(canvas, canvas_width, canvas_height, frame)?;
+    for dst_y in region.dst_y0..region.dst_y1 {
+        let src_x = (region.dst_x0 as i32 - frame.x) as u32;
+        let src_y = (dst_y as i32 - frame.y) as u32;
+        let src_start = (src_y as usize * frame.image.width as usize + src_x as usize) * 4;
+        let dst_start = (dst_y as usize * canvas_width as usize + region.dst_x0 as usize) * 4;
+        for column in 0..(region.dst_x1 - region.dst_x0) as usize {
+            let src = src_start + column * 4;
+            let dst = dst_start + column * 4;
+            let alpha = u32::from(frame.image.pixels[src + 3]);
+            for channel in 0..3 {
+                canvas[dst + channel] = blend_u8(
+                    frame.image.pixels[src + channel],
+                    canvas[dst + channel],
+                    alpha,
+                );
+            }
+            canvas[dst + 3] = blend_alpha_u8(frame.image.pixels[src + 3], canvas[dst + 3]);
+        }
+    }
+    Ok(())
+}
+
+fn blend_u8(source: u8, destination: u8, alpha: u32) -> u8 {
+    ((u32::from(source) * alpha + u32::from(destination) * (255 - alpha) + 127) / 255) as u8
+}
+
+fn blend_alpha_u8(source: u8, destination: u8) -> u8 {
+    let source = u32::from(source);
+    let destination = u32::from(destination);
+    (source + (destination * (255 - source) + 127) / 255).min(255) as u8
+}
+
+struct CompositingRegion {
+    dst_x0: u32,
+    dst_y0: u32,
+    dst_x1: u32,
+    dst_y1: u32,
+}
+
+fn compositing_region(
+    canvas: &[u8],
+    canvas_width: u32,
+    canvas_height: u32,
+    frame: &RgbaFrame,
+) -> Result<CompositingRegion> {
+    let frame_width = frame.image.width;
+    let frame_height = frame.image.height;
+    validate_rgba8_buffer(&frame.image)?;
+    let expected_canvas_len = (canvas_width as usize)
+        .checked_mul(canvas_height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    if canvas.len() != expected_canvas_len {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+
+    let frame_x0 = i64::from(frame.x);
+    let frame_y0 = i64::from(frame.y);
+    let frame_x1 = frame_x0 + i64::from(frame_width);
+    let frame_y1 = frame_y0 + i64::from(frame_height);
+    let dst_x0 = frame_x0.max(0).min(i64::from(canvas_width)) as u32;
+    let dst_y0 = frame_y0.max(0).min(i64::from(canvas_height)) as u32;
+    let dst_x1 = frame_x1.max(0).min(i64::from(canvas_width)) as u32;
+    let dst_y1 = frame_y1.max(0).min(i64::from(canvas_height)) as u32;
+    Ok(CompositingRegion {
+        dst_x0,
+        dst_y0,
+        dst_x1,
+        dst_y1,
+    })
+}
+
+fn validate_rgba8_buffer(image: &RgbaImage) -> Result<()> {
+    let expected = (image.width as usize)
+        .checked_mul(image.height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    if image.pixels.len() != expected {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+    Ok(())
 }
 
 fn decode_linear_rgb_buffered(
@@ -3778,6 +4086,186 @@ mod tests {
         assert_eq!(samples.len(), 1088 * 64);
         assert_eq!(*samples.iter().min().unwrap(), 6682);
         assert_eq!(*samples.iter().max().unwrap(), 58853);
+    }
+
+    #[test]
+    fn inspect_exposes_animation_frame_sequence() {
+        let bytes = std::fs::read(workspace_path(
+            "reference/libjxl/testdata/jxl/blending/cropped_traffic_light.jxl",
+        ))
+        .unwrap();
+        let info = inspect(&bytes).unwrap();
+
+        assert!(info.basic_info.have_animation);
+        assert_eq!(info.frames.len(), 4);
+        assert_eq!(info.frame_data.len(), 4);
+        assert_eq!(info.modular_frames.len(), 4);
+        assert_eq!(info.vardct_plans.len(), 4);
+        assert_eq!(info.vardct_frames.len(), 4);
+        assert!(info.modular_frames.iter().all(Option::is_some));
+        assert!(info.vardct_plans.iter().all(Option::is_none));
+        assert!(info.vardct_frames.iter().all(Option::is_none));
+        assert_eq!(info.first_frame.as_ref(), info.frames.first());
+        assert_eq!(info.first_frame_data.as_ref(), info.frame_data.first());
+        assert_eq!(
+            info.first_frame_modular.as_ref(),
+            info.modular_frames.first().and_then(Option::as_ref)
+        );
+        assert_eq!(
+            info.frames
+                .iter()
+                .map(|frame| frame.animation_frame.duration)
+                .collect::<Vec<_>>(),
+            vec![300, 100, 300, 100]
+        );
+        assert_eq!(
+            info.frames
+                .iter()
+                .map(|frame| frame.is_last)
+                .collect::<Vec<_>>(),
+            vec![false, false, false, true]
+        );
+    }
+
+    #[test]
+    fn decode_rgba8_frames_exposes_raw_animation_rectangles() {
+        let bytes = std::fs::read(workspace_path(
+            "reference/libjxl/testdata/jxl/blending/cropped_traffic_light.jxl",
+        ))
+        .unwrap();
+        let info = inspect(&bytes).unwrap();
+        let frames = decode_rgba8_frames(&bytes).unwrap();
+
+        assert_eq!(frames.len(), 4);
+        for (index, (decoded, header)) in frames.iter().zip(&info.frames).enumerate() {
+            assert_eq!(decoded.x, header.frame_origin.x0, "frame {index} x");
+            assert_eq!(decoded.y, header.frame_origin.y0, "frame {index} y");
+            assert_eq!(
+                decoded.duration, header.animation_frame.duration,
+                "frame {index} duration"
+            );
+            assert_eq!(
+                decoded.timecode, header.animation_frame.timecode,
+                "frame {index} timecode"
+            );
+            assert_eq!(
+                decoded.image.width, header.frame_size.width,
+                "frame {index} width"
+            );
+            assert_eq!(
+                decoded.image.height, header.frame_size.height,
+                "frame {index} height"
+            );
+            assert_eq!(
+                decoded.image.pixels.len(),
+                header.frame_size.width as usize * header.frame_size.height as usize * 4,
+                "frame {index} pixels"
+            );
+        }
+        assert!(
+            frames
+                .iter()
+                .flat_map(|frame| frame.image.pixels.chunks_exact(4))
+                .any(|pixel| pixel[3] != 0)
+        );
+        assert_eq!(
+            Decoder::new().memory_limit(1).decode_rgba8_frames(&bytes),
+            Err(Error::Unsupported("memory limit exceeded"))
+        );
+        assert_eq!(
+            Decoder::new()
+                .roi(Rect {
+                    x: 0,
+                    y: 0,
+                    width: 8,
+                    height: 8,
+                })
+                .decode_rgba8_frames(&bytes),
+            Err(Error::Unsupported("region-of-interest frame decode"))
+        );
+    }
+
+    #[test]
+    fn decode_rgba8_animation_composites_replace_frames() {
+        let bytes = std::fs::read(workspace_path(
+            "reference/libjxl/testdata/jxl/blending/cropped_traffic_light.jxl",
+        ))
+        .unwrap();
+        let info = inspect(&bytes).unwrap();
+        assert_eq!(info.frames[0].blending_info.mode, BlendMode::Replace);
+        assert!(
+            info.frames[1..]
+                .iter()
+                .all(|frame| frame.blending_info.mode == BlendMode::Blend)
+        );
+
+        let raw_frames = decode_rgba8_frames(&bytes).unwrap();
+        let animation = decode_rgba8_animation(&bytes).unwrap();
+        assert_eq!(animation.len(), raw_frames.len());
+        assert_eq!(animation.len(), 4);
+        for (index, (composited, raw)) in animation.iter().zip(&raw_frames).enumerate() {
+            assert_eq!(composited.x, 0, "frame {index} x");
+            assert_eq!(composited.y, 0, "frame {index} y");
+            assert_eq!(composited.duration, raw.duration, "frame {index} duration");
+            assert_eq!(composited.timecode, raw.timecode, "frame {index} timecode");
+            assert_eq!(composited.image.width, info.width, "frame {index} width");
+            assert_eq!(composited.image.height, info.height, "frame {index} height");
+            assert!(
+                composited
+                    .image
+                    .pixels
+                    .chunks_exact(4)
+                    .all(|pixel| pixel[3] == 255),
+                "frame {index} alpha"
+            );
+        }
+        assert_eq!(
+            animation[0].image.pixels,
+            window_interleaved_u8(
+                &raw_frames[0].image.pixels,
+                raw_frames[0].image.width,
+                4,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    width: info.width,
+                    height: info.height,
+                },
+            )
+        );
+        assert_ne!(
+            animation[1].image.pixels, animation[0].image.pixels,
+            "blend frame should change the composited canvas"
+        );
+        assert_eq!(
+            animation
+                .iter()
+                .map(|frame| rgba8_checksum(&frame.image.pixels))
+                .collect::<Vec<_>>(),
+            vec![
+                2_552_782_184_964_619_063,
+                3_342_112_483_607_925_487,
+                2_450_278_185_916_923_380,
+                2_999_354_724_818_656_045,
+            ]
+        );
+        assert_eq!(
+            Decoder::new()
+                .memory_limit(1)
+                .decode_rgba8_animation(&bytes),
+            Err(Error::Unsupported("memory limit exceeded"))
+        );
+        assert_eq!(
+            Decoder::new()
+                .roi(Rect {
+                    x: 0,
+                    y: 0,
+                    width: 8,
+                    height: 8,
+                })
+                .decode_rgba8_animation(&bytes),
+            Err(Error::Unsupported("region-of-interest animation decode"))
+        );
     }
 
     #[test]
@@ -9241,6 +9729,16 @@ mod tests {
             output.extend_from_slice(&samples[start..start + copy_width]);
         }
         output
+    }
+
+    fn rgba8_checksum(samples: &[u8]) -> u64 {
+        samples
+            .iter()
+            .enumerate()
+            .fold(0xcbf2_9ce4_8422_2325u64, |checksum, (index, sample)| {
+                (checksum ^ ((index as u64) << 8) ^ u64::from(*sample))
+                    .wrapping_mul(0x0000_0100_0000_01b3)
+            })
     }
 
     fn window_interleaved_u16(samples: &[u16], width: u32, channels: usize, roi: Rect) -> Vec<u16> {
