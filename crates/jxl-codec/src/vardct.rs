@@ -1001,6 +1001,8 @@ pub struct VarDctAcGroupMetadata {
     pub dequantized_grid: Option<VarDctAcDequantizedGrid>,
     pub spatial_grid: Option<VarDctAcSpatialGrid>,
     pub spatial_with_dc_grid: Option<VarDctAcSpatialGrid>,
+    pub modular_ac: Option<ModularDecodedGroup>,
+    pub modular_ac_error: Option<Error>,
     pub parse_error: Option<Error>,
 }
 
@@ -1014,6 +1016,7 @@ pub struct VarDctAcGroupCursorMetadata {
     pub ans_state_end_bits: Option<usize>,
     pub coefficient_stream_start_bits: Option<usize>,
     pub modular_ac_start_bits: Option<usize>,
+    pub modular_ac_end_bits: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2583,6 +2586,7 @@ pub fn read_vardct_decode_plan(
                 codestream,
                 frame_header,
                 payload,
+                global_tree.as_ref(),
                 global.as_ref(),
                 ac_global_metadata.as_ref(),
                 ac_global_entropy.as_deref(),
@@ -2941,6 +2945,7 @@ fn read_vardct_ac_group_metadata(
     codestream: &[u8],
     frame_header: &FrameHeader,
     payload: VarDctPassGroupPayloadMetadata,
+    global_tree: Option<&ModularTreeCoding>,
     global: Option<&VarDctGlobalMetadata>,
     ac_global: Option<&VarDctAcGlobalMetadata>,
     ac_global_entropy: Option<&[Option<VarDctAcPassEntropy>]>,
@@ -2972,6 +2977,7 @@ fn read_vardct_ac_group_metadata(
             ans_state_end_bits: None,
             coefficient_stream_start_bits: None,
             modular_ac_start_bits: None,
+            modular_ac_end_bits: None,
         },
         histogram_selector_bits,
         histogram_selector: None,
@@ -2984,6 +2990,8 @@ fn read_vardct_ac_group_metadata(
         dequantized_grid: None,
         spatial_grid: None,
         spatial_with_dc_grid: None,
+        modular_ac: None,
+        modular_ac_error: None,
         parse_error: None,
     };
 
@@ -3079,6 +3087,26 @@ fn read_vardct_ac_group_metadata(
                             Ok(probe) => {
                                 metadata.cursor.modular_ac_start_bits =
                                     Some(reader.bits_consumed());
+                                if !metadata.payload.modular_ac_channels.is_empty() {
+                                    let mut modular_ac_reader = BitReader::new(bytes);
+                                    modular_ac_reader.skip_bits(reader.bits_consumed())?;
+                                    match decode_modular_stream_from_reader(
+                                        &mut modular_ac_reader,
+                                        metadata.payload.section.section.section_physical_index,
+                                        metadata.payload.modular_ac_stream_id,
+                                        &metadata.payload.modular_ac_channels,
+                                        global_tree,
+                                    ) {
+                                        Ok((_, decoded)) => {
+                                            metadata.cursor.modular_ac_end_bits =
+                                                Some(modular_ac_reader.bits_consumed());
+                                            metadata.modular_ac = Some(decoded);
+                                        }
+                                        Err(error) => {
+                                            metadata.modular_ac_error = Some(error);
+                                        }
+                                    }
+                                }
                                 metadata.coefficient_probe = Some(probe);
                                 metadata.parse_error = Some(Error::Unsupported(
                                     "VarDCT AC coefficient stream decoding",
@@ -7818,6 +7846,7 @@ mod tests {
                 ans_state_end_bits: None,
                 coefficient_stream_start_bits: None,
                 modular_ac_start_bits: None,
+                modular_ac_end_bits: None,
             },
             histogram_selector_bits: 0,
             histogram_selector: Some(0),
@@ -7830,6 +7859,8 @@ mod tests {
             dequantized_grid: None,
             spatial_grid: None,
             spatial_with_dc_grid,
+            modular_ac: None,
+            modular_ac_error: None,
             parse_error: None,
         }
     }

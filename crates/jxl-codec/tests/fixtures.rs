@@ -2248,6 +2248,72 @@ fn generated_vardct_alpha_exposes_modular_ac_channel_plans_when_available() {
             (0, 1, 22, 0, 2, vec![(3, 64, 192, 256, 0, 0, 0)]),
         ]
     );
+    assert_eq!(
+        plan.ac_group_metadata
+            .iter()
+            .map(|metadata| (
+                metadata.payload.group.group,
+                metadata.cursor.modular_ac_start_bits,
+                metadata.cursor.modular_ac_end_bits,
+                metadata.modular_ac_error.clone(),
+                metadata.modular_ac.as_ref().map(|group| (
+                    group.stream_id,
+                    group.bits_consumed,
+                    group
+                        .channels
+                        .iter()
+                        .map(|channel| {
+                            let checksum = channel.samples.iter().enumerate().fold(
+                                0u64,
+                                |checksum, (index, sample)| {
+                                    checksum
+                                        .wrapping_mul(1_099_511_628_211)
+                                        .wrapping_add(index as u64)
+                                        .rotate_left(11)
+                                        ^ *sample as u64
+                                },
+                            );
+                            (
+                                channel.channel_index,
+                                channel.width,
+                                channel.height,
+                                channel.x0,
+                                channel.y0,
+                                channel.samples.len(),
+                                channel.samples.iter().copied().min().unwrap_or(0),
+                                channel.samples.iter().copied().max().unwrap_or(0),
+                                checksum,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                )),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                0,
+                Some(36477),
+                Some(152693),
+                None,
+                Some((
+                    21,
+                    152693,
+                    vec![(3, 256, 192, 0, 0, 49152, 0, 255, 2403843327144689486)],
+                )),
+            ),
+            (
+                1,
+                Some(8202),
+                Some(37398),
+                None,
+                Some((
+                    22,
+                    37398,
+                    vec![(3, 64, 192, 256, 0, 12288, 0, 255, 4530178598880764288)],
+                )),
+            ),
+        ]
+    );
 }
 
 #[test]
