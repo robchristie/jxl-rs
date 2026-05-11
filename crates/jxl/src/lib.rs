@@ -338,11 +338,13 @@ impl Decoder {
         Ok(image)
     }
 
-    /// Decodes VarDCT XYB color to interleaved linear RGB `f32` samples.
+    /// Decodes color to interleaved linear RGB `f32` samples.
     ///
-    /// This path applies the inverse opsin transform. It intentionally does
-    /// not yet perform full JPEG XL output color management. Modular images
-    /// and non-XYB VarDCT color transforms currently return
+    /// XYB images are converted with the JPEG XL inverse opsin path. Non-XYB
+    /// modular RGB/gray images are supported when their encoded color space is
+    /// the default sRGB/D65 profile or linear transfer. This path intentionally
+    /// does not yet perform full JPEG XL output color management; ICC,
+    /// wide-gamut, custom-primary, and non-XYB VarDCT outputs currently return
     /// [`Error::Unsupported`].
     pub fn decode_linear_rgb(&self, input: &[u8]) -> Result<LinearRgbImage> {
         self.validate_shared_options()?;
@@ -763,7 +765,11 @@ fn decode_linear_rgb_buffered(
     if first_frame_encoding(&codestream)? != FrameEncoding::VarDct {
         reject_vardct_pass_for_non_vardct(vardct_pass)?;
         if first_frame_color_transform(&codestream)? != jxl_codec::ColorTransform::Xyb {
-            return Err(Error::Unsupported("linear RGB modular output"));
+            let orientation = codestream.metadata.orientation;
+            return orient_linear_rgb(
+                modular_non_xyb_linear_rgb_from_codestream(codestream, config.region)?,
+                orientation,
+            );
         }
         let orientation = codestream.metadata.orientation;
         return orient_linear_rgb(
@@ -1021,6 +1027,107 @@ fn modular_xyb_linear_rgb_from_codestream(
         jxl_codec::VarDctXybInverseVariant::BMinusBias,
     );
     linear_rgb_from_vardct_rgb(rgb)
+}
+
+fn modular_non_xyb_linear_rgb_from_codestream(
+    codestream: jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+) -> Result<LinearRgbImage> {
+    let color_encoding = codestream.metadata.color_encoding.clone();
+    let color_channels = codestream.metadata.num_color_channels() as usize;
+    validate_linear_rgb_color_encoding(&color_encoding)?;
+    let channels = decode_channels_codestream(codestream, region, None)?;
+    linear_rgb_from_decoded_channels(&channels, &color_encoding, color_channels)
+}
+
+fn validate_linear_rgb_color_encoding(color: &ColorEncoding) -> Result<()> {
+    match color.color_space {
+        ColorSpace::Rgb => {
+            if color.want_icc
+                || color.white_point != WhitePoint::D65
+                || color.custom_white_point.is_some()
+                || color.primaries != Primaries::Srgb
+                || color.custom_primaries.is_some()
+            {
+                return Err(Error::Unsupported("linear RGB color management"));
+            }
+        }
+        ColorSpace::Gray => {
+            if color.want_icc {
+                return Err(Error::Unsupported("linear RGB color management"));
+            }
+        }
+        _ => return Err(Error::Unsupported("linear RGB modular output")),
+    }
+    if !matches!(
+        color.transfer_function,
+        TransferFunction::Srgb | TransferFunction::Linear
+    ) || color.gamma.is_some()
+    {
+        return Err(Error::Unsupported("linear RGB transfer function"));
+    }
+    Ok(())
+}
+
+fn linear_rgb_from_decoded_channels(
+    channels: &DecodedChannels,
+    color_encoding: &ColorEncoding,
+    color_channels: usize,
+) -> Result<LinearRgbImage> {
+    if !matches!(color_channels, 1 | 3) {
+        return Err(Error::Unsupported("unsupported color channel count"));
+    }
+    if channels.color_channels != color_channels || channels.channels.len() < color_channels {
+        return Err(Error::Unsupported("missing color channel output"));
+    }
+    let channel_indices = (0..color_channels).collect::<Vec<_>>();
+    validate_interleaved_channel_geometry(channels, &channel_indices, None)?;
+    let sample_count = decoded_channel_sample_count(channels)?;
+    let mut pixels = Vec::with_capacity(sample_count * 3);
+    for index in 0..sample_count {
+        if color_channels == 1 {
+            let (sample, bit_depth) = channel_sample(&channels.channels[0], index)?;
+            let linear = linear_sample_from_encoded_sample(sample, bit_depth, color_encoding)?;
+            pixels.extend_from_slice(&[linear, linear, linear]);
+        } else {
+            for channel in 0..3 {
+                let (sample, bit_depth) = channel_sample(&channels.channels[channel], index)?;
+                pixels.push(linear_sample_from_encoded_sample(
+                    sample,
+                    bit_depth,
+                    color_encoding,
+                )?);
+            }
+        }
+    }
+    Ok(LinearRgbImage {
+        width: channels.width,
+        height: channels.height,
+        pixels,
+    })
+}
+
+fn linear_sample_from_encoded_sample(
+    sample: u32,
+    bit_depth: u32,
+    color_encoding: &ColorEncoding,
+) -> Result<f32> {
+    let max = max_sample_value(bit_depth)? as f32;
+    let encoded = sample as f32 / max;
+    Ok(match color_encoding.transfer_function {
+        TransferFunction::Linear => encoded,
+        TransferFunction::Srgb => srgb_sample_to_linear(encoded),
+        _ => return Err(Error::Unsupported("linear RGB transfer function")),
+    })
+}
+
+fn srgb_sample_to_linear(sample: f32) -> f32 {
+    let sample = sample.clamp(0.0, 1.0);
+    if sample <= 0.040_45 {
+        sample / 12.92
+    } else {
+        ((sample + 0.055) / 1.055).powf(2.4)
+    }
 }
 
 fn modular_codestream_to_xyb_image(
@@ -3231,7 +3338,7 @@ mod tests {
             Decoder::new()
                 .output(DecodeOutput::LinearRgb)
                 .decode_output(&bytes),
-            Err(Error::Unsupported("linear RGB modular output"))
+            Err(Error::Unsupported("linear RGB color management"))
         );
     }
 
@@ -4151,6 +4258,99 @@ mod tests {
         assert_eq!(rgba8.width, 2048);
         assert_eq!(rgba8.height, 2048);
         assert_eq!(rgba8.pixels.len(), 2048 * 2048 * 4);
+    }
+
+    #[test]
+    fn decode_linear_rgb_supports_generated_modular_srgb_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping public modular sRGB linear decode; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-modular-srgb-source", "ppm");
+        let encoded = unique_temp_path("jxl-modular-srgb", "jxl");
+        write_split_vardct_source_ppm(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "0", "-m", "1", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let source = std::fs::read(&input).unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed for modular sRGB: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+        let source = parse_ppm_rgb(&source);
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert_eq!(info.metadata.color_encoding.color_space, ColorSpace::Rgb);
+        assert_eq!(
+            info.metadata.color_encoding.transfer_function,
+            TransferFunction::Srgb
+        );
+        assert_eq!(
+            info.first_frame.as_ref().unwrap().encoding,
+            FrameEncoding::Modular
+        );
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, source.width);
+        assert_eq!(decoded.height, source.height);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.bit_depth, 8);
+        assert_eq!(
+            Decoder::new()
+                .output(DecodeOutput::LinearRgb)
+                .decode_output(&encoded_bytes),
+            decode_linear_rgb(&encoded_bytes).map(DecodedOutput::LinearRgb)
+        );
+
+        let linear = decode_linear_rgb(&encoded_bytes).unwrap();
+        assert_eq!(linear.width, source.width);
+        assert_eq!(linear.height, source.height);
+        assert_eq!(linear.pixels.len(), source.samples.len());
+        for (index, (&actual, &sample)) in linear.pixels.iter().zip(&source.samples).enumerate() {
+            let expected = srgb_sample_to_linear(sample as f32 / 255.0);
+            assert!(
+                (actual - expected).abs() <= f32::EPSILON,
+                "linear sample mismatch at {index}: actual={actual}, expected={expected}"
+            );
+        }
+
+        let roi = Rect {
+            x: 17,
+            y: 19,
+            width: 41,
+            height: 29,
+        };
+        let roi_linear = Decoder::new()
+            .roi(roi)
+            .decode_linear_rgb(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_linear_rgb(&roi_linear, &linear, roi);
+        assert_eq!(
+            decode_with_options(
+                &encoded_bytes,
+                DecodeOptions {
+                    output: DecodeOutput::LinearRgb,
+                    roi: Some(roi),
+                    ..DecodeOptions::default()
+                }
+            ),
+            Ok(DecodedOutput::LinearRgb(roi_linear))
+        );
+        assert_eq!(
+            Decoder::new()
+                .memory_limit(1)
+                .decode_linear_rgb(&encoded_bytes),
+            Err(Error::Unsupported("memory limit exceeded"))
+        );
     }
 
     #[test]
@@ -8199,6 +8399,48 @@ mod tests {
         assert_eq!(scale_sample_to_u16(65_535, 16), 65_535);
         assert_eq!(scale_sample_to_u16(128, 8), 32_896);
         assert_eq!(scale_sample_to_u16(1, 1), 65_535);
+    }
+
+    #[test]
+    fn converts_srgb_samples_to_linear() {
+        assert_eq!(srgb_sample_to_linear(-1.0), 0.0);
+        assert_eq!(srgb_sample_to_linear(0.0), 0.0);
+        assert!((srgb_sample_to_linear(10.0 / 255.0) - 0.003_035_27).abs() < 1e-8);
+        assert!((srgb_sample_to_linear(128.0 / 255.0) - 0.215_860_53).abs() < 1e-8);
+        assert_eq!(srgb_sample_to_linear(1.0), 1.0);
+        assert_eq!(srgb_sample_to_linear(2.0), 1.0);
+    }
+
+    #[test]
+    fn linear_rgb_from_decoded_gray_expands_to_rgb() {
+        let channels = DecodedChannels {
+            width: 2,
+            height: 1,
+            color_channels: 1,
+            alpha: None,
+            bit_depth: 8,
+            channels: vec![DecodedChannel {
+                width: 2,
+                height: 1,
+                hshift: 0,
+                vshift: 0,
+                bit_depth: 8,
+                samples: ChannelData::U8(vec![0, 255]),
+            }],
+        };
+        let color_encoding = ColorEncoding {
+            color_space: ColorSpace::Gray,
+            ..ColorEncoding::default()
+        };
+
+        assert_eq!(
+            linear_rgb_from_decoded_channels(&channels, &color_encoding, 1).unwrap(),
+            LinearRgbImage {
+                width: 2,
+                height: 1,
+                pixels: vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            }
+        );
     }
 
     #[test]
