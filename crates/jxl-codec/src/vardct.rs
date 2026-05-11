@@ -21,6 +21,8 @@ use crate::modular::{
 use crate::transform::CustomTransformData;
 use std::ops::Range;
 
+const NUM_QUANT_TABLES: usize = 17;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VarDctFrameMetadata {
     pub width: u32,
@@ -978,6 +980,9 @@ pub struct VarDctPassGroupPayloadMetadata {
     pub section: VarDctSectionPayloadMetadata,
     pub pass: usize,
     pub group: VarDctGroupMetadata,
+    pub modular_ac_stream_id: usize,
+    pub modular_ac_min_shift: i32,
+    pub modular_ac_max_shift: i32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2546,10 +2551,19 @@ pub fn read_vardct_decode_plan(
         .ac_group_sections
         .iter()
         .map(|section| {
+            let (modular_ac_min_shift, modular_ac_max_shift) =
+                frame_header.passes.downsampling_bracket(section.pass)?;
             Ok(VarDctPassGroupPayloadMetadata {
                 section: section_payload_metadata(codestream, frame_data, &section.section)?,
                 pass: section.pass,
                 group: section.group,
+                modular_ac_stream_id: 1
+                    + 3 * frame.dc_groups.len()
+                    + NUM_QUANT_TABLES
+                    + frame.ac_groups.len() * section.pass
+                    + section.group.group,
+                modular_ac_min_shift,
+                modular_ac_max_shift,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -7704,6 +7718,9 @@ mod tests {
                 },
                 pass: 0,
                 group,
+                modular_ac_stream_id: 0,
+                modular_ac_min_shift: 0,
+                modular_ac_max_shift: 2,
             },
             cursor: VarDctAcGroupCursorMetadata {
                 payload_start_bits: 0,

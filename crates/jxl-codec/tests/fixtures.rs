@@ -512,9 +512,18 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(plan.ac_group_payloads[0].section.payload_range, 3843..8335);
     assert_eq!(plan.ac_group_payloads[0].pass, 0);
     assert_eq!(plan.ac_group_payloads[0].group.group, 0);
+    assert_eq!(plan.ac_group_payloads[0].modular_ac_stream_id, 21);
+    assert_eq!(
+        (
+            plan.ac_group_payloads[0].modular_ac_min_shift,
+            plan.ac_group_payloads[0].modular_ac_max_shift
+        ),
+        (0, 2)
+    );
     assert_eq!(plan.ac_group_payloads[1].section.payload_range, 8335..9359);
     assert_eq!(plan.ac_group_payloads[1].pass, 0);
     assert_eq!(plan.ac_group_payloads[1].group.group, 1);
+    assert_eq!(plan.ac_group_payloads[1].modular_ac_stream_id, 22);
     assert_eq!(plan.ac_group_metadata.len(), plan.ac_group_payloads.len());
     assert_eq!(
         plan.ac_group_metadata
@@ -2589,16 +2598,19 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
             .map(|payload| (
                 payload.pass,
                 payload.group.group,
+                payload.modular_ac_stream_id,
+                payload.modular_ac_min_shift,
+                payload.modular_ac_max_shift,
                 payload.section.payload_range.clone()
             ))
             .collect::<Vec<_>>(),
         vec![
-            (0, 0, 4130..5624),
-            (0, 1, 5624..5988),
-            (1, 0, 5988..7036),
-            (1, 1, 7036..7272),
-            (2, 0, 7272..9518),
-            (2, 1, 9518..10018),
+            (0, 0, 21, 2, 2, 4130..5624),
+            (0, 1, 22, 2, 2, 5624..5988),
+            (1, 0, 23, 1, 1, 5988..7036),
+            (1, 1, 24, 1, 1, 7036..7272),
+            (2, 0, 25, 0, 0, 7272..9518),
+            (2, 1, 26, 0, 0, 9518..10018),
         ]
     );
     assert_eq!(plan.ac_group_metadata.len(), plan.ac_group_payloads.len());
