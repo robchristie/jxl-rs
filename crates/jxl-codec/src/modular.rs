@@ -2543,21 +2543,10 @@ fn plan_modular_region(plan: &ModularDecodePlan, rect: ImageRect) -> Result<Modu
     }
 
     let channel_regions = modular_region_channel_rects(&plan.channel_plan, decode_rect)?;
-    if plan
-        .channel_plan
-        .channels
+    if channel_regions
         .iter()
-        .zip(&channel_regions)
         .skip(plan.channel_plan.nb_meta_channels)
-        .any(|(channel, region)| {
-            (!has_squeeze
-                && (channel.hshift != 0
-                    || channel.vshift != 0
-                    || channel.width != plan.channel_plan.width
-                    || channel.height != plan.channel_plan.height))
-                || region.width == 0
-                || region.height == 0
-        })
+        .any(|region| region.width == 0 || region.height == 0)
     {
         return Err(Error::Unsupported(
             "modular region assembly with shifted channels",
@@ -5015,33 +5004,37 @@ mod tests {
     }
 
     #[test]
-    fn rejects_modular_region_with_shifted_channels() {
+    fn assembles_modular_region_with_shifted_channels() {
         let mut plan = region_test_plan(8, 4, 1);
+        plan.channel_plan.channels[0].width = 4;
         plan.channel_plan.channels[0].hshift = 1;
         let residuals = ModularResiduals {
             global: None,
             groups: Vec::new(),
         };
 
-        assert_eq!(
-            assemble_test_region(&plan, &residuals, image_rect(0, 0, 4, 4)),
-            Err(Error::Unsupported(
-                "modular region assembly with shifted channels"
-            ))
-        );
+        let image = assemble_test_region(&plan, &residuals, image_rect(0, 0, 4, 4)).unwrap();
+
+        assert_eq!(image.width, 4);
+        assert_eq!(image.height, 4);
+        assert_eq!(image.channels.len(), 1);
+        assert_eq!(image.channels[0].width, 2);
+        assert_eq!(image.channels[0].height, 4);
+        assert_eq!(image.channels[0].samples, vec![0; 8]);
     }
 
     #[test]
-    fn classifies_shifted_modular_region_plan_failure() {
+    fn plans_modular_region_with_shifted_channels() {
         let mut plan = region_test_plan(8, 4, 1);
+        plan.channel_plan.channels[0].width = 4;
         plan.channel_plan.channels[0].hshift = 1;
 
-        assert_eq!(
-            plan_modular_region(&plan, image_rect(0, 0, 4, 4)),
-            Err(Error::Unsupported(
-                "modular region assembly with shifted channels"
-            ))
-        );
+        let region_plan = plan_modular_region(&plan, image_rect(0, 0, 4, 4)).unwrap();
+
+        assert_eq!(region_plan.requested_rect, image_rect(0, 0, 4, 4));
+        assert_eq!(region_plan.decode_rect, image_rect(0, 0, 4, 4));
+        assert_eq!(region_plan.channel_rects, vec![image_rect(0, 0, 2, 4)]);
+        assert!(!region_plan.has_squeeze);
     }
 
     #[test]

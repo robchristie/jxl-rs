@@ -508,6 +508,14 @@ fn decode_buffered(
     }
     reject_vardct_pass_for_non_vardct(vardct_pass)?;
 
+    if let Some(region) = config.region
+        && raw_alpha_channel_index(&codestream.metadata)?.is_some()
+    {
+        let (_, full_codestream) = jxl_codec::parse_file(input)?;
+        let image = decode_buffered_codestream(full_codestream, None)?;
+        return crop_decoded_image(image, region);
+    }
+
     decode_buffered_codestream(codestream, config.region)
 }
 
@@ -624,6 +632,15 @@ fn decode_rgba8_buffered(
             };
         }
         reject_vardct_alpha_output(&codestream.metadata)?;
+        if codestream.metadata.num_color_channels() == 1 {
+            let channels =
+                decode_vardct_channels_codestream(&codestream, config.region, vardct_pass)?;
+            return rgba8_from_decoded_channels_with_transform_data(
+                &channels,
+                alpha_channel_index,
+                Some(&codestream.transform_data),
+            );
+        }
         let orientation = codestream.metadata.orientation;
         let image = rgba8_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
             &codestream,
@@ -633,6 +650,14 @@ fn decode_rgba8_buffered(
         return orient_rgba8(image, orientation);
     }
     reject_vardct_pass_for_non_vardct(vardct_pass)?;
+
+    if let Some(region) = config.region
+        && raw_alpha_channel_index(&codestream.metadata)?.is_some()
+    {
+        let (_, full_codestream) = jxl_codec::parse_file(input)?;
+        let image = rgba8_from_modular_codestream(full_codestream, None)?;
+        return crop_rgba8_image(image, region);
+    }
 
     rgba8_from_modular_codestream(codestream, config.region)
 }
@@ -1024,6 +1049,9 @@ fn vardct_extra_channels_from_ac(
         .as_ref()
         .ok_or(Error::Unsupported("image has no decoded frame"))?;
     let color_channels = codestream.metadata.num_color_channels() as usize;
+    // VarDCT modular side streams are indexed after the three internal color planes,
+    // even when the public image color space is grayscale.
+    let vardct_modular_extra_base = 3usize;
     let channel_bit_depths = decoded_channel_bit_depths(&codestream.metadata, color_channels)?;
     let mut planes = codestream
         .metadata
@@ -1058,10 +1086,10 @@ fn vardct_extra_channels_from_ac(
     let mut saw_extra_channel = vec![false; planes.len()];
     if let Some(group) = &plan.modular_global {
         for channel in &group.channels {
-            if channel.channel_index < color_channels {
+            if channel.channel_index < vardct_modular_extra_base {
                 continue;
             }
-            let extra_index = channel.channel_index - color_channels;
+            let extra_index = channel.channel_index - vardct_modular_extra_base;
             let Some(plane) = planes.get_mut(extra_index) else {
                 return Err(Error::InvalidCodestream(
                     "decoded VarDCT extra channel index is out of range",
@@ -1092,10 +1120,10 @@ fn vardct_extra_channels_from_ac(
             continue;
         };
         for channel in &group.channels {
-            if channel.channel_index < color_channels {
+            if channel.channel_index < vardct_modular_extra_base {
                 continue;
             }
-            let extra_index = channel.channel_index - color_channels;
+            let extra_index = channel.channel_index - vardct_modular_extra_base;
             let Some(plane) = planes.get_mut(extra_index) else {
                 return Err(Error::InvalidCodestream(
                     "decoded VarDCT extra channel index is out of range",
@@ -1245,6 +1273,15 @@ fn decode_rgba16_buffered(
             };
         }
         reject_vardct_alpha_output(&codestream.metadata)?;
+        if codestream.metadata.num_color_channels() == 1 {
+            let channels =
+                decode_vardct_channels_codestream_rgb16(&codestream, config.region, vardct_pass)?;
+            return rgba16_from_decoded_channels_with_transform_data(
+                &channels,
+                alpha_channel_index,
+                Some(&codestream.transform_data),
+            );
+        }
         let orientation = codestream.metadata.orientation;
         let image = rgba16_from_vardct_srgb16(vardct_srgb16_image_from_codestream(
             &codestream,
@@ -1254,6 +1291,14 @@ fn decode_rgba16_buffered(
         return orient_rgba16(image, orientation);
     }
     reject_vardct_pass_for_non_vardct(vardct_pass)?;
+
+    if let Some(region) = config.region
+        && raw_alpha_channel_index(&codestream.metadata)?.is_some()
+    {
+        let (_, full_codestream) = jxl_codec::parse_file(input)?;
+        let image = rgba16_from_modular_codestream(full_codestream, None)?;
+        return crop_rgba16_image(image, region);
+    }
 
     rgba16_from_modular_codestream(codestream, config.region)
 }
@@ -2899,6 +2944,60 @@ mod tests {
     }
 
     #[test]
+    fn decoded_channel_orientation_preserves_shifted_extra_channel_geometry() {
+        let channels = DecodedChannels {
+            width: 5,
+            height: 3,
+            color_channels: 1,
+            alpha: None,
+            bit_depth: 8,
+            channels: vec![
+                decoded_u8_channel(5, 3, &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]),
+                DecodedChannel {
+                    width: 3,
+                    height: 2,
+                    hshift: 1,
+                    vshift: 1,
+                    bit_depth: 8,
+                    samples: ChannelData::U8(vec![10, 11, 12, 13, 14, 15]),
+                },
+            ],
+        };
+
+        let oriented = orient_decoded_channels(channels, Orientation::Rotate90Cw).unwrap();
+        assert_eq!(oriented.width, 3);
+        assert_eq!(oriented.height, 5);
+        assert_eq!(oriented.color_channels, 1);
+        assert_eq!(oriented.alpha, None);
+        assert_eq!(oriented.bit_depth, 8);
+        assert_eq!(oriented.channels.len(), 2);
+
+        let color = &oriented.channels[0];
+        assert_eq!(color.width, 3);
+        assert_eq!(color.height, 5);
+        assert_eq!(color.hshift, 0);
+        assert_eq!(color.vshift, 0);
+        let ChannelData::U8(color_samples) = &color.samples else {
+            panic!("expected oriented color channel to stay 8-bit");
+        };
+        assert_eq!(
+            color_samples,
+            &[10, 5, 0, 11, 6, 1, 12, 7, 2, 13, 8, 3, 14, 9, 4]
+        );
+
+        let extra = &oriented.channels[1];
+        assert_eq!(extra.width, 2);
+        assert_eq!(extra.height, 3);
+        assert_eq!(extra.hshift, 1);
+        assert_eq!(extra.vshift, 1);
+        assert_eq!(extra.bit_depth, 8);
+        let ChannelData::U8(extra_samples) = &extra.samples else {
+            panic!("expected oriented extra channel to stay 8-bit");
+        };
+        assert_eq!(extra_samples, &[13, 10, 14, 11, 15, 12]);
+    }
+
+    #[test]
     fn decode_channels_roi_supports_palette_modular_fixture() {
         let bytes = std::fs::read(workspace_path(
             "reference/libjxl/testdata/jxl/pq_gradient.jxl",
@@ -4363,6 +4462,557 @@ mod tests {
     }
 
     #[test]
+    fn decode_channels_exposes_generated_gray_var_dct_alpha_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!(
+                "skipping grayscale VarDCT alpha raw-channel decode; reference cjxl is not built"
+            );
+            return;
+        };
+
+        let input = unique_temp_path("jxl-gray-vardct-alpha-source", "pam");
+        let encoded = unique_temp_path("jxl-gray-vardct-alpha", "jxl");
+        let source = write_gray_alpha_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let reference = reference_djxl().map(|djxl| {
+            let output = unique_temp_path("jxl-gray-vardct-alpha-reference", "pam");
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed: {}",
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+
+            let reference = std::fs::read(&output).unwrap();
+            let _ = std::fs::remove_file(&output);
+            parse_pam_gray_alpha(&reference)
+        });
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert!(info.first_frame_vardct.is_some());
+        assert_eq!(info.metadata.color_encoding.color_space, ColorSpace::Gray);
+        assert_eq!(info.metadata.num_color_channels(), 1);
+        assert_eq!(
+            raw_alpha_info(&info.metadata).unwrap(),
+            Some(AlphaInfo {
+                bit_depth: 8,
+                premultiplied: false,
+            })
+        );
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, source.width);
+        assert_eq!(channels.height, source.height);
+        assert_eq!(channels.color_channels, 1);
+        assert_eq!(
+            channels.alpha,
+            Some(AlphaInfo {
+                bit_depth: 8,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(channels.bit_depth, 8);
+        assert_eq!(channels.channels.len(), 2);
+        for channel in &channels.channels {
+            assert_eq!(channel.width, source.width);
+            assert_eq!(channel.height, source.height);
+            assert_eq!(channel.hshift, 0);
+            assert_eq!(channel.vshift, 0);
+            assert_eq!(channel.bit_depth, 8);
+        }
+        let ChannelData::U8(gray) = &channels.channels[0].samples else {
+            panic!("expected 8-bit grayscale VarDCT color channel");
+        };
+        let ChannelData::U8(alpha) = &channels.channels[1].samples else {
+            panic!("expected 8-bit grayscale VarDCT alpha channel");
+        };
+        assert_eq!(alpha, &source.alpha);
+
+        if let Some(reference) = &reference {
+            let reference_gray = PgmGray {
+                width: reference.width,
+                height: reference.height,
+                samples: reference.gray.iter().copied().map(u16::from).collect(),
+            };
+            let metrics = gray8_samples_oracle_metrics(
+                gray,
+                channels.width,
+                channels.height,
+                &reference_gray,
+                &[0, gray.len() / 2, gray.len() - 1],
+            );
+            assert_eq!(
+                metrics,
+                Srgb8OracleMetrics {
+                    max_abs_error: 255,
+                    sum_abs_error: 42_617,
+                    checksum: 16_107_006_911_524_474_586,
+                    anchors: vec![100, 255, 177],
+                    reference_anchors: vec![3, 0, 249],
+                }
+            );
+            assert_eq!(alpha, &reference.alpha);
+        } else {
+            eprintln!("skipping grayscale VarDCT alpha djxl comparison; tool is not built");
+        }
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, source.width);
+        assert_eq!(decoded.height, source.height);
+        assert_eq!(decoded.color_channels, 1);
+        assert_eq!(decoded.alpha, channels.alpha);
+        assert_decoded_channels_match_image(&channels, &decoded);
+        let PixelData::U8(decoded_pixels) = &decoded.pixels else {
+            panic!("expected 8-bit grayscale-alpha VarDCT image");
+        };
+        assert_eq!(decoded_pixels.len(), source.gray_alpha.len());
+        assert_eq!(
+            decoded_pixels
+                .chunks_exact(2)
+                .map(|pixel| pixel[1])
+                .collect::<Vec<_>>(),
+            source.alpha
+        );
+
+        let roi = Rect {
+            x: 5,
+            y: 3,
+            width: 19,
+            height: 11,
+        };
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_channels(&roi_channels, &channels, roi);
+        let roi_decoded = Decoder::new().roi(roi).decode(&encoded_bytes).unwrap();
+        assert_roi_matches_full_image(&roi_decoded, &decoded, roi);
+
+        let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba8.width, source.width);
+        assert_eq!(rgba8.height, source.height);
+        for ((pixel, &gray), &alpha) in rgba8.pixels.chunks_exact(4).zip(gray).zip(&source.alpha) {
+            assert_eq!(pixel, &[gray, gray, gray, alpha]);
+        }
+        let roi_rgba8 = Decoder::new()
+            .roi(roi)
+            .decode_rgba8(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_rgba8(&roi_rgba8, &rgba8, roi);
+
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        assert_eq!(rgba16.width, source.width);
+        assert_eq!(rgba16.height, source.height);
+        for (pixel, &alpha) in rgba16.pixels.chunks_exact(4).zip(&source.alpha) {
+            assert_eq!(pixel[0], pixel[1]);
+            assert_eq!(pixel[1], pixel[2]);
+            assert_eq!(pixel[3], u16::from(alpha) * 257);
+        }
+        let roi_rgba16 = Decoder::new()
+            .roi(roi)
+            .decode_rgba16(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_rgba16(&roi_rgba16, &rgba16, roi);
+
+        let pass0_channels = Decoder::new()
+            .vardct_pass(0)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_eq!(pass0_channels.color_channels, 1);
+        assert_eq!(pass0_channels.alpha, channels.alpha);
+        let ChannelData::U8(pass0_alpha) = &pass0_channels.channels[1].samples else {
+            panic!("expected 8-bit grayscale VarDCT pass alpha channel");
+        };
+        assert_eq!(pass0_alpha, &source.alpha);
+    }
+
+    #[test]
+    fn decode_outputs_generated_gray_var_dct_alpha16_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping grayscale VarDCT alpha16 decode; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-gray-vardct-alpha16-source", "pam");
+        let encoded = unique_temp_path("jxl-gray-vardct-alpha16", "jxl");
+        let source = write_gray_alpha_source_pam16(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let reference = reference_djxl().map(|djxl| {
+            let output = unique_temp_path("jxl-gray-vardct-alpha16-reference", "pam");
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed: {}",
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+
+            let reference = std::fs::read(&output).unwrap();
+            let _ = std::fs::remove_file(&output);
+            parse_pam_gray_alpha16(&reference)
+        });
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert!(info.first_frame_vardct.is_some());
+        assert_eq!(info.metadata.color_encoding.color_space, ColorSpace::Gray);
+        assert_eq!(info.metadata.num_color_channels(), 1);
+        assert_eq!(
+            raw_alpha_info(&info.metadata).unwrap(),
+            Some(AlphaInfo {
+                bit_depth: 16,
+                premultiplied: false,
+            })
+        );
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, source.width);
+        assert_eq!(channels.height, source.height);
+        assert_eq!(channels.color_channels, 1);
+        assert_eq!(
+            channels.alpha,
+            Some(AlphaInfo {
+                bit_depth: 16,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(channels.bit_depth, 8);
+        assert_eq!(channels.channels.len(), 2);
+        let gray_channel = &channels.channels[0];
+        assert_eq!(gray_channel.width, source.width);
+        assert_eq!(gray_channel.height, source.height);
+        assert_eq!(gray_channel.hshift, 0);
+        assert_eq!(gray_channel.vshift, 0);
+        assert_eq!(gray_channel.bit_depth, 8);
+        let alpha_channel = &channels.channels[1];
+        assert_eq!(alpha_channel.width, source.width);
+        assert_eq!(alpha_channel.height, source.height);
+        assert_eq!(alpha_channel.hshift, 0);
+        assert_eq!(alpha_channel.vshift, 0);
+        assert_eq!(alpha_channel.bit_depth, 16);
+        let ChannelData::U8(gray) = &gray_channel.samples else {
+            panic!("expected 8-bit grayscale VarDCT color channel");
+        };
+        let ChannelData::U16(alpha) = &alpha_channel.samples else {
+            panic!("expected 16-bit grayscale VarDCT alpha channel");
+        };
+        assert_eq!(alpha, &source.alpha);
+
+        if let Some(reference) = &reference {
+            let scaled_reference_gray = PgmGray {
+                width: reference.width,
+                height: reference.height,
+                samples: reference
+                    .gray
+                    .iter()
+                    .map(|&sample| ((u32::from(sample) * 255 + 32_767) / 65_535) as u16)
+                    .collect(),
+            };
+            let metrics = gray8_samples_oracle_metrics(
+                gray,
+                channels.width,
+                channels.height,
+                &scaled_reference_gray,
+                &[0, gray.len() / 2, gray.len() - 1],
+            );
+            assert_eq!(
+                metrics,
+                Srgb8OracleMetrics {
+                    max_abs_error: 255,
+                    sum_abs_error: 36_224,
+                    checksum: 5_450_027_092_381_118_560,
+                    anchors: vec![53, 57, 131],
+                    reference_anchors: vec![0, 197, 137],
+                }
+            );
+            assert_eq!(alpha, &reference.alpha);
+        } else {
+            eprintln!("skipping grayscale VarDCT alpha16 djxl comparison; tool is not built");
+        }
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, source.width);
+        assert_eq!(decoded.height, source.height);
+        assert_eq!(decoded.color_channels, 1);
+        assert_eq!(decoded.alpha, channels.alpha);
+        assert_eq!(decoded.bit_depth, 16);
+        let PixelData::U16(decoded_pixels) = &decoded.pixels else {
+            panic!("expected 16-bit grayscale-alpha VarDCT image");
+        };
+        assert_eq!(decoded_pixels.len(), source.gray_alpha.len());
+        assert_eq!(
+            decoded_pixels
+                .chunks_exact(2)
+                .map(|pixel| pixel[1])
+                .collect::<Vec<_>>(),
+            source.alpha
+        );
+
+        let roi = Rect {
+            x: 4,
+            y: 2,
+            width: 17,
+            height: 9,
+        };
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_channels(&roi_channels, &channels, roi);
+        let roi_decoded = Decoder::new().roi(roi).decode(&encoded_bytes).unwrap();
+        assert_roi_matches_full_image(&roi_decoded, &decoded, roi);
+
+        let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba8.width, source.width);
+        assert_eq!(rgba8.height, source.height);
+        assert_eq!(
+            rgba8
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>(),
+            source
+                .alpha
+                .iter()
+                .map(|&alpha| ((u32::from(alpha) * 255 + 32_767) / 65_535) as u8)
+                .collect::<Vec<_>>()
+        );
+        for pixel in rgba8.pixels.chunks_exact(4) {
+            assert_eq!(pixel[0], pixel[1]);
+            assert_eq!(pixel[1], pixel[2]);
+        }
+        let roi_rgba8 = Decoder::new()
+            .roi(roi)
+            .decode_rgba8(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_rgba8(&roi_rgba8, &rgba8, roi);
+
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        assert_eq!(rgba16.width, source.width);
+        assert_eq!(rgba16.height, source.height);
+        for (pixel, &alpha) in rgba16.pixels.chunks_exact(4).zip(&source.alpha) {
+            assert_eq!(pixel[0], pixel[1]);
+            assert_eq!(pixel[1], pixel[2]);
+            assert_eq!(pixel[3], alpha);
+        }
+        let roi_rgba16 = Decoder::new()
+            .roi(roi)
+            .decode_rgba16(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_rgba16(&roi_rgba16, &rgba16, roi);
+    }
+
+    #[test]
+    fn decode_outputs_subsampled_gray_var_dct_alpha16_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!(
+                "skipping subsampled grayscale VarDCT alpha16 decode; reference cjxl is not built"
+            );
+            return;
+        };
+
+        let input = unique_temp_path("jxl-gray-vardct-alpha16-subsampled-source", "pam");
+        let encoded = unique_temp_path("jxl-gray-vardct-alpha16-subsampled", "jxl");
+        let source = write_gray_alpha_source_pam16(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args([
+                "-d",
+                "1.0",
+                "-m",
+                "0",
+                "--container=0",
+                "--ec_resampling",
+                "2",
+                "--quiet",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let reference = reference_djxl().map(|djxl| {
+            let output = unique_temp_path("jxl-gray-vardct-alpha16-subsampled-reference", "pam");
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed: {}",
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+
+            let reference = std::fs::read(&output).unwrap();
+            let _ = std::fs::remove_file(&output);
+            parse_pam_gray_alpha16(&reference)
+        });
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert!(info.first_frame_vardct.is_some());
+        assert_eq!(info.metadata.color_encoding.color_space, ColorSpace::Gray);
+        assert_eq!(info.metadata.num_color_channels(), 1);
+        assert_eq!(
+            raw_alpha_info(&info.metadata).unwrap(),
+            Some(AlphaInfo {
+                bit_depth: 16,
+                premultiplied: false,
+            })
+        );
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, source.width);
+        assert_eq!(channels.height, source.height);
+        assert_eq!(channels.color_channels, 1);
+        assert_eq!(
+            channels.alpha,
+            Some(AlphaInfo {
+                bit_depth: 16,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(channels.bit_depth, 8);
+        assert_eq!(channels.channels.len(), 2);
+        let gray_channel = &channels.channels[0];
+        assert_eq!(gray_channel.width, source.width);
+        assert_eq!(gray_channel.height, source.height);
+        assert_eq!(gray_channel.hshift, 0);
+        assert_eq!(gray_channel.vshift, 0);
+        let alpha_channel = &channels.channels[1];
+        assert_eq!(alpha_channel.width, source.width.div_ceil(2));
+        assert_eq!(alpha_channel.height, source.height.div_ceil(2));
+        assert_eq!(alpha_channel.hshift, 1);
+        assert_eq!(alpha_channel.vshift, 1);
+        assert_eq!(alpha_channel.bit_depth, 16);
+        let ChannelData::U16(alpha) = &alpha_channel.samples else {
+            panic!("expected 16-bit subsampled grayscale VarDCT alpha channel");
+        };
+        assert_eq!(
+            alpha.len(),
+            alpha_channel.width as usize * alpha_channel.height as usize
+        );
+        assert_eq!(alpha.iter().copied().min(), Some(2_115));
+        assert_eq!(alpha.iter().copied().max(), Some(64_239));
+        let alpha_checksum = alpha
+            .iter()
+            .enumerate()
+            .fold(0u64, |checksum, (index, sample)| {
+                checksum
+                    .wrapping_mul(1_099_511_628_211)
+                    .wrapping_add(index as u64)
+                    .rotate_left(11)
+                    ^ u64::from(*sample)
+            });
+        assert_eq!(alpha_checksum, 16_058_973_670_731_747_394);
+
+        let roi = Rect {
+            x: 4,
+            y: 2,
+            width: 17,
+            height: 9,
+        };
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_eq!(roi_channels.width, roi.width);
+        assert_eq!(roi_channels.height, roi.height);
+        let roi_alpha_channel = &roi_channels.channels[1];
+        assert_eq!(roi_alpha_channel.width, 9);
+        assert_eq!(roi_alpha_channel.height, 5);
+        assert_eq!(roi_alpha_channel.hshift, 1);
+        assert_eq!(roi_alpha_channel.vshift, 1);
+        let ChannelData::U16(roi_alpha) = &roi_alpha_channel.samples else {
+            panic!("expected 16-bit subsampled grayscale VarDCT ROI alpha channel");
+        };
+        let shifted_roi = Rect {
+            x: 2,
+            y: 1,
+            width: 9,
+            height: 5,
+        };
+        assert_eq!(
+            roi_alpha,
+            &window_u16(alpha, alpha_channel.width, shifted_roi)
+        );
+
+        if let Some(reference) = &reference {
+            let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+            let rgba16_alpha = rgba16
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha16_matches_reference(&rgba16_alpha, &reference.alpha);
+
+            let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+            let rgba8_alpha = rgba8
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            let reference_alpha8 = reference
+                .alpha
+                .iter()
+                .map(|&alpha| ((u32::from(alpha) * 255 + 32_767) / 65_535) as u8)
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(&rgba8_alpha, &reference_alpha8);
+        } else {
+            eprintln!(
+                "skipping subsampled grayscale VarDCT alpha16 djxl comparison; tool is not built"
+            );
+        }
+    }
+
+    #[test]
     fn decode_channels_exposes_subsampled_var_dct_alpha_when_available() {
         let Some(cjxl) = reference_cjxl() else {
             eprintln!(
@@ -5046,6 +5696,244 @@ mod tests {
     }
 
     #[test]
+    fn decode_channels_exposes_generated_gray_var_dct_depth_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!(
+                "skipping grayscale VarDCT depth raw-channel decode; reference cjxl is not built"
+            );
+            return;
+        };
+
+        let input = unique_temp_path("jxl-gray-vardct-depth-source", "pam");
+        let encoded = unique_temp_path("jxl-gray-vardct-depth", "jxl");
+        let source = write_gray_depth_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert!(info.first_frame_vardct.is_some());
+        assert_eq!(info.metadata.color_encoding.color_space, ColorSpace::Gray);
+        assert_eq!(info.metadata.num_color_channels(), 1);
+        assert_eq!(info.metadata.extra_channels.len(), 1);
+        assert_eq!(
+            info.metadata.extra_channels[0].channel_type,
+            ExtraChannelType::Depth
+        );
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, source.width);
+        assert_eq!(channels.height, source.height);
+        assert_eq!(channels.color_channels, 1);
+        assert_eq!(channels.alpha, None);
+        assert_eq!(channels.bit_depth, 8);
+        assert_eq!(channels.channels.len(), 2);
+        let gray_channel = &channels.channels[0];
+        assert_eq!(gray_channel.width, source.width);
+        assert_eq!(gray_channel.height, source.height);
+        assert_eq!(gray_channel.hshift, 0);
+        assert_eq!(gray_channel.vshift, 0);
+        assert_eq!(gray_channel.bit_depth, 8);
+        let depth_channel = &channels.channels[1];
+        assert_eq!(depth_channel.width, source.width);
+        assert_eq!(depth_channel.height, source.height);
+        assert_eq!(depth_channel.hshift, 0);
+        assert_eq!(depth_channel.vshift, 0);
+        assert_eq!(depth_channel.bit_depth, 8);
+        let ChannelData::U8(depth) = &depth_channel.samples else {
+            panic!("expected 8-bit grayscale VarDCT depth channel");
+        };
+        assert_eq!(depth, &source.depth);
+
+        let roi = Rect {
+            x: 3,
+            y: 4,
+            width: 13,
+            height: 9,
+        };
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_channels(&roi_channels, &channels, roi);
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, source.width);
+        assert_eq!(decoded.height, source.height);
+        assert_eq!(decoded.color_channels, 1);
+        assert_eq!(decoded.alpha, None);
+        assert_eq!(decoded.bit_depth, 8);
+        let PixelData::U8(decoded_gray) = &decoded.pixels else {
+            panic!("expected 8-bit grayscale VarDCT decode");
+        };
+        let ChannelData::U8(channel_gray) = &gray_channel.samples else {
+            panic!("expected 8-bit grayscale VarDCT color channel");
+        };
+        assert_eq!(decoded_gray, channel_gray);
+        let roi_decoded = Decoder::new().roi(roi).decode(&encoded_bytes).unwrap();
+        assert_roi_matches_full_image(&roi_decoded, &decoded, roi);
+
+        let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba8.width, source.width);
+        assert_eq!(rgba8.height, source.height);
+        for (pixel, &gray) in rgba8.pixels.chunks_exact(4).zip(channel_gray) {
+            assert_eq!(pixel, &[gray, gray, gray, 255]);
+        }
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        assert_eq!(rgba16.width, source.width);
+        assert_eq!(rgba16.height, source.height);
+        for pixel in rgba16.pixels.chunks_exact(4) {
+            assert_eq!(pixel[0], pixel[1]);
+            assert_eq!(pixel[1], pixel[2]);
+            assert_eq!(pixel[3], u16::MAX);
+        }
+    }
+
+    #[test]
+    fn decode_channels_exposes_subsampled_gray_var_dct_depth_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!(
+                "skipping subsampled grayscale VarDCT depth raw-channel decode; reference cjxl is not built"
+            );
+            return;
+        };
+
+        let input = unique_temp_path("jxl-gray-vardct-depth-subsampled-source", "pam");
+        let encoded = unique_temp_path("jxl-gray-vardct-depth-subsampled", "jxl");
+        let source = write_gray_depth_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args([
+                "-d",
+                "1.0",
+                "-m",
+                "0",
+                "--container=0",
+                "--ec_resampling",
+                "2",
+                "--quiet",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert!(info.first_frame_vardct.is_some());
+        assert_eq!(info.metadata.color_encoding.color_space, ColorSpace::Gray);
+        assert_eq!(info.metadata.num_color_channels(), 1);
+        assert_eq!(info.metadata.extra_channels.len(), 1);
+        assert_eq!(
+            info.metadata.extra_channels[0].channel_type,
+            ExtraChannelType::Depth
+        );
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, source.width);
+        assert_eq!(channels.height, source.height);
+        assert_eq!(channels.color_channels, 1);
+        assert_eq!(channels.alpha, None);
+        assert_eq!(channels.bit_depth, 8);
+        assert_eq!(channels.channels.len(), 2);
+        let gray_channel = &channels.channels[0];
+        assert_eq!(gray_channel.width, source.width);
+        assert_eq!(gray_channel.height, source.height);
+        assert_eq!(gray_channel.hshift, 0);
+        assert_eq!(gray_channel.vshift, 0);
+        let depth_channel = &channels.channels[1];
+        assert_eq!(depth_channel.width, source.width.div_ceil(2));
+        assert_eq!(depth_channel.height, source.height.div_ceil(2));
+        assert_eq!(depth_channel.hshift, 1);
+        assert_eq!(depth_channel.vshift, 1);
+        assert_eq!(depth_channel.bit_depth, 8);
+        let ChannelData::U8(depth) = &depth_channel.samples else {
+            panic!("expected 8-bit subsampled grayscale VarDCT depth channel");
+        };
+        assert_eq!(
+            depth.len(),
+            depth_channel.width as usize * depth_channel.height as usize
+        );
+        assert_eq!(depth.iter().copied().min(), Some(28));
+        assert_eq!(depth.iter().copied().max(), Some(222));
+        let depth_checksum = depth
+            .iter()
+            .enumerate()
+            .fold(0u64, |checksum, (index, sample)| {
+                checksum
+                    .wrapping_mul(1_099_511_628_211)
+                    .wrapping_add(index as u64)
+                    .rotate_left(11)
+                    ^ u64::from(*sample)
+            });
+        assert_eq!(depth_checksum, 6_577_634_186_647_311_850);
+
+        let roi = Rect {
+            x: 3,
+            y: 4,
+            width: 13,
+            height: 9,
+        };
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_eq!(roi_channels.width, roi.width);
+        assert_eq!(roi_channels.height, roi.height);
+        assert_eq!(roi_channels.color_channels, channels.color_channels);
+        assert_eq!(roi_channels.alpha, None);
+        assert_eq!(roi_channels.channels.len(), channels.channels.len());
+        let roi_depth_channel = &roi_channels.channels[1];
+        assert_eq!(roi_depth_channel.width, 7);
+        assert_eq!(roi_depth_channel.height, 5);
+        assert_eq!(roi_depth_channel.hshift, 1);
+        assert_eq!(roi_depth_channel.vshift, 1);
+        let ChannelData::U8(roi_depth) = &roi_depth_channel.samples else {
+            panic!("expected 8-bit subsampled grayscale VarDCT ROI depth channel");
+        };
+        let shifted_roi = Rect {
+            x: 1,
+            y: 2,
+            width: 7,
+            height: 5,
+        };
+        assert_eq!(
+            roi_depth,
+            &window_u8(depth, depth_channel.width, shifted_roi)
+        );
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, source.width);
+        assert_eq!(decoded.height, source.height);
+        assert_eq!(decoded.color_channels, 1);
+        assert_eq!(decoded.alpha, None);
+
+        let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba8.width, source.width);
+        assert_eq!(rgba8.height, source.height);
+        assert!(rgba8.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
     fn decode_outputs_generated_var_dct_alpha_depth_when_available() {
         let Some(cjxl) = reference_cjxl() else {
             eprintln!("skipping VarDCT alpha+depth decode; reference cjxl is not built");
@@ -5697,6 +6585,705 @@ mod tests {
     }
 
     #[test]
+    fn decode_rgba8_upsamples_subsampled_modular_alpha_when_available() {
+        let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+            eprintln!(
+                "skipping subsampled modular alpha comparison; reference tools are not built"
+            );
+            return;
+        };
+
+        let input = unique_temp_path("jxl-rgba8-alpha-subsampled-source", "pam");
+        let encoded = unique_temp_path("jxl-rgba8-alpha-subsampled", "jxl");
+        let reference_output = unique_temp_path("jxl-rgba8-alpha-subsampled-reference", "pam");
+        write_alpha_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args([
+                "-d",
+                "0",
+                "-m",
+                "1",
+                "--container=0",
+                "--ec_resampling",
+                "2",
+                "--quiet",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let djxl_output = Command::new(&djxl)
+            .arg(&encoded)
+            .arg(&reference_output)
+            .arg("--quiet")
+            .output()
+            .unwrap();
+        assert!(
+            djxl_output.status.success(),
+            "reference djxl failed: {}",
+            String::from_utf8_lossy(&djxl_output.stderr)
+        );
+
+        let reference = std::fs::read(&reference_output).unwrap();
+        let reference = parse_pam_rgba(&reference);
+        let reference_alpha = reference
+            .samples
+            .chunks_exact(4)
+            .map(|pixel| pixel[3] as u8)
+            .collect::<Vec<_>>();
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let _ = std::fs::remove_file(&reference_output);
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, reference.width);
+        assert_eq!(channels.height, reference.height);
+        assert_eq!(channels.color_channels, 3);
+        assert_eq!(
+            channels.alpha,
+            Some(AlphaInfo {
+                bit_depth: 8,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(channels.channels.len(), 4);
+        let alpha_channel = &channels.channels[3];
+        assert_eq!(alpha_channel.width, reference.width.div_ceil(2));
+        assert_eq!(alpha_channel.height, reference.height.div_ceil(2));
+        assert_eq!(alpha_channel.hshift, 1);
+        assert_eq!(alpha_channel.vshift, 1);
+        assert_eq!(alpha_channel.bit_depth, 8);
+        let ChannelData::U8(alpha) = &alpha_channel.samples else {
+            panic!("expected 8-bit subsampled modular alpha channel");
+        };
+        assert_eq!(alpha.iter().copied().min(), Some(32));
+        assert_eq!(alpha.iter().copied().max(), Some(238));
+        let alpha_checksum = alpha
+            .iter()
+            .enumerate()
+            .fold(0u64, |checksum, (index, sample)| {
+                checksum
+                    .wrapping_mul(1_099_511_628_211)
+                    .wrapping_add(index as u64)
+                    .rotate_left(11)
+                    ^ u64::from(*sample)
+            });
+        assert_eq!(alpha_checksum, 6_357_654_557_809_416_742);
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, reference.width);
+        assert_eq!(decoded.height, reference.height);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.alpha, channels.alpha);
+        let PixelData::U8(decoded_pixels) = &decoded.pixels else {
+            panic!("expected 8-bit modular alpha decode");
+        };
+        let decoded_alpha = decoded_pixels
+            .chunks_exact(4)
+            .map(|pixel| pixel[3])
+            .collect::<Vec<_>>();
+        assert_alpha_matches_reference(&decoded_alpha, &reference_alpha);
+
+        let rgba = decode_rgba8(&encoded_bytes).unwrap();
+        let rgba_alpha = rgba
+            .pixels
+            .chunks_exact(4)
+            .map(|pixel| pixel[3])
+            .collect::<Vec<_>>();
+        assert_alpha_matches_reference(&rgba_alpha, &reference_alpha);
+
+        let roi = Rect {
+            x: 17,
+            y: 9,
+            width: 23,
+            height: 21,
+        };
+        let roi_rgba = Decoder::new()
+            .roi(roi)
+            .decode_rgba8(&encoded_bytes)
+            .unwrap();
+        let roi_alpha = roi_rgba
+            .pixels
+            .chunks_exact(4)
+            .map(|pixel| pixel[3])
+            .collect::<Vec<_>>();
+        assert_alpha_matches_reference(
+            &roi_alpha,
+            &window_u8(&reference_alpha, reference.width, roi),
+        );
+
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        let roi_alpha_channel = &roi_channels.channels[3];
+        assert_eq!(roi_alpha_channel.width, 12);
+        assert_eq!(roi_alpha_channel.height, 11);
+        assert_eq!(roi_alpha_channel.hshift, 1);
+        assert_eq!(roi_alpha_channel.vshift, 1);
+    }
+
+    #[test]
+    fn decode_rgba8_upsamples_wider_subsampled_modular_alpha_when_available() {
+        let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+            eprintln!(
+                "skipping wider subsampled modular alpha comparison; reference tools are not built"
+            );
+            return;
+        };
+
+        for (resampling, shift, expected_min, expected_max, expected_checksum) in [
+            (4u32, 2i32, 84u8, 169u8, 5_389_941_862_787_020_957u64),
+            (8u32, 3i32, 112u8, 148u8, 3_913_142_275_485_721_700u64),
+        ] {
+            let input = unique_temp_path("jxl-rgba8-alpha-wide-subsampled-source", "pam");
+            let encoded = unique_temp_path("jxl-rgba8-alpha-wide-subsampled", "jxl");
+            let reference_output =
+                unique_temp_path("jxl-rgba8-alpha-wide-subsampled-reference", "pam");
+            write_alpha_source_pam(&input);
+
+            let cjxl_output = Command::new(&cjxl)
+                .arg(&input)
+                .arg(&encoded)
+                .args([
+                    "-d",
+                    "0",
+                    "-m",
+                    "1",
+                    "--container=0",
+                    "--ec_resampling",
+                    &resampling.to_string(),
+                    "--quiet",
+                ])
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_file(&input);
+            assert!(
+                cjxl_output.status.success(),
+                "reference cjxl failed for resampling {resampling}: {}",
+                String::from_utf8_lossy(&cjxl_output.stderr)
+            );
+
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&reference_output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed for resampling {resampling}: {}",
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+
+            let reference = std::fs::read(&reference_output).unwrap();
+            let reference = parse_pam_rgba(&reference);
+            let reference_alpha = reference
+                .samples
+                .chunks_exact(4)
+                .map(|pixel| pixel[3] as u8)
+                .collect::<Vec<_>>();
+            let encoded_bytes = std::fs::read(&encoded).unwrap();
+            let _ = std::fs::remove_file(&encoded);
+            let _ = std::fs::remove_file(&reference_output);
+
+            let channels = decode_channels(&encoded_bytes).unwrap();
+            let alpha_channel = &channels.channels[3];
+            assert_eq!(alpha_channel.width, reference.width.div_ceil(resampling));
+            assert_eq!(alpha_channel.height, reference.height.div_ceil(resampling));
+            assert_eq!(alpha_channel.hshift, shift);
+            assert_eq!(alpha_channel.vshift, shift);
+            let ChannelData::U8(alpha) = &alpha_channel.samples else {
+                panic!("expected 8-bit wider subsampled modular alpha channel");
+            };
+            assert_eq!(alpha.iter().copied().min(), Some(expected_min));
+            assert_eq!(alpha.iter().copied().max(), Some(expected_max));
+            let alpha_checksum =
+                alpha
+                    .iter()
+                    .enumerate()
+                    .fold(0u64, |checksum, (index, sample)| {
+                        checksum
+                            .wrapping_mul(1_099_511_628_211)
+                            .wrapping_add(index as u64)
+                            .rotate_left(11)
+                            ^ u64::from(*sample)
+                    });
+            assert_eq!(alpha_checksum, expected_checksum);
+
+            let rgba = decode_rgba8(&encoded_bytes).unwrap();
+            let rgba_alpha = rgba
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(&rgba_alpha, &reference_alpha);
+
+            let roi = Rect {
+                x: 17,
+                y: 9,
+                width: 23,
+                height: 21,
+            };
+            let roi_rgba = Decoder::new()
+                .roi(roi)
+                .decode_rgba8(&encoded_bytes)
+                .unwrap();
+            let roi_alpha = roi_rgba
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(
+                &roi_alpha,
+                &window_u8(&reference_alpha, reference.width, roi),
+            );
+        }
+    }
+
+    #[test]
+    fn decode_rgba16_upsamples_subsampled_modular_alpha_when_available() {
+        let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+            eprintln!(
+                "skipping 16-bit subsampled modular alpha comparison; reference tools are not built"
+            );
+            return;
+        };
+
+        let input = unique_temp_path("jxl-rgba16-alpha-subsampled-source", "pam");
+        let encoded = unique_temp_path("jxl-rgba16-alpha-subsampled", "jxl");
+        let reference_output = unique_temp_path("jxl-rgba16-alpha-subsampled-reference", "pam");
+        let source = write_alpha_source_pam16(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args([
+                "-d",
+                "0",
+                "-m",
+                "1",
+                "--container=0",
+                "--ec_resampling",
+                "2",
+                "--quiet",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let djxl_output = Command::new(&djxl)
+            .arg(&encoded)
+            .arg(&reference_output)
+            .arg("--quiet")
+            .output()
+            .unwrap();
+        assert!(
+            djxl_output.status.success(),
+            "reference djxl failed: {}",
+            String::from_utf8_lossy(&djxl_output.stderr)
+        );
+
+        let reference = std::fs::read(&reference_output).unwrap();
+        let reference = parse_pam_rgba16(&reference);
+        assert_eq!(reference.width, source.width);
+        assert_eq!(reference.height, source.height);
+        assert_eq!(
+            source.alpha.len(),
+            source.width as usize * source.height as usize
+        );
+        let reference_alpha = reference
+            .samples
+            .chunks_exact(4)
+            .map(|pixel| pixel[3])
+            .collect::<Vec<_>>();
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let _ = std::fs::remove_file(&reference_output);
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, reference.width);
+        assert_eq!(channels.height, reference.height);
+        assert_eq!(channels.color_channels, 3);
+        assert_eq!(
+            channels.alpha,
+            Some(AlphaInfo {
+                bit_depth: 16,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(channels.channels.len(), 4);
+        let alpha_channel = &channels.channels[3];
+        assert_eq!(alpha_channel.width, reference.width.div_ceil(2));
+        assert_eq!(alpha_channel.height, reference.height.div_ceil(2));
+        assert_eq!(alpha_channel.hshift, 1);
+        assert_eq!(alpha_channel.vshift, 1);
+        assert_eq!(alpha_channel.bit_depth, 16);
+        let ChannelData::U16(alpha) = &alpha_channel.samples else {
+            panic!("expected 16-bit subsampled modular alpha channel");
+        };
+        assert_eq!(alpha.iter().copied().min(), Some(1_604));
+        assert_eq!(alpha.iter().copied().max(), Some(63_694));
+        let alpha_checksum = alpha
+            .iter()
+            .enumerate()
+            .fold(0u64, |checksum, (index, sample)| {
+                checksum
+                    .wrapping_mul(1_099_511_628_211)
+                    .wrapping_add(index as u64)
+                    .rotate_left(11)
+                    ^ u64::from(*sample)
+            });
+        assert_eq!(alpha_checksum, 8_116_986_388_688_171_143);
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, reference.width);
+        assert_eq!(decoded.height, reference.height);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.alpha, channels.alpha);
+        let PixelData::U16(decoded_pixels) = &decoded.pixels else {
+            panic!("expected 16-bit modular alpha decode");
+        };
+        let decoded_alpha = decoded_pixels
+            .chunks_exact(4)
+            .map(|pixel| pixel[3])
+            .collect::<Vec<_>>();
+        assert_alpha16_matches_reference(&decoded_alpha, &reference_alpha);
+
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        let rgba16_alpha = rgba16
+            .pixels
+            .chunks_exact(4)
+            .map(|pixel| pixel[3])
+            .collect::<Vec<_>>();
+        assert_alpha16_matches_reference(&rgba16_alpha, &reference_alpha);
+
+        let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+        let rgba8_alpha = rgba8
+            .pixels
+            .chunks_exact(4)
+            .map(|pixel| pixel[3])
+            .collect::<Vec<_>>();
+        let reference_alpha8 = reference_alpha
+            .iter()
+            .map(|&alpha| ((u32::from(alpha) * 255 + 32_767) / 65_535) as u8)
+            .collect::<Vec<_>>();
+        assert_alpha_matches_reference(&rgba8_alpha, &reference_alpha8);
+
+        let roi = Rect {
+            x: 5,
+            y: 4,
+            width: 11,
+            height: 9,
+        };
+        let roi_rgba16 = Decoder::new()
+            .roi(roi)
+            .decode_rgba16(&encoded_bytes)
+            .unwrap();
+        let roi_alpha = roi_rgba16
+            .pixels
+            .chunks_exact(4)
+            .map(|pixel| pixel[3])
+            .collect::<Vec<_>>();
+        assert_alpha16_matches_reference(
+            &roi_alpha,
+            &window_u16(&reference_alpha, reference.width, roi),
+        );
+    }
+
+    #[test]
+    fn decode_rgba16_upsamples_wider_subsampled_modular_alpha_when_available() {
+        let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+            eprintln!(
+                "skipping wider 16-bit subsampled modular alpha comparison; reference tools are not built"
+            );
+            return;
+        };
+
+        for (resampling, shift, expected_min, expected_max, expected_checksum) in [
+            (
+                4u32,
+                2i32,
+                6_105u16,
+                58_719u16,
+                5_635_816_994_059_519_416u64,
+            ),
+            (
+                8u32,
+                3i32,
+                17_477u16,
+                48_637u16,
+                11_909_690_253_215_219_231u64,
+            ),
+        ] {
+            let input = unique_temp_path("jxl-rgba16-alpha-wide-subsampled-source", "pam");
+            let encoded = unique_temp_path("jxl-rgba16-alpha-wide-subsampled", "jxl");
+            let reference_output =
+                unique_temp_path("jxl-rgba16-alpha-wide-subsampled-reference", "pam");
+            let source = write_alpha_source_pam16(&input);
+
+            let cjxl_output = Command::new(&cjxl)
+                .arg(&input)
+                .arg(&encoded)
+                .args([
+                    "-d",
+                    "0",
+                    "-m",
+                    "1",
+                    "--container=0",
+                    "--ec_resampling",
+                    &resampling.to_string(),
+                    "--quiet",
+                ])
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_file(&input);
+            assert!(
+                cjxl_output.status.success(),
+                "reference cjxl failed for 16-bit resampling {resampling}: {}",
+                String::from_utf8_lossy(&cjxl_output.stderr)
+            );
+
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&reference_output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed for 16-bit resampling {resampling}: {}",
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+
+            let reference = std::fs::read(&reference_output).unwrap();
+            let reference = parse_pam_rgba16(&reference);
+            assert_eq!(reference.width, source.width);
+            assert_eq!(reference.height, source.height);
+            let reference_alpha = reference
+                .samples
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            let encoded_bytes = std::fs::read(&encoded).unwrap();
+            let _ = std::fs::remove_file(&encoded);
+            let _ = std::fs::remove_file(&reference_output);
+
+            let channels = decode_channels(&encoded_bytes).unwrap();
+            let alpha_channel = &channels.channels[3];
+            assert_eq!(alpha_channel.width, reference.width.div_ceil(resampling));
+            assert_eq!(alpha_channel.height, reference.height.div_ceil(resampling));
+            assert_eq!(alpha_channel.hshift, shift);
+            assert_eq!(alpha_channel.vshift, shift);
+            assert_eq!(alpha_channel.bit_depth, 16);
+            let ChannelData::U16(alpha) = &alpha_channel.samples else {
+                panic!("expected 16-bit wider subsampled modular alpha channel");
+            };
+            assert_eq!(alpha.iter().copied().min(), Some(expected_min));
+            assert_eq!(alpha.iter().copied().max(), Some(expected_max));
+            let alpha_checksum =
+                alpha
+                    .iter()
+                    .enumerate()
+                    .fold(0u64, |checksum, (index, sample)| {
+                        checksum
+                            .wrapping_mul(1_099_511_628_211)
+                            .wrapping_add(index as u64)
+                            .rotate_left(11)
+                            ^ u64::from(*sample)
+                    });
+            assert_eq!(alpha_checksum, expected_checksum);
+
+            let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+            let rgba16_alpha = rgba16
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha16_matches_reference(&rgba16_alpha, &reference_alpha);
+
+            let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+            let rgba8_alpha = rgba8
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            let reference_alpha8 = reference_alpha
+                .iter()
+                .map(|&alpha| ((u32::from(alpha) * 255 + 32_767) / 65_535) as u8)
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(&rgba8_alpha, &reference_alpha8);
+
+            let roi = Rect {
+                x: 5,
+                y: 4,
+                width: 11,
+                height: 9,
+            };
+            let roi_rgba16 = Decoder::new()
+                .roi(roi)
+                .decode_rgba16(&encoded_bytes)
+                .unwrap();
+            let roi_alpha = roi_rgba16
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha16_matches_reference(
+                &roi_alpha,
+                &window_u16(&reference_alpha, reference.width, roi),
+            );
+        }
+    }
+
+    #[test]
+    fn decode_channels_exposes_subsampled_modular_depth_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!(
+                "skipping subsampled modular depth raw-channel decode; reference cjxl is not built"
+            );
+            return;
+        };
+
+        let input = unique_temp_path("jxl-gray-modular-depth-subsampled-source", "pam");
+        let encoded = unique_temp_path("jxl-gray-modular-depth-subsampled", "jxl");
+        let source = write_gray_depth_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args([
+                "-d",
+                "0",
+                "-m",
+                "1",
+                "--container=0",
+                "--ec_resampling",
+                "2",
+                "--quiet",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert_eq!(info.metadata.color_encoding.color_space, ColorSpace::Gray);
+        assert_eq!(info.metadata.num_color_channels(), 1);
+        assert_eq!(info.metadata.extra_channels.len(), 1);
+        assert_eq!(
+            info.metadata.extra_channels[0].channel_type,
+            ExtraChannelType::Depth
+        );
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, source.width);
+        assert_eq!(channels.height, source.height);
+        assert_eq!(channels.color_channels, 1);
+        assert_eq!(channels.alpha, None);
+        assert_eq!(channels.bit_depth, 8);
+        assert_eq!(channels.channels.len(), 2);
+        let gray_channel = &channels.channels[0];
+        assert_eq!(gray_channel.width, source.width);
+        assert_eq!(gray_channel.height, source.height);
+        assert_eq!(gray_channel.hshift, 0);
+        assert_eq!(gray_channel.vshift, 0);
+        let depth_channel = &channels.channels[1];
+        assert_eq!(depth_channel.width, source.width.div_ceil(2));
+        assert_eq!(depth_channel.height, source.height.div_ceil(2));
+        assert_eq!(depth_channel.hshift, 1);
+        assert_eq!(depth_channel.vshift, 1);
+        assert_eq!(depth_channel.bit_depth, 8);
+        let ChannelData::U8(depth) = &depth_channel.samples else {
+            panic!("expected 8-bit subsampled modular depth channel");
+        };
+        assert_eq!(depth.iter().copied().min(), Some(28));
+        assert_eq!(depth.iter().copied().max(), Some(222));
+        let depth_checksum = depth
+            .iter()
+            .enumerate()
+            .fold(0u64, |checksum, (index, sample)| {
+                checksum
+                    .wrapping_mul(1_099_511_628_211)
+                    .wrapping_add(index as u64)
+                    .rotate_left(11)
+                    ^ u64::from(*sample)
+            });
+        assert_eq!(depth_checksum, 6_577_634_186_647_311_850);
+
+        let roi = Rect {
+            x: 3,
+            y: 4,
+            width: 13,
+            height: 9,
+        };
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_eq!(roi_channels.width, roi.width);
+        assert_eq!(roi_channels.height, roi.height);
+        assert_eq!(roi_channels.color_channels, channels.color_channels);
+        assert_eq!(roi_channels.alpha, None);
+        assert_eq!(roi_channels.channels.len(), channels.channels.len());
+        let roi_depth_channel = &roi_channels.channels[1];
+        assert_eq!(roi_depth_channel.width, 7);
+        assert_eq!(roi_depth_channel.height, 5);
+        assert_eq!(roi_depth_channel.hshift, 1);
+        assert_eq!(roi_depth_channel.vshift, 1);
+        let ChannelData::U8(roi_depth) = &roi_depth_channel.samples else {
+            panic!("expected 8-bit subsampled modular ROI depth channel");
+        };
+        let shifted_roi = Rect {
+            x: 1,
+            y: 2,
+            width: 7,
+            height: 5,
+        };
+        assert_eq!(
+            roi_depth,
+            &window_u8(depth, depth_channel.width, shifted_roi)
+        );
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, source.width);
+        assert_eq!(decoded.height, source.height);
+        assert_eq!(decoded.color_channels, 1);
+        assert_eq!(decoded.alpha, None);
+        let PixelData::U8(gray) = &decoded.pixels else {
+            panic!("expected 8-bit grayscale modular depth image");
+        };
+        let ChannelData::U8(raw_gray) = &gray_channel.samples else {
+            panic!("expected 8-bit grayscale modular color channel");
+        };
+        assert_eq!(gray, raw_gray);
+
+        let rgba = decode_rgba8(&encoded_bytes).unwrap();
+        for (pixel, &gray) in rgba.pixels.chunks_exact(4).zip(raw_gray) {
+            assert_eq!(pixel, &[gray, gray, gray, 255]);
+        }
+    }
+
+    #[test]
     fn decode_rgba8_ignores_non_alpha_extra_channels_when_available() {
         let Some(cjxl) = reference_cjxl() else {
             eprintln!("skipping extra-channel RGBA comparison; reference cjxl is not built");
@@ -6092,6 +7679,20 @@ mod tests {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
+    struct GrayDepthPam {
+        width: u32,
+        height: u32,
+        depth: Vec<u8>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct AlphaPam16 {
+        width: u32,
+        height: u32,
+        alpha: Vec<u16>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
     struct Srgb8OracleMetrics {
         max_abs_error: u16,
         sum_abs_error: u64,
@@ -6206,6 +7807,153 @@ mod tests {
         }
     }
 
+    fn parse_pam_rgba16(bytes: &[u8]) -> PpmRgb {
+        let header_end = bytes
+            .windows(7)
+            .position(|window| window == b"ENDHDR\n")
+            .map(|index| index + 7)
+            .expect("PAM header did not contain ENDHDR");
+        let header = std::str::from_utf8(&bytes[..header_end]).unwrap();
+        assert!(header.starts_with("P7\n"));
+        let mut width = None;
+        let mut height = None;
+        let mut depth = None;
+        let mut maxval = None;
+        let mut tupltype = None;
+        for line in header.lines() {
+            let mut fields = line.splitn(2, ' ');
+            match (fields.next(), fields.next()) {
+                (Some("WIDTH"), Some(value)) => width = Some(value.parse::<u32>().unwrap()),
+                (Some("HEIGHT"), Some(value)) => height = Some(value.parse::<u32>().unwrap()),
+                (Some("DEPTH"), Some(value)) => depth = Some(value.parse::<u32>().unwrap()),
+                (Some("MAXVAL"), Some(value)) => maxval = Some(value.parse::<u32>().unwrap()),
+                (Some("TUPLTYPE"), Some(value)) => tupltype = Some(value),
+                _ => {}
+            }
+        }
+        assert_eq!(depth, Some(4));
+        assert_eq!(maxval, Some(65535));
+        assert_eq!(tupltype, Some("RGB_ALPHA"));
+        let width = width.unwrap();
+        let height = height.unwrap();
+        let data = &bytes[header_end..];
+        assert_eq!(data.len(), width as usize * height as usize * 8);
+        PpmRgb {
+            width,
+            height,
+            samples: data
+                .chunks_exact(2)
+                .map(|sample| u16::from_be_bytes([sample[0], sample[1]]))
+                .collect(),
+        }
+    }
+
+    fn parse_pam_gray_alpha(bytes: &[u8]) -> GrayAlphaPam {
+        let header_end = bytes
+            .windows(7)
+            .position(|window| window == b"ENDHDR\n")
+            .map(|index| index + 7)
+            .expect("PAM header did not contain ENDHDR");
+        let header = std::str::from_utf8(&bytes[..header_end]).unwrap();
+        assert!(header.starts_with("P7\n"));
+        let mut width = None;
+        let mut height = None;
+        let mut depth = None;
+        let mut maxval = None;
+        let mut tupltype = None;
+        for line in header.lines() {
+            let mut fields = line.splitn(2, ' ');
+            match (fields.next(), fields.next()) {
+                (Some("WIDTH"), Some(value)) => width = Some(value.parse::<u32>().unwrap()),
+                (Some("HEIGHT"), Some(value)) => height = Some(value.parse::<u32>().unwrap()),
+                (Some("DEPTH"), Some(value)) => depth = Some(value.parse::<u32>().unwrap()),
+                (Some("MAXVAL"), Some(value)) => maxval = Some(value.parse::<u32>().unwrap()),
+                (Some("TUPLTYPE"), Some(value)) => tupltype = Some(value),
+                _ => {}
+            }
+        }
+        assert_eq!(depth, Some(2));
+        assert_eq!(maxval, Some(255));
+        assert_eq!(tupltype, Some("GRAYSCALE_ALPHA"));
+        let width = width.unwrap();
+        let height = height.unwrap();
+        let data = &bytes[header_end..];
+        assert_eq!(data.len(), width as usize * height as usize * 2);
+
+        let mut gray = Vec::with_capacity(width as usize * height as usize);
+        let mut alpha = Vec::with_capacity(width as usize * height as usize);
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        for pixel in data.chunks_exact(2) {
+            gray.push(pixel[0]);
+            alpha.push(pixel[1]);
+            rgba.extend_from_slice(&[pixel[0], pixel[0], pixel[0], pixel[1]]);
+        }
+
+        GrayAlphaPam {
+            width,
+            height,
+            gray_alpha: data.to_vec(),
+            gray,
+            alpha,
+            rgba,
+        }
+    }
+
+    fn parse_pam_gray_alpha16(bytes: &[u8]) -> GrayAlphaPam16 {
+        let header_end = bytes
+            .windows(7)
+            .position(|window| window == b"ENDHDR\n")
+            .map(|index| index + 7)
+            .expect("PAM header did not contain ENDHDR");
+        let header = std::str::from_utf8(&bytes[..header_end]).unwrap();
+        assert!(header.starts_with("P7\n"));
+        let mut width = None;
+        let mut height = None;
+        let mut depth = None;
+        let mut maxval = None;
+        let mut tupltype = None;
+        for line in header.lines() {
+            let mut fields = line.splitn(2, ' ');
+            match (fields.next(), fields.next()) {
+                (Some("WIDTH"), Some(value)) => width = Some(value.parse::<u32>().unwrap()),
+                (Some("HEIGHT"), Some(value)) => height = Some(value.parse::<u32>().unwrap()),
+                (Some("DEPTH"), Some(value)) => depth = Some(value.parse::<u32>().unwrap()),
+                (Some("MAXVAL"), Some(value)) => maxval = Some(value.parse::<u32>().unwrap()),
+                (Some("TUPLTYPE"), Some(value)) => tupltype = Some(value),
+                _ => {}
+            }
+        }
+        assert_eq!(depth, Some(2));
+        assert_eq!(maxval, Some(65535));
+        assert_eq!(tupltype, Some("GRAYSCALE_ALPHA"));
+        let width = width.unwrap();
+        let height = height.unwrap();
+        let data = &bytes[header_end..];
+        assert_eq!(data.len(), width as usize * height as usize * 4);
+
+        let mut gray_alpha = Vec::with_capacity(width as usize * height as usize * 2);
+        let mut gray = Vec::with_capacity(width as usize * height as usize);
+        let mut alpha = Vec::with_capacity(width as usize * height as usize);
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        for pixel in data.chunks_exact(4) {
+            let gray_sample = u16::from_be_bytes([pixel[0], pixel[1]]);
+            let alpha_sample = u16::from_be_bytes([pixel[2], pixel[3]]);
+            gray_alpha.extend_from_slice(&[gray_sample, alpha_sample]);
+            gray.push(gray_sample);
+            alpha.push(alpha_sample);
+            rgba.extend_from_slice(&[gray_sample, gray_sample, gray_sample, alpha_sample]);
+        }
+
+        GrayAlphaPam16 {
+            width,
+            height,
+            gray_alpha,
+            gray,
+            alpha,
+            rgba,
+        }
+    }
+
     fn netpbm_token(bytes: &[u8], mut offset: usize) -> (&[u8], usize) {
         loop {
             while offset < bytes.len() && bytes[offset].is_ascii_whitespace() {
@@ -6312,6 +8060,24 @@ mod tests {
         let PixelData::U8(samples) = &decoded.pixels else {
             panic!("expected public grayscale oracle comparison to use 8-bit output");
         };
+        gray8_samples_oracle_metrics(
+            samples,
+            decoded.width,
+            decoded.height,
+            reference,
+            anchor_indices,
+        )
+    }
+
+    fn gray8_samples_oracle_metrics(
+        samples: &[u8],
+        width: u32,
+        height: u32,
+        reference: &PgmGray,
+        anchor_indices: &[usize],
+    ) -> Srgb8OracleMetrics {
+        assert_eq!(width, reference.width);
+        assert_eq!(height, reference.height);
         assert_eq!(samples.len(), reference.samples.len());
 
         let mut max_abs_error = 0u16;
@@ -6492,6 +8258,34 @@ mod tests {
         );
     }
 
+    fn assert_alpha16_matches_reference(actual: &[u16], expected: &[u16]) {
+        if actual == expected {
+            return;
+        }
+        let first_mismatch = actual
+            .iter()
+            .zip(expected)
+            .position(|(actual, expected)| actual != expected);
+        let max_abs_error = actual
+            .iter()
+            .zip(expected)
+            .map(|(&actual, &expected)| actual.abs_diff(expected))
+            .max()
+            .unwrap_or(0);
+        if actual.len() == expected.len() && max_abs_error <= 257 {
+            return;
+        }
+        panic!(
+            "alpha16 mismatch: len actual={} expected={}, first_mismatch={:?}, max_abs_error={}, actual_prefix={:?}, expected_prefix={:?}",
+            actual.len(),
+            expected.len(),
+            first_mismatch,
+            max_abs_error,
+            &actual[..actual.len().min(16)],
+            &expected[..expected.len().min(16)]
+        );
+    }
+
     fn window_interleaved_u8(samples: &[u8], width: u32, channels: usize, roi: Rect) -> Vec<u8> {
         let mut output = Vec::with_capacity(roi.width as usize * roi.height as usize * channels);
         let row_stride = width as usize * channels;
@@ -6616,6 +8410,36 @@ mod tests {
             bytes.push((state >> 24) as u8);
         }
         std::fs::write(path, bytes).unwrap();
+    }
+
+    fn write_alpha_source_pam16(path: &Path) -> AlphaPam16 {
+        let width = 19u32;
+        let height = 15u32;
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+        )
+        .into_bytes();
+        let mut alpha = Vec::with_capacity(width as usize * height as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let samples = [
+                    ((x * 2971 + y * 359 + 11) & 0xffff) as u16,
+                    ((x * 811 + y * 2371 + 37) & 0xffff) as u16,
+                    ((x * 1237 + y * 1597 + 91) & 0xffff) as u16,
+                    ((x * 1723 + y * 3253 + 61) & 0xffff) as u16,
+                ];
+                for sample in samples {
+                    bytes.extend_from_slice(&sample.to_be_bytes());
+                }
+                alpha.push(samples[3]);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+        AlphaPam16 {
+            width,
+            height,
+            alpha,
+        }
     }
 
     fn write_vardct_alpha_source_pam(path: &Path) -> Vec<u8> {
@@ -6811,6 +8635,31 @@ mod tests {
             gray,
             alpha,
             rgba,
+        }
+    }
+
+    fn write_gray_depth_source_pam(path: &Path) -> GrayDepthPam {
+        let width = 23u32;
+        let height = 19u32;
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 2\nMAXVAL 255\nTUPLTYPE GRAYSCALE\nTUPLTYPE Depth\nENDHDR\n"
+        )
+        .into_bytes();
+        let mut depth = Vec::with_capacity(width as usize * height as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let gray_sample = ((x * 17 + y * 11 + 9) & 0xff) as u8;
+                let depth_sample = ((x * 37 + y * 41 + 73) & 0xff) as u8;
+                bytes.push(gray_sample);
+                bytes.push(depth_sample);
+                depth.push(depth_sample);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+        GrayDepthPam {
+            width,
+            height,
+            depth,
         }
     }
 
