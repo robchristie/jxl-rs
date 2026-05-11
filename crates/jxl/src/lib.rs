@@ -458,8 +458,13 @@ fn decode_buffered(
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
         let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
         if alpha_channel_index.is_some() {
-            let channels =
-                decode_vardct_channels_codestream(&codestream, config.region, vardct_pass)?;
+            let channels = if raw_alpha_info(&codestream.metadata)?
+                .is_some_and(|alpha| alpha.bit_depth > 8)
+            {
+                decode_vardct_channels_codestream_rgb16(&codestream, config.region, vardct_pass)?
+            } else {
+                decode_vardct_channels_codestream(&codestream, config.region, vardct_pass)?
+            };
             return decode_buffered_channels(channels, alpha_channel_index);
         }
         reject_vardct_alpha_output(&codestream.metadata)?;
@@ -2544,6 +2549,106 @@ mod tests {
     }
 
     #[test]
+    fn decode_outputs_generated_var_dct_alpha16_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping VarDCT alpha16 decode; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-vardct-alpha16-source", "pam");
+        let encoded = unique_temp_path("jxl-vardct-alpha16", "jxl");
+        let expected_alpha = write_vardct_alpha_source_pam16(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert!(info.first_frame_vardct.is_some());
+        assert_eq!(
+            raw_alpha_info(&info.metadata).unwrap(),
+            Some(AlphaInfo {
+                bit_depth: 16,
+                premultiplied: false,
+            })
+        );
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, 320);
+        assert_eq!(channels.height, 192);
+        assert_eq!(channels.color_channels, 3);
+        assert_eq!(
+            channels.alpha,
+            Some(AlphaInfo {
+                bit_depth: 16,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(channels.bit_depth, 8);
+        assert_eq!(channels.channels.len(), 4);
+        let ChannelData::U16(alpha) = &channels.channels[3].samples else {
+            panic!("expected 16-bit VarDCT alpha channel");
+        };
+        assert_eq!(alpha, &expected_alpha);
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, 320);
+        assert_eq!(decoded.height, 192);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.alpha, channels.alpha);
+        assert_eq!(decoded.bit_depth, 16);
+        let PixelData::U16(decoded_pixels) = &decoded.pixels else {
+            panic!("expected 16-bit VarDCT decoded image");
+        };
+        assert_eq!(decoded_pixels.len(), expected_alpha.len() * 4);
+        assert_eq!(
+            decoded_pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>(),
+            expected_alpha
+        );
+
+        let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba8.width, 320);
+        assert_eq!(rgba8.height, 192);
+        assert_eq!(
+            rgba8
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>(),
+            expected_alpha
+                .iter()
+                .map(|&alpha| ((u32::from(alpha) * 255 + 32_767) / 65_535) as u8)
+                .collect::<Vec<_>>()
+        );
+
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        assert_eq!(rgba16.width, 320);
+        assert_eq!(rgba16.height, 192);
+        assert_eq!(
+            rgba16
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>(),
+            expected_alpha
+        );
+    }
+
+    #[test]
     fn decode_channels_exposes_generated_var_dct_depth_when_available() {
         let Some(cjxl) = reference_cjxl() else {
             eprintln!("skipping VarDCT depth raw-channel decode; reference cjxl is not built");
@@ -3893,6 +3998,32 @@ mod tests {
                 bytes.push((((x + y) * 255 / (width + height - 2)) ^ checker) as u8);
                 let alpha_sample = ((x * 29 + y * 31 + 43) & 0xff) as u8;
                 bytes.push(alpha_sample);
+                alpha.push(alpha_sample);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+        alpha
+    }
+
+    fn write_vardct_alpha_source_pam16(path: &Path) -> Vec<u16> {
+        let width = 320u32;
+        let height = 192u32;
+        let mut alpha = Vec::with_capacity(width as usize * height as usize);
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+        )
+        .into_bytes();
+        for y in 0..height {
+            for x in 0..width {
+                let checker = (((x / 16) ^ (y / 16)) & 1) * 12_336;
+                let red = ((x * 65_535 / (width - 1)) ^ checker) as u16;
+                let green = ((y * 65_535 / (height - 1)) ^ checker) as u16;
+                let blue = (((x + y) * 65_535 / (width + height - 2)) ^ checker) as u16;
+                let alpha_sample = ((x * 1733 + y * 2411 + 43) & 0xffff) as u16;
+                bytes.extend_from_slice(&red.to_be_bytes());
+                bytes.extend_from_slice(&green.to_be_bytes());
+                bytes.extend_from_slice(&blue.to_be_bytes());
+                bytes.extend_from_slice(&alpha_sample.to_be_bytes());
                 alpha.push(alpha_sample);
             }
         }
