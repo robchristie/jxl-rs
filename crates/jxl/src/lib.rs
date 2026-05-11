@@ -3339,9 +3339,9 @@ mod tests {
         assert_eq!(
             metrics,
             Srgb8OracleMetrics {
-                max_abs_error: 176,
-                sum_abs_error: 83_724_650,
-                checksum: 783408327537764352,
+                max_abs_error: 163,
+                sum_abs_error: 83_008_163,
+                checksum: 11583904892958779392,
                 anchors: vec![115, 113, 72, 64],
                 reference_anchors: vec![111, 126, 51, 67],
             }

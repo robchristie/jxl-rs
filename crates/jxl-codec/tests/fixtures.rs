@@ -3465,11 +3465,258 @@ fn generated_vardct_ycbcr_420_decodes_shifted_dc_and_ac_metadata_when_available(
         ((height - 1) * width + width - 1) * 3 + 2,
     ];
     let metrics = srgb8_oracle_metrics(&srgb, &reference, &anchor_indices);
-    assert_eq!(metrics.max_abs_error, 176);
-    assert_eq!(metrics.sum_abs_error, 83_724_650);
-    assert_eq!(metrics.checksum, 12962029519371309851);
+    assert_eq!(metrics.max_abs_error, 163);
+    assert_eq!(metrics.sum_abs_error, 83_008_163);
+    assert_eq!(metrics.checksum, 1795393261726045634);
     assert_eq!(metrics.anchors, vec![115, 113, 72, 64]);
     assert_eq!(metrics.reference_anchors, vec![111, 126, 51, 67]);
+}
+
+#[test]
+fn generated_vardct_ycbcr_axis_subsampling_uses_axis_chroma_filter_when_available() {
+    let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+        eprintln!(
+            "skipping generated VarDCT YCbCr 4:2:2/4:4:0 fixtures; reference tools are not built"
+        );
+        return;
+    };
+
+    for (label, path, modes, shifts, expected) in [
+        (
+            "422",
+            "reference/libjxl/testdata/jxl/flower/flower.png.im_q85_422.jpg",
+            [0, 2, 0],
+            [(1, 0), (0, 0), (1, 0)],
+            Srgb8OracleMetrics {
+                max_abs_error: 165,
+                sum_abs_error: 78_803_068,
+                checksum: 4234331386373515510,
+                anchors: vec![115, 126, 67, 64],
+                reference_anchors: vec![109, 130, 49, 68],
+            },
+        ),
+        (
+            "440",
+            "reference/libjxl/testdata/jxl/flower/flower.png.im_q85_440.jpg",
+            [0, 3, 0],
+            [(0, 1), (0, 0), (0, 1)],
+            Srgb8OracleMetrics {
+                max_abs_error: 162,
+                sum_abs_error: 79_289_398,
+                checksum: 15327067622782411689,
+                anchors: vec![115, 118, 70, 64],
+                reference_anchors: vec![109, 128, 50, 68],
+            },
+        ),
+        (
+            "luma-subsample",
+            "reference/libjxl/testdata/jxl/flower/flower.png.im_q85_luma_subsample.jpg",
+            [1, 0, 1],
+            [(0, 0), (1, 1), (0, 0)],
+            Srgb8OracleMetrics {
+                max_abs_error: 178,
+                sum_abs_error: 103_344_239,
+                checksum: 16312090793819482378,
+                anchors: vec![117, 155, 86, 63],
+                reference_anchors: vec![108, 129, 50, 69],
+            },
+        ),
+        (
+            "asymmetric",
+            "reference/libjxl/testdata/jxl/flower/flower.png.im_q85_asymmetric.jpg",
+            [2, 1, 3],
+            [(0, 1), (0, 0), (1, 0)],
+            Srgb8OracleMetrics {
+                max_abs_error: 162,
+                sum_abs_error: 79_010_536,
+                checksum: 14796434999999194884,
+                anchors: vec![115, 126, 66, 64],
+                reference_anchors: vec![109, 130, 48, 68],
+            },
+        ),
+    ] {
+        let input = workspace_path(path);
+        let encoded = unique_temp_path(&format!("jxl-rs-vardct-ycbcr-{label}"), "jxl");
+        let reference_output =
+            unique_temp_path(&format!("jxl-rs-vardct-ycbcr-{label}-reference"), "ppm");
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["--allow_jpeg_reconstruction=0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed for YCbCr 4:{label}: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+        let djxl_output = Command::new(&djxl)
+            .arg(&encoded)
+            .arg(&reference_output)
+            .arg("--quiet")
+            .output()
+            .unwrap();
+        assert!(
+            djxl_output.status.success(),
+            "reference djxl failed for YCbCr 4:{label}: {}",
+            String::from_utf8_lossy(&djxl_output.stderr)
+        );
+        let reference = std::fs::read(&reference_output).unwrap();
+        let _ = std::fs::remove_file(&reference_output);
+        let reference = parse_ppm_rgb(&reference);
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+        let frame = codestream.first_frame.as_ref().unwrap();
+        assert_eq!(frame.color_transform, ColorTransform::YCbCr);
+        assert_eq!(frame.chroma_subsampling.channel_mode, modes);
+        for (channel, (hshift, vshift)) in shifts.into_iter().enumerate() {
+            assert_eq!(
+                frame.chroma_subsampling.h_shift(channel),
+                Some(hshift),
+                "{label} channel {channel} hshift"
+            );
+            assert_eq!(
+                frame.chroma_subsampling.v_shift(channel),
+                Some(vshift),
+                "{label} channel {channel} vshift"
+            );
+        }
+
+        let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+        let srgb = assemble_vardct_ycbcr_srgb8_image(plan)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{label} did not assemble VarDCT YCbCr output"));
+        let width = srgb.width as usize;
+        let height = srgb.height as usize;
+        let center = (height / 2 * width + width / 2) * 3;
+        let anchor_indices = [
+            0,
+            center,
+            center + 1,
+            ((height - 1) * width + width - 1) * 3 + 2,
+        ];
+        let metrics = srgb8_oracle_metrics(&srgb, &reference, &anchor_indices);
+        assert_eq!(metrics, expected, "{label}");
+    }
+}
+
+#[test]
+fn generated_vardct_ycbcr_420_odd_dimensions_use_ceil_shifted_planes_when_available() {
+    let (Some(cjpeg), Some(cjxl), Some(djxl)) =
+        (reference_cjpeg(), reference_cjxl(), reference_djxl())
+    else {
+        eprintln!(
+            "skipping generated odd-sized YCbCr 4:2:0 fixture; reference tools are not built"
+        );
+        return;
+    };
+
+    let input = unique_temp_path("jxl-rs-vardct-ycbcr-odd-source", "ppm");
+    let jpeg = unique_temp_path("jxl-rs-vardct-ycbcr-odd-source", "jpg");
+    let encoded = unique_temp_path("jxl-rs-vardct-ycbcr-odd", "jxl");
+    let reference_output = unique_temp_path("jxl-rs-vardct-ycbcr-odd-reference", "ppm");
+    write_odd_ycbcr_source_ppm(&input);
+
+    let cjpeg_output = Command::new(&cjpeg)
+        .arg("-outfile")
+        .arg(&jpeg)
+        .args(["-sample", "2x2", "-quality", "85"])
+        .arg(&input)
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&input);
+    assert!(
+        cjpeg_output.status.success(),
+        "reference cjpeg failed for odd YCbCr 4:2:0: {}",
+        String::from_utf8_lossy(&cjpeg_output.stderr)
+    );
+
+    let cjxl_output = Command::new(&cjxl)
+        .arg(&jpeg)
+        .arg(&encoded)
+        .args(["--allow_jpeg_reconstruction=0", "--container=0", "--quiet"])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&jpeg);
+    assert!(
+        cjxl_output.status.success(),
+        "reference cjxl failed for odd YCbCr 4:2:0: {}",
+        String::from_utf8_lossy(&cjxl_output.stderr)
+    );
+    let djxl_output = Command::new(&djxl)
+        .arg(&encoded)
+        .arg(&reference_output)
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        djxl_output.status.success(),
+        "reference djxl failed for odd YCbCr 4:2:0: {}",
+        String::from_utf8_lossy(&djxl_output.stderr)
+    );
+    let reference = std::fs::read(&reference_output).unwrap();
+    let _ = std::fs::remove_file(&reference_output);
+    let reference = parse_ppm_rgb(&reference);
+
+    let encoded_bytes = std::fs::read(&encoded).unwrap();
+    let _ = std::fs::remove_file(&encoded);
+    let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+    let frame = codestream.first_frame.as_ref().unwrap();
+    assert_eq!(frame.frame_size.width, 17);
+    assert_eq!(frame.frame_size.height, 19);
+    assert_eq!(frame.color_transform, ColorTransform::YCbCr);
+    assert_eq!(frame.chroma_subsampling.channel_mode, [0, 1, 0]);
+    assert_eq!(frame.chroma_subsampling.h_shift(0), Some(1));
+    assert_eq!(frame.chroma_subsampling.v_shift(0), Some(1));
+    assert_eq!(frame.chroma_subsampling.h_shift(1), Some(0));
+    assert_eq!(frame.chroma_subsampling.v_shift(1), Some(0));
+    assert_eq!(frame.chroma_subsampling.h_shift(2), Some(1));
+    assert_eq!(frame.chroma_subsampling.v_shift(2), Some(1));
+
+    let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+    let first_group = plan
+        .ac_group_metadata
+        .iter()
+        .find(|metadata| metadata.payload.group.group == 0)
+        .unwrap();
+    let spatial = first_group.spatial_with_dc_grid.as_ref().unwrap();
+    assert_eq!((spatial.width_blocks, spatial.height_blocks), (4, 4));
+    assert_eq!(
+        (
+            spatial.per_channel[0].width_blocks,
+            spatial.per_channel[0].height_blocks,
+            spatial.per_channel[1].width_blocks,
+            spatial.per_channel[1].height_blocks,
+            spatial.per_channel[2].width_blocks,
+            spatial.per_channel[2].height_blocks,
+        ),
+        (2, 2, 4, 4, 2, 2)
+    );
+
+    let srgb = assemble_vardct_ycbcr_srgb8_image(plan).unwrap().unwrap();
+    assert_eq!((srgb.width, srgb.height), (17, 19));
+    let width = srgb.width as usize;
+    let height = srgb.height as usize;
+    let center = (height / 2 * width + width / 2) * 3;
+    let anchor_indices = [
+        0,
+        center,
+        center + 1,
+        ((height - 1) * width + width - 1) * 3 + 2,
+    ];
+    let metrics = srgb8_oracle_metrics(&srgb, &reference, &anchor_indices);
+    assert_eq!(
+        metrics,
+        Srgb8OracleMetrics {
+            max_abs_error: 150,
+            sum_abs_error: 47_707,
+            checksum: 7871451239593819532,
+            anchors: vec![92, 145, 137, 188],
+            reference_anchors: vec![7, 166, 180, 209],
+        }
+    );
 }
 
 #[test]
@@ -4281,6 +4528,20 @@ fn write_flat_vardct_source_ppm(path: &Path) {
     std::fs::write(path, bytes).unwrap();
 }
 
+fn write_odd_ycbcr_source_ppm(path: &Path) {
+    let width = 17u32;
+    let height = 19u32;
+    let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
+    for y in 0..height {
+        for x in 0..width {
+            bytes.push(((x * 13 + y * 7) & 255) as u8);
+            bytes.push(((x * 3 + y * 17 + 29) & 255) as u8);
+            bytes.push(((x * 19 + y * 5 + 71) & 255) as u8);
+        }
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
 fn write_vardct_alpha_source_pam(path: &Path) {
     let width = 320u32;
     let height = 192u32;
@@ -4835,6 +5096,21 @@ fn reference_cjxl() -> Option<PathBuf> {
 
     let default = workspace_path("reference/libjxl/build-rs-oracle/tools/cjxl");
     default.is_file().then_some(default)
+}
+
+fn reference_cjpeg() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("JXL_RS_REFERENCE_CJPEG") {
+        let path = PathBuf::from(path);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+
+    if Command::new("cjpeg").arg("-version").output().is_ok() {
+        return Some(PathBuf::from("cjpeg"));
+    }
+
+    None
 }
 
 fn reference_vardct_trace() -> Option<PathBuf> {

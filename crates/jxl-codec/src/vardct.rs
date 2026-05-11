@@ -1721,24 +1721,12 @@ fn assemble_vardct_xyb_image_from_groups_with_mode(
     groups: &[VarDctAcGroupMetadata],
     mode: VarDctAssemblyMode,
 ) -> Result<Option<VarDctXybImage>> {
-    let sample_len = (frame.width as usize)
-        .checked_mul(frame.height as usize)
-        .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
-    let mut image = VarDctXybImage {
-        width: frame.width,
-        height: frame.height,
-        groups_assembled: 0,
-        groups_missing: 0,
-        channels: [
-            vec![0.0; sample_len],
-            vec![0.0; sample_len],
-            vec![0.0; sample_len],
-        ],
-    };
+    let mut builder =
+        VarDctImageAssembly::new(frame.width, frame.height, &frame.chroma_subsampling)?;
 
     for metadata in vardct_ac_groups_for_assembly(groups, mode) {
         let Some(grid) = metadata.spatial_with_dc_grid.as_ref() else {
-            image.groups_missing += 1;
+            builder.groups_missing += 1;
             continue;
         };
         if grid.group != metadata.payload.group.group
@@ -1747,33 +1735,24 @@ fn assemble_vardct_xyb_image_from_groups_with_mode(
         {
             return Err(Error::InvalidCodestream("invalid VarDCT spatial grid"));
         }
-        copy_vardct_spatial_group_to_image(grid, metadata.payload.group, &mut image)?;
-        image.groups_assembled += 1;
+        builder.copy_group(grid, metadata.payload.group)?;
+        builder.groups_assembled += 1;
     }
 
-    Ok((image.groups_assembled > 0).then_some(image))
+    builder.finish()
 }
 
 fn assemble_vardct_xyb_image_final(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
-    let sample_len = (plan.frame.coded_width as usize)
-        .checked_mul(plan.frame.coded_height as usize)
-        .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
-    let mut image = VarDctXybImage {
-        width: plan.frame.coded_width,
-        height: plan.frame.coded_height,
-        groups_assembled: 0,
-        groups_missing: 0,
-        channels: [
-            vec![0.0; sample_len],
-            vec![0.0; sample_len],
-            vec![0.0; sample_len],
-        ],
-    };
+    let mut builder = VarDctImageAssembly::new(
+        plan.frame.coded_width,
+        plan.frame.coded_height,
+        &plan.frame.chroma_subsampling,
+    )?;
 
     for metadata in final_vardct_ac_passes_by_group(&plan.ac_group_metadata) {
         let spatial = final_vardct_spatial_grid_for_group(plan, metadata)?;
         let Some(grid) = spatial.as_ref().or(metadata.spatial_with_dc_grid.as_ref()) else {
-            image.groups_missing += 1;
+            builder.groups_missing += 1;
             continue;
         };
         if grid.group != metadata.payload.group.group
@@ -1782,35 +1761,26 @@ fn assemble_vardct_xyb_image_final(plan: &VarDctDecodePlan) -> Result<Option<Var
         {
             return Err(Error::InvalidCodestream("invalid VarDCT spatial grid"));
         }
-        copy_vardct_spatial_group_to_image(grid, metadata.payload.group, &mut image)?;
-        image.groups_assembled += 1;
+        builder.copy_group(grid, metadata.payload.group)?;
+        builder.groups_assembled += 1;
     }
 
-    Ok((image.groups_assembled > 0).then_some(image))
+    builder.finish()
 }
 
 fn assemble_vardct_xyb_image_dc_only(
     plan: &VarDctDecodePlan,
     dc_multiplier: f32,
 ) -> Result<Option<VarDctXybImage>> {
-    let sample_len = (plan.frame.coded_width as usize)
-        .checked_mul(plan.frame.coded_height as usize)
-        .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
-    let mut image = VarDctXybImage {
-        width: plan.frame.coded_width,
-        height: plan.frame.coded_height,
-        groups_assembled: 0,
-        groups_missing: 0,
-        channels: [
-            vec![0.0; sample_len],
-            vec![0.0; sample_len],
-            vec![0.0; sample_len],
-        ],
-    };
+    let mut builder = VarDctImageAssembly::new(
+        plan.frame.coded_width,
+        plan.frame.coded_height,
+        &plan.frame.chroma_subsampling,
+    )?;
 
     for metadata in final_vardct_ac_passes_by_group(&plan.ac_group_metadata) {
         let Some(grid) = dc_only_spatial_grid_for_group(plan, metadata, dc_multiplier)? else {
-            image.groups_missing += 1;
+            builder.groups_missing += 1;
             continue;
         };
         if grid.group != metadata.payload.group.group
@@ -1819,11 +1789,11 @@ fn assemble_vardct_xyb_image_dc_only(
         {
             return Err(Error::InvalidCodestream("invalid VarDCT spatial grid"));
         }
-        copy_vardct_spatial_group_to_image(&grid, metadata.payload.group, &mut image)?;
-        image.groups_assembled += 1;
+        builder.copy_group(&grid, metadata.payload.group)?;
+        builder.groups_assembled += 1;
     }
 
-    Ok((image.groups_assembled > 0).then_some(image))
+    builder.finish()
 }
 
 fn dc_only_spatial_grid_for_group(
@@ -2001,38 +1971,289 @@ fn vardct_ac_passes_by_group(
     selected
 }
 
-fn copy_vardct_spatial_group_to_image(
-    grid: &VarDctAcSpatialGrid,
-    group: VarDctGroupMetadata,
-    image: &mut VarDctXybImage,
-) -> Result<()> {
-    let image_width = image.width as usize;
-    let image_height = image.height as usize;
-    for local_y in 0..group.height as usize {
-        let image_y = group.y as usize + local_y;
-        if image_y >= image_height {
-            continue;
-        }
-        for local_x in 0..group.width as usize {
-            let image_x = group.x as usize + local_x;
-            if image_x >= image_width {
+struct VarDctImageAssembly {
+    width: u32,
+    height: u32,
+    groups_assembled: usize,
+    groups_missing: usize,
+    channels: [Vec<f32>; 3],
+    shifted_channels: [Option<VarDctShiftedChannelAssembly>; 3],
+}
+
+struct VarDctShiftedChannelAssembly {
+    hshift: usize,
+    vshift: usize,
+    width: usize,
+    height: usize,
+    samples: Vec<f32>,
+}
+
+impl VarDctImageAssembly {
+    fn new(width: u32, height: u32, chroma: &YCbCrChromaSubsampling) -> Result<Self> {
+        let sample_len = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
+        let mut shifted_channels: [Option<VarDctShiftedChannelAssembly>; 3] =
+            std::array::from_fn(|_| None);
+        for (channel, shifted_channel) in shifted_channels.iter_mut().enumerate() {
+            let hshift = chroma
+                .h_shift(channel)
+                .ok_or(Error::InvalidCodestream("invalid chroma channel"))?
+                as usize;
+            let vshift = chroma
+                .v_shift(channel)
+                .ok_or(Error::InvalidCodestream("invalid chroma channel"))?
+                as usize;
+            if hshift == 0 && vshift == 0 {
                 continue;
             }
-            let output_index = image_y * image_width + image_x;
-            for channel in 0..3 {
-                let channel_grid = &grid.per_channel[channel];
-                let channel_x = local_x >> channel_grid.hshift;
-                let channel_y = local_y >> channel_grid.vshift;
-                let block_x = channel_x / 8;
-                let block_y = channel_y / 8;
-                let sample = (channel_y % 8) * 8 + (channel_x % 8);
-                image.channels[channel][output_index] = grid
-                    .sample(channel, block_x, block_y, sample)
-                    .ok_or(Error::InvalidCodestream("invalid VarDCT spatial sample"))?;
+            let shifted_width = shifted_axis(width as usize, hshift)?;
+            let shifted_height = shifted_axis(height as usize, vshift)?;
+            let len = shifted_width
+                .checked_mul(shifted_height)
+                .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
+            *shifted_channel = Some(VarDctShiftedChannelAssembly {
+                hshift,
+                vshift,
+                width: shifted_width,
+                height: shifted_height,
+                samples: vec![0.0; len],
+            });
+        }
+
+        Ok(Self {
+            width,
+            height,
+            groups_assembled: 0,
+            groups_missing: 0,
+            channels: [
+                vec![0.0; sample_len],
+                vec![0.0; sample_len],
+                vec![0.0; sample_len],
+            ],
+            shifted_channels,
+        })
+    }
+
+    fn copy_group(&mut self, grid: &VarDctAcSpatialGrid, group: VarDctGroupMetadata) -> Result<()> {
+        for channel in 0..3 {
+            if self.shifted_channels[channel].is_some() {
+                self.copy_shifted_group_channel(grid, group, channel)?;
+            } else {
+                self.copy_full_res_group_channel(grid, group, channel)?;
             }
+        }
+        Ok(())
+    }
+
+    fn copy_full_res_group_channel(
+        &mut self,
+        grid: &VarDctAcSpatialGrid,
+        group: VarDctGroupMetadata,
+        channel: usize,
+    ) -> Result<()> {
+        let image_width = self.width as usize;
+        let image_height = self.height as usize;
+        let channel_grid = &grid.per_channel[channel];
+        for local_y in 0..group.height as usize {
+            let image_y = group.y as usize + local_y;
+            if image_y >= image_height {
+                continue;
+            }
+            for local_x in 0..group.width as usize {
+                let image_x = group.x as usize + local_x;
+                if image_x >= image_width {
+                    continue;
+                }
+                let output_index = image_y * image_width + image_x;
+                self.channels[channel][output_index] = vardct_spatial_channel_grid_sample(
+                    channel_grid,
+                    local_x as isize,
+                    local_y as isize,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn copy_shifted_group_channel(
+        &mut self,
+        grid: &VarDctAcSpatialGrid,
+        group: VarDctGroupMetadata,
+        channel: usize,
+    ) -> Result<()> {
+        let channel_grid = &grid.per_channel[channel];
+        let shifted = self.shifted_channels[channel]
+            .as_mut()
+            .ok_or(Error::InvalidCodestream("missing shifted VarDCT channel"))?;
+        let group_x = (group.x as usize) >> shifted.hshift;
+        let group_y = (group.y as usize) >> shifted.vshift;
+        let local_width = (group.width as usize) >> shifted.hshift;
+        let local_height = (group.height as usize) >> shifted.vshift;
+        let grid_width = channel_grid.width_blocks * 8;
+        let grid_height = channel_grid.height_blocks * 8;
+        for local_y in 0..local_height.min(grid_height) {
+            let y = group_y + local_y;
+            if y >= shifted.height {
+                continue;
+            }
+            for local_x in 0..local_width.min(grid_width) {
+                let x = group_x + local_x;
+                if x >= shifted.width {
+                    continue;
+                }
+                let output_index = y * shifted.width + x;
+                shifted.samples[output_index] = vardct_spatial_channel_grid_sample(
+                    channel_grid,
+                    local_x as isize,
+                    local_y as isize,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<Option<VarDctXybImage>> {
+        if self.groups_assembled == 0 {
+            return Ok(None);
+        }
+        for channel in 0..3 {
+            if let Some(shifted) = &self.shifted_channels[channel] {
+                upsample_shifted_vardct_channel(
+                    shifted,
+                    self.width as usize,
+                    self.height as usize,
+                    &mut self.channels[channel],
+                )?;
+            }
+        }
+        Ok(Some(VarDctXybImage {
+            width: self.width,
+            height: self.height,
+            groups_assembled: self.groups_assembled,
+            groups_missing: self.groups_missing,
+            channels: self.channels,
+        }))
+    }
+}
+
+fn shifted_axis(size: usize, shift: usize) -> Result<usize> {
+    if shift > 1 {
+        return Err(Error::Unsupported("VarDCT chroma upsampling"));
+    }
+    let addend = (1usize << shift)
+        .checked_sub(1)
+        .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
+    let padded = size
+        .checked_add(addend)
+        .ok_or(Error::InvalidCodestream("VarDCT image is too large"))?;
+    padded
+        .checked_shr(shift as u32)
+        .ok_or(Error::InvalidCodestream("VarDCT image is too large"))
+}
+
+fn upsample_shifted_vardct_channel(
+    shifted: &VarDctShiftedChannelAssembly,
+    width: usize,
+    height: usize,
+    output: &mut [f32],
+) -> Result<()> {
+    if shifted.hshift > 1 || shifted.vshift > 1 {
+        return Err(Error::Unsupported("VarDCT chroma upsampling"));
+    }
+    for y in 0..height {
+        for x in 0..width {
+            output[y * width + x] = shifted_vardct_channel_sample(shifted, x, y)?;
         }
     }
     Ok(())
+}
+
+fn shifted_vardct_channel_sample(
+    shifted: &VarDctShiftedChannelAssembly,
+    x: usize,
+    y: usize,
+) -> Result<f32> {
+    let source_y = y >> shifted.vshift;
+    if shifted.vshift == 0 {
+        return shifted_vardct_channel_horizontal_sample(shifted, x, source_y as isize);
+    }
+
+    let mid = shifted_vardct_channel_horizontal_sample(shifted, x, source_y as isize)?;
+    let neighbor_y = if y & 1 == 0 {
+        source_y as isize - 1
+    } else {
+        source_y as isize + 1
+    };
+    let neighbor = shifted_vardct_channel_horizontal_sample(shifted, x, neighbor_y)?;
+    Ok(0.75f32.mul_add(mid, 0.25 * neighbor))
+}
+
+fn shifted_vardct_channel_horizontal_sample(
+    shifted: &VarDctShiftedChannelAssembly,
+    x: usize,
+    source_y: isize,
+) -> Result<f32> {
+    let source_x = x >> shifted.hshift;
+    if shifted.hshift == 0 {
+        return shifted_vardct_channel_grid_sample(shifted, source_x as isize, source_y);
+    }
+
+    let mid = shifted_vardct_channel_grid_sample(shifted, source_x as isize, source_y)?;
+    let neighbor_x = if x & 1 == 0 {
+        source_x as isize - 1
+    } else {
+        source_x as isize + 1
+    };
+    let neighbor = shifted_vardct_channel_grid_sample(shifted, neighbor_x, source_y)?;
+    Ok(0.75f32.mul_add(mid, 0.25 * neighbor))
+}
+
+fn shifted_vardct_channel_grid_sample(
+    shifted: &VarDctShiftedChannelAssembly,
+    x: isize,
+    y: isize,
+) -> Result<f32> {
+    if shifted.width == 0 || shifted.height == 0 {
+        return Err(Error::InvalidCodestream("empty VarDCT spatial grid"));
+    }
+    let x = mirror_coordinate(x, shifted.width);
+    let y = mirror_coordinate(y, shifted.height);
+    shifted
+        .samples
+        .get(y * shifted.width + x)
+        .copied()
+        .ok_or(Error::InvalidCodestream("invalid VarDCT spatial sample"))
+}
+
+fn vardct_spatial_channel_grid_sample(
+    grid: &VarDctAcSpatialChannelGrid,
+    x: isize,
+    y: isize,
+) -> Result<f32> {
+    let width = grid
+        .width_blocks
+        .checked_mul(8)
+        .ok_or(Error::InvalidCodestream("VarDCT spatial grid is too large"))?;
+    let height = grid
+        .height_blocks
+        .checked_mul(8)
+        .ok_or(Error::InvalidCodestream("VarDCT spatial grid is too large"))?;
+    if width == 0 || height == 0 {
+        return Err(Error::InvalidCodestream("empty VarDCT spatial grid"));
+    }
+
+    let x = mirror_coordinate(x, width);
+    let y = mirror_coordinate(y, height);
+    let block_x = x / 8;
+    let block_y = y / 8;
+    let sample = (y % 8) * 8 + (x % 8);
+    let index = ((block_y * grid.width_blocks + block_x) * DCT_BLOCK_SIZE) + sample;
+    grid.samples
+        .get(index)
+        .copied()
+        .map(f32::from_bits)
+        .ok_or(Error::InvalidCodestream("invalid VarDCT spatial sample"))
 }
 
 fn upsample_vardct_xyb_image_to_display(
@@ -5635,22 +5856,31 @@ fn dequantize_vardct_ac_grid(
         if x_matrix.len() != size || y_matrix.len() != size || b_matrix.len() != size {
             return Err(Error::InvalidCodestream("invalid dequant matrix size"));
         }
-        let y_block = vardct_shifted_ac_block(block, channel_block_shapes[1])
-            .ok_or(Error::InvalidCodestream("invalid luma AC block"))?;
+        let y_block = vardct_shifted_ac_block(block, channel_block_shapes[1]);
         for local_position in 0..size {
             let output_index = coefficient_grid_index_for_local_position(
                 grid.width_blocks,
                 block,
                 local_position,
             )?;
-            let y_index = coefficient_grid_index_for_local_position(
-                channel_block_shapes[1].width,
-                y_block,
-                local_position,
-            )?;
-            let quantized_y = grid.per_channel[1].coefficients[y_index];
-            let dequant_y = adjust_quant_bias(1, quantized_y) * y_matrix[local_position] * y_scale;
-            write_dequantized_coefficient(&mut dequantized.per_channel[1], output_index, dequant_y);
+            let dequant_y = if let Some(y_block) = y_block {
+                let y_index = coefficient_grid_index_for_local_position(
+                    channel_block_shapes[1].width,
+                    y_block,
+                    local_position,
+                )?;
+                let quantized_y = grid.per_channel[1].coefficients[y_index];
+                let dequant_y =
+                    adjust_quant_bias(1, quantized_y) * y_matrix[local_position] * y_scale;
+                write_dequantized_coefficient(
+                    &mut dequantized.per_channel[1],
+                    output_index,
+                    dequant_y,
+                );
+                dequant_y
+            } else {
+                0.0
+            };
 
             if let Some(x_block) = vardct_shifted_ac_block(block, channel_block_shapes[0]) {
                 let x_index = coefficient_grid_index_for_local_position(
@@ -9790,6 +10020,27 @@ mod tests {
         let target_index = ((2 * 4 + 2) * DCT_BLOCK_SIZE) + 3 * 8 + 4;
         assert_eq!(grid.samples[target_index], 3.25f32.to_bits());
         assert_eq!(grid.nonzero_samples, 1);
+    }
+
+    #[test]
+    fn shifted_spatial_channel_uses_separable_chroma_upsampling_filter() {
+        let mut shifted = VarDctShiftedChannelAssembly {
+            hshift: 1,
+            vshift: 1,
+            width: 8,
+            height: 8,
+            samples: vec![0.0; DCT_BLOCK_SIZE],
+        };
+        for y in 0..8 {
+            for x in 0..8 {
+                shifted.samples[y * 8 + x] = y as f32 * 10.0 + x as f32;
+            }
+        }
+
+        assert_eq!(shifted_vardct_channel_sample(&shifted, 0, 0).unwrap(), 0.0);
+        assert_eq!(shifted_vardct_channel_sample(&shifted, 1, 0).unwrap(), 0.25);
+        assert_eq!(shifted_vardct_channel_sample(&shifted, 0, 1).unwrap(), 2.5);
+        assert_eq!(shifted_vardct_channel_sample(&shifted, 1, 1).unwrap(), 2.75);
     }
 
     #[test]
