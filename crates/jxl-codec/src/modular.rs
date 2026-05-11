@@ -7,6 +7,7 @@ use crate::error::{Error, Result};
 use crate::frame::{ColorTransform, FrameEncoding, FrameHeader};
 use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_payload};
 use crate::metadata::{ImageMetadata, unpack_signed};
+use crate::vardct::VarDctXybImage;
 use rayon::prelude::*;
 
 const TREE_CONTEXTS: usize = 6;
@@ -39,6 +40,15 @@ const FLAG_SPLINES: u64 = 16;
 const UNSUPPORTED_DC_GLOBAL_FEATURES: u64 = FLAG_PATCHES;
 const NOISE_LUT_SIZE: usize = 8;
 const NOISE_PRECISION: f32 = 1024.0;
+const NOISE_XORSHIFT_LANES: usize = 8;
+const NOISE_FLOATS_PER_BATCH: usize = NOISE_XORSHIFT_LANES * 2;
+const NOISE_CONV_RADIUS: isize = 2;
+const NOISE_NORM_CONST: f32 = 0.22;
+const NOISE_RG_CORR: f32 = 127.0 / 128.0;
+const NOISE_RGN_CORR: f32 = 1.0 / 128.0;
+const NOISE_DEFAULT_VISIBLE_FRAME_INDEX: u32 = 1;
+const NOISE_DEFAULT_NONVISIBLE_FRAME_INDEX: u32 = 0;
+const DEFAULT_MODULAR_DC_QUANT: [f32; 3] = [1.0 / 4096.0, 1.0 / 512.0, 1.0 / 256.0];
 const SPLINE_CONTEXTS: usize = 6;
 const SPLINE_QUANTIZATION_ADJUSTMENT_CONTEXT: usize = 0;
 const SPLINE_STARTING_POSITION_CONTEXT: usize = 1;
@@ -71,6 +81,9 @@ struct ModularDecodePlan {
     global: ModularGlobalSection,
     channel_plan: ModularChannelPlan,
     groups: Vec<ModularSectionMetadata>,
+    group_dim: u32,
+    upsampling: u32,
+    color_transform: ColorTransform,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,6 +200,7 @@ pub struct ModularGlobalSection {
     pub section_logical_id: usize,
     pub section_kind: FrameSectionKind,
     pub features: FrameFeatureMetadata,
+    pub dc_quant_bits: [u32; 3],
     pub has_global_tree: bool,
     pub global_tree: Option<MaTree>,
     pub global_tree_contexts: Option<usize>,
@@ -210,6 +224,12 @@ pub struct NoiseFrameMetadata {
 impl NoiseFrameMetadata {
     pub fn strength_lut(&self) -> [f32; NOISE_LUT_SIZE] {
         self.lut.map(|value| value as f32 / NOISE_PRECISION)
+    }
+}
+
+impl ModularGlobalSection {
+    pub fn dc_quant(&self) -> [f32; 3] {
+        self.dc_quant_bits.map(f32::from_bits)
     }
 }
 
@@ -614,9 +634,6 @@ pub fn read_modular_frame_metadata(
         }
         None => None,
     };
-    if image_error.is_none() && plan.global.features.noise.is_some() {
-        image_error = Some(Error::Unsupported("noise rendering"));
-    }
     let image = if image_error.is_none() {
         residuals.as_ref().and_then(|residuals| {
             let result = assemble_modular_frame_image(&plan, residuals, region_plan.as_ref());
@@ -631,10 +648,24 @@ pub fn read_modular_frame_metadata(
     } else {
         None
     };
+    if image.is_some()
+        && image_error.is_none()
+        && plan.color_transform == ColorTransform::Xyb
+        && (plan.global.features.splines.is_some() || plan.global.features.noise.is_some())
+    {
+        image_error = Some(if plan.global.features.splines.is_some() {
+            Error::Unsupported("spline rendering with XYB")
+        } else {
+            Error::Unsupported("noise rendering with XYB")
+        });
+    }
     let ModularDecodePlan {
         global,
         channel_plan,
         groups,
+        group_dim: _,
+        upsampling: _,
+        color_transform: _,
     } = plan;
     Ok(Some(ModularFrameMetadata {
         global,
@@ -655,7 +686,9 @@ fn assemble_modular_frame_image(
         Some(region_plan) => assemble_modular_image_region(plan, residuals, region_plan)?,
         None => assemble_modular_image(plan, residuals)?,
     };
-    if let Some(splines) = &plan.global.features.splines {
+    if let Some(splines) = &plan.global.features.splines
+        && plan.color_transform != ColorTransform::Xyb
+    {
         let image_origin = region_plan
             .map(|region_plan| (region_plan.requested_rect.x, region_plan.requested_rect.y))
             .unwrap_or((0, 0));
@@ -667,6 +700,14 @@ fn assemble_modular_frame_image(
             plan.channel_plan.height,
             image_origin,
         )?;
+    }
+    if let Some(noise) = &plan.global.features.noise {
+        let image_origin = region_plan
+            .map(|region_plan| (region_plan.requested_rect.x, region_plan.requested_rect.y))
+            .unwrap_or((0, 0));
+        if plan.color_transform != ColorTransform::Xyb {
+            render_noise_into_modular_image(&mut image, noise, plan, image_origin)?;
+        }
     }
     Ok(image)
 }
@@ -699,6 +740,9 @@ fn read_modular_decode_plan(
         global,
         channel_plan,
         groups,
+        group_dim: frame_header.group_layout.group_dim,
+        upsampling: frame_header.upsampling,
+        color_transform: frame_header.color_transform,
     })
 }
 
@@ -1290,6 +1334,33 @@ fn render_splines_into_modular_image(
     Ok(())
 }
 
+pub fn render_splines_into_xyb_image(
+    image: &mut VarDctXybImage,
+    splines: &SplineFrameMetadata,
+    full_width: u32,
+    full_height: u32,
+    image_origin: (u32, u32),
+) -> Result<()> {
+    let width = image.width as usize;
+    let height = image.height as usize;
+    if width == 0 || height == 0 {
+        return Err(Error::InvalidCodestream("empty spline render image"));
+    }
+    let pixel_count = width
+        .checked_mul(height)
+        .ok_or(Error::InvalidCodestream("spline image size overflow"))?;
+    if image
+        .channels
+        .iter()
+        .any(|plane| plane.len() != pixel_count)
+    {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+
+    let plan = splines.render_plan_default_color_correlation(full_width, full_height)?;
+    render_spline_plan_into_planes(&plan, width, height, image_origin, &mut image.channels)
+}
+
 fn render_spline_plan_into_planes(
     plan: &SplineRenderPlan,
     width: usize,
@@ -1350,6 +1421,383 @@ fn render_spline_segment_row(
     }
 }
 
+fn render_noise_into_modular_image(
+    image: &mut ModularImage,
+    noise: &NoiseFrameMetadata,
+    plan: &ModularDecodePlan,
+    image_origin: (u32, u32),
+) -> Result<()> {
+    if noise.lut.iter().all(|value| *value == 0) {
+        return Ok(());
+    }
+    if image.channels.len() < 3 {
+        return Err(Error::Unsupported("noise rendering"));
+    }
+    if plan.upsampling != 1 {
+        return Err(Error::Unsupported("noise rendering with frame upsampling"));
+    }
+    if plan.channel_plan.bit_depth == 0 || plan.channel_plan.bit_depth > 30 {
+        return Err(Error::Unsupported("noise rendering"));
+    }
+    if plan.color_transform == ColorTransform::Xyb {
+        return Err(Error::Unsupported("noise rendering with XYB"));
+    }
+    if plan.color_transform != ColorTransform::None {
+        return Err(Error::Unsupported("noise rendering with YCbCr"));
+    }
+
+    let width = image.width as usize;
+    let height = image.height as usize;
+    if width == 0 || height == 0 {
+        return Err(Error::InvalidCodestream("empty noise render image"));
+    }
+    for channel in image.channels.iter().take(3) {
+        if channel.width as usize != width || channel.height as usize != height {
+            return Err(Error::Unsupported("noise rendering with shifted channels"));
+        }
+    }
+
+    let full_width = plan.channel_plan.width as usize;
+    let full_height = plan.channel_plan.height as usize;
+    let origin_x = image_origin.0 as usize;
+    let origin_y = image_origin.1 as usize;
+    if origin_x
+        .checked_add(width)
+        .filter(|right| *right <= full_width)
+        .is_none()
+        || origin_y
+            .checked_add(height)
+            .filter(|bottom| *bottom <= full_height)
+            .is_none()
+    {
+        return Err(Error::InvalidCodestream("noise ROI outside image"));
+    }
+
+    let pixel_count = channel_sample_count(image.width, image.height)?;
+    let max_sample = ((1u64 << plan.channel_plan.bit_depth) - 1) as f32;
+    let mut planes = [
+        image.channels[0]
+            .samples
+            .iter()
+            .map(|sample| *sample as f32 / max_sample)
+            .collect::<Vec<_>>(),
+        image.channels[1]
+            .samples
+            .iter()
+            .map(|sample| *sample as f32 / max_sample)
+            .collect::<Vec<_>>(),
+        image.channels[2]
+            .samples
+            .iter()
+            .map(|sample| *sample as f32 / max_sample)
+            .collect::<Vec<_>>(),
+    ];
+    if planes.iter().any(|plane| plane.len() != pixel_count) {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+
+    let random = generate_group_noise_planes(full_width, full_height, plan.group_dim as usize)?;
+    let convolved = random.map(|plane| convolve_noise_plane(&plane, full_width, full_height));
+    add_noise_to_planes(
+        &mut planes,
+        &convolved,
+        noise,
+        width,
+        height,
+        full_width,
+        (origin_x, origin_y),
+    )?;
+
+    for (channel, plane) in image.channels.iter_mut().take(3).zip(planes) {
+        for (sample, value) in channel.samples.iter_mut().zip(plane) {
+            *sample = (value * max_sample).round().clamp(0.0, max_sample) as i32;
+        }
+    }
+    Ok(())
+}
+
+pub fn render_noise_into_xyb_image(
+    image: &mut VarDctXybImage,
+    noise: &NoiseFrameMetadata,
+    full_width: u32,
+    full_height: u32,
+    group_dim: u32,
+    image_origin: (u32, u32),
+) -> Result<()> {
+    if noise.lut.iter().all(|value| *value == 0) {
+        return Ok(());
+    }
+    let width = image.width as usize;
+    let height = image.height as usize;
+    if width == 0 || height == 0 {
+        return Err(Error::InvalidCodestream("empty noise render image"));
+    }
+    let full_width = full_width as usize;
+    let full_height = full_height as usize;
+    let group_dim = group_dim as usize;
+    let origin_x = image_origin.0 as usize;
+    let origin_y = image_origin.1 as usize;
+    if origin_x
+        .checked_add(width)
+        .filter(|right| *right <= full_width)
+        .is_none()
+        || origin_y
+            .checked_add(height)
+            .filter(|bottom| *bottom <= full_height)
+            .is_none()
+    {
+        return Err(Error::InvalidCodestream("noise ROI outside image"));
+    }
+
+    let random = generate_group_noise_planes(full_width, full_height, group_dim)?;
+    let convolved = random.map(|plane| convolve_noise_plane(&plane, full_width, full_height));
+    add_noise_to_planes(
+        &mut image.channels,
+        &convolved,
+        noise,
+        width,
+        height,
+        full_width,
+        (origin_x, origin_y),
+    )
+}
+
+fn generate_group_noise_planes(
+    width: usize,
+    height: usize,
+    group_dim: usize,
+) -> Result<[Vec<f32>; 3]> {
+    if width == 0 || height == 0 || group_dim == 0 {
+        return Err(Error::InvalidCodestream("invalid noise dimensions"));
+    }
+    let pixels = width
+        .checked_mul(height)
+        .ok_or(Error::InvalidCodestream("noise image size overflow"))?;
+    let mut planes = [
+        vec![0.0f32; pixels],
+        vec![0.0f32; pixels],
+        vec![0.0f32; pixels],
+    ];
+    let groups_x = width.div_ceil(group_dim);
+    let groups_y = height.div_ceil(group_dim);
+    for gy in 0..groups_y {
+        for gx in 0..groups_x {
+            let x0 = gx * group_dim;
+            let y0 = gy * group_dim;
+            let group_width = group_dim.min(width - x0);
+            let group_height = group_dim.min(height - y0);
+            let mut rng = Xorshift128Plus::from_four_seeds(
+                NOISE_DEFAULT_VISIBLE_FRAME_INDEX,
+                NOISE_DEFAULT_NONVISIBLE_FRAME_INDEX,
+                x0 as u32,
+                y0 as u32,
+            );
+            for plane in &mut planes {
+                fill_noise_rect(&mut rng, plane, width, x0, y0, group_width, group_height);
+            }
+        }
+    }
+    Ok(planes)
+}
+
+fn fill_noise_rect(
+    rng: &mut Xorshift128Plus,
+    plane: &mut [f32],
+    plane_width: usize,
+    x0: usize,
+    y0: usize,
+    width: usize,
+    height: usize,
+) {
+    let mut batch = [0.0f32; NOISE_FLOATS_PER_BATCH];
+    for y in 0..height {
+        let mut x = 0usize;
+        while x + NOISE_FLOATS_PER_BATCH < width {
+            rng.fill_f32_batch(&mut batch);
+            let row_start = (y0 + y) * plane_width + x0 + x;
+            plane[row_start..row_start + NOISE_FLOATS_PER_BATCH].copy_from_slice(&batch);
+            x += NOISE_FLOATS_PER_BATCH;
+        }
+
+        rng.fill_f32_batch(&mut batch);
+        let row_start = (y0 + y) * plane_width + x0 + x;
+        plane[row_start..row_start + width - x].copy_from_slice(&batch[..width - x]);
+    }
+}
+
+fn convolve_noise_plane(input: &[f32], width: usize, height: usize) -> Vec<f32> {
+    let mut output = vec![0.0f32; input.len()];
+    for y in 0..height {
+        for x in 0..width {
+            let center = input[y * width + x];
+            let mut others = 0.0f32;
+            for dy in -NOISE_CONV_RADIUS..=NOISE_CONV_RADIUS {
+                let sample_y = mirror_index(y as isize + dy, height);
+                for dx in -NOISE_CONV_RADIUS..=NOISE_CONV_RADIUS {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let sample_x = mirror_index(x as isize + dx, width);
+                    others += input[sample_y * width + sample_x];
+                }
+            }
+            output[y * width + x] = others.mul_add(0.16, center * -3.84);
+        }
+    }
+    output
+}
+
+fn add_noise_to_planes(
+    planes: &mut [Vec<f32>; 3],
+    convolved_noise: &[Vec<f32>; 3],
+    noise: &NoiseFrameMetadata,
+    width: usize,
+    height: usize,
+    full_width: usize,
+    image_origin: (usize, usize),
+) -> Result<()> {
+    let expected_local_len = width
+        .checked_mul(height)
+        .ok_or(Error::InvalidCodestream("noise ROI size overflow"))?;
+    if planes.iter().any(|plane| plane.len() != expected_local_len) {
+        return Err(Error::InvalidCodestream("noise ROI plane size mismatch"));
+    }
+    let full_height = convolved_noise[0]
+        .len()
+        .checked_div(full_width)
+        .ok_or(Error::InvalidCodestream("invalid noise plane size"))?;
+    let expected_len = full_width
+        .checked_mul(full_height)
+        .ok_or(Error::InvalidCodestream("noise plane size overflow"))?;
+    if full_width == 0
+        || full_height == 0
+        || convolved_noise
+            .iter()
+            .any(|plane| plane.len() != expected_len)
+    {
+        return Err(Error::InvalidCodestream("noise plane size mismatch"));
+    }
+    let lut = noise.strength_lut();
+    for y in 0..height {
+        let local_row = y * width;
+        for x in 0..width {
+            let local_index = local_row + x;
+            let image_x = image_origin.0 + x;
+            let noise_index = (image_origin.1 + y) * full_width + image_x;
+            let vx = planes[0][local_index];
+            let vy = planes[1][local_index];
+            let in_g = (vy - vx) * 0.5;
+            let in_r = (vy + vx) * 0.5;
+            let strength_g = noise_strength_lut(&lut, in_g);
+            let strength_r = noise_strength_lut(&lut, in_r);
+            let rnd_r = convolved_noise[0][noise_index] * NOISE_NORM_CONST;
+            let rnd_g = convolved_noise[1][noise_index] * NOISE_NORM_CONST;
+            let rnd_cor = convolved_noise[2][noise_index] * NOISE_NORM_CONST;
+            let red_noise = strength_r * rnd_r.mul_add(NOISE_RGN_CORR, NOISE_RG_CORR * rnd_cor);
+            let green_noise = strength_g * rnd_g.mul_add(NOISE_RGN_CORR, NOISE_RG_CORR * rnd_cor);
+            let rg_noise = red_noise + green_noise;
+            planes[0][local_index] += red_noise - green_noise;
+            planes[1][local_index] += rg_noise;
+            planes[2][local_index] += rg_noise;
+        }
+    }
+    Ok(())
+}
+
+fn noise_strength_lut(lut: &[f32; NOISE_LUT_SIZE], x: f32) -> f32 {
+    let scale = (NOISE_LUT_SIZE - 2) as f32;
+    let scaled = (x * scale).max(0.0);
+    let (floor_x, frac_x) = if scaled >= scale + 1.0 {
+        (NOISE_LUT_SIZE - 2, 1.0)
+    } else {
+        let floor = scaled.floor();
+        (floor as usize, scaled - floor)
+    };
+    let low = lut[floor_x];
+    let high = lut[floor_x + 1];
+    ((high - low).mul_add(frac_x, low)).clamp(0.0, 1.0)
+}
+
+fn mirror_index(mut x: isize, size: usize) -> usize {
+    let size = size as isize;
+    while x < 0 || x >= size {
+        if x < 0 {
+            x = -x - 1;
+        } else {
+            x = 2 * size - 1 - x;
+        }
+    }
+    x as usize
+}
+
+#[derive(Debug, Clone)]
+struct Xorshift128Plus {
+    s0: [u64; NOISE_XORSHIFT_LANES],
+    s1: [u64; NOISE_XORSHIFT_LANES],
+}
+
+impl Xorshift128Plus {
+    fn from_four_seeds(seed1: u32, seed2: u32, seed3: u32, seed4: u32) -> Self {
+        let mut s0 = [0u64; NOISE_XORSHIFT_LANES];
+        let mut s1 = [0u64; NOISE_XORSHIFT_LANES];
+        s0[0] = split_mix64(
+            ((u64::from(seed1) << 32) + u64::from(seed2)).wrapping_add(0x9E3779B97F4A7C15),
+        );
+        s1[0] = split_mix64(
+            ((u64::from(seed3) << 32) + u64::from(seed4)).wrapping_add(0x9E3779B97F4A7C15),
+        );
+        for i in 1..NOISE_XORSHIFT_LANES {
+            s0[i] = split_mix64(s0[i - 1]);
+            s1[i] = split_mix64(s1[i - 1]);
+        }
+        Self { s0, s1 }
+    }
+
+    #[cfg(test)]
+    fn from_seed(seed: u64) -> Self {
+        let mut s0 = [0u64; NOISE_XORSHIFT_LANES];
+        let mut s1 = [0u64; NOISE_XORSHIFT_LANES];
+        s0[0] = split_mix64(seed.wrapping_add(0x9E3779B97F4A7C15));
+        s1[0] = split_mix64(s0[0]);
+        for i in 1..NOISE_XORSHIFT_LANES {
+            s0[i] = split_mix64(s1[i - 1]);
+            s1[i] = split_mix64(s0[i]);
+        }
+        Self { s0, s1 }
+    }
+
+    fn fill_u64(&mut self) -> [u64; NOISE_XORSHIFT_LANES] {
+        let mut bits = [0u64; NOISE_XORSHIFT_LANES];
+        for (i, value) in bits.iter_mut().enumerate() {
+            let mut s1 = self.s0[i];
+            let s0 = self.s1[i];
+            *value = s1.wrapping_add(s0);
+            self.s0[i] = s0;
+            s1 ^= s1 << 23;
+            self.s1[i] = s1 ^ s0 ^ (s1 >> 18) ^ (s0 >> 5);
+        }
+        bits
+    }
+
+    fn fill_f32_batch(&mut self, output: &mut [f32; NOISE_FLOATS_PER_BATCH]) {
+        let bits = self.fill_u64();
+        for (index, value) in bits.into_iter().enumerate() {
+            output[index * 2] = noise_bits_to_float(value as u32);
+            output[index * 2 + 1] = noise_bits_to_float((value >> 32) as u32);
+        }
+    }
+}
+
+fn split_mix64(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
+    z ^ (z >> 31)
+}
+
+fn noise_bits_to_float(bits: u32) -> f32 {
+    f32::from_bits((bits >> 9) | 0x3F800000)
+}
+
 fn fast_cosf(value: f32) -> f32 {
     let pi2 = std::f32::consts::PI * 2.0;
     let pi2_inv = 0.5 / std::f32::consts::PI;
@@ -1394,7 +1842,7 @@ fn read_global_section(
     section: &FrameSection,
 ) -> Result<ModularGlobalSection> {
     let features = read_dc_global_features(reader, frame_header)?;
-    skip_dc_dequant_matrices(reader)?;
+    let dc_quant = read_dc_dequant_matrices(reader)?;
     let has_global_tree = reader.read_bool()?;
     let global_tree_metadata = if has_global_tree {
         Some(read_tree_metadata(
@@ -1415,6 +1863,7 @@ fn read_global_section(
         section_logical_id: section.logical_id,
         section_kind: section.kind,
         features,
+        dc_quant_bits: dc_quant.map(f32::to_bits),
         has_global_tree,
         global_tree: global_tree_metadata
             .as_ref()
@@ -1886,7 +2335,7 @@ fn decode_global_residuals(
     let payload = section_payload(codestream, section)?;
     let mut reader = BitReader::new(payload);
     read_dc_global_features(&mut reader, frame_header)?;
-    skip_dc_dequant_matrices(&mut reader)?;
+    read_dc_dequant_matrices(&mut reader)?;
     if !reader.read_bool()? {
         return Err(Error::InvalidCodestream("modular frame has no global tree"));
     }
@@ -3870,19 +4319,22 @@ fn ceil_log2_nonzero_u32(value: u32) -> Result<i32> {
     Ok((u32::BITS - (value - 1).leading_zeros()) as i32)
 }
 
-fn skip_dc_dequant_matrices(reader: &mut BitReader<'_>) -> Result<()> {
+fn read_dc_dequant_matrices(reader: &mut BitReader<'_>) -> Result<[f32; 3]> {
     let all_default = reader.read_bool()?;
-    if !all_default {
-        for _ in 0..3 {
-            let coefficient = reader.read_f16()?;
-            if coefficient <= 0.0 {
-                return Err(Error::InvalidCodestream(
-                    "invalid DC dequant matrix coefficient",
-                ));
-            }
+    if all_default {
+        return Ok(DEFAULT_MODULAR_DC_QUANT);
+    }
+
+    let mut coefficients = [0.0f32; 3];
+    for coefficient in &mut coefficients {
+        *coefficient = reader.read_f16()? * (1.0 / 128.0);
+        if *coefficient <= 0.0 {
+            return Err(Error::InvalidCodestream(
+                "invalid DC dequant matrix coefficient",
+            ));
         }
     }
-    Ok(())
+    Ok(coefficients)
 }
 
 fn global_tree_size_limit(metadata: &ImageMetadata, frame_header: &FrameHeader) -> Result<usize> {
@@ -4286,6 +4738,76 @@ mod tests {
     #[test]
     fn inverse_rct_supports_ycocg() {
         assert_eq!(inverse_rct_pixel(6, 100, 20, 10).unwrap(), (105, 105, 85));
+    }
+
+    #[test]
+    fn xorshift128plus_matches_reference_vector() {
+        let mut rng = Xorshift128Plus::from_seed(12345);
+
+        assert_eq!(
+            rng.fill_u64(),
+            [
+                0x6E901576D477CBB1,
+                0xE9E53789195DA2A2,
+                0xB681F6DDA5E0AE99,
+                0x8EFD18CE21FD6896,
+                0xA898A80DF75CF532,
+                0x50CEB2C9E2DE7E32,
+                0x3CA7C2FEB25C0DD0,
+                0xA4D0866B80B4D836,
+            ]
+        );
+    }
+
+    #[test]
+    fn noise_strength_lut_interpolates_and_clamps() {
+        let lut = [0.0, 0.1, 0.2, 0.4, 0.7, 1.0, 0.9, 0.8];
+
+        assert_close(noise_strength_lut(&lut, -0.5), 0.0);
+        assert_close(noise_strength_lut(&lut, 0.25), 0.15);
+        assert_close(noise_strength_lut(&lut, 2.0), 0.8);
+    }
+
+    #[test]
+    fn noise_roi_rendering_matches_crop_of_full_noise_rendering() {
+        let mut plan = region_test_plan(20, 18, 3);
+        plan.group_dim = 8;
+        plan.color_transform = ColorTransform::None;
+        let noise = NoiseFrameMetadata {
+            lut: [8, 16, 32, 64, 96, 128, 160, 192],
+            bits_consumed: 80,
+        };
+        let full_samples = (0..20 * 18)
+            .map(|index| 80 + (index % 40) as i32)
+            .collect::<Vec<_>>();
+        let mut full = ModularImage {
+            width: 20,
+            height: 18,
+            channels: vec![
+                image_channel(20, 18, &full_samples),
+                image_channel(20, 18, &full_samples),
+                image_channel(20, 18, &full_samples),
+            ],
+        };
+
+        render_noise_into_modular_image(&mut full, &noise, &plan, (0, 0)).unwrap();
+
+        let origin = (5, 4);
+        let mut roi = ModularImage {
+            width: 7,
+            height: 6,
+            channels: (0..3)
+                .map(|_| crop_channel(&full_samples, 20, origin, 7, 6))
+                .collect(),
+        };
+        render_noise_into_modular_image(&mut roi, &noise, &plan, origin).unwrap();
+
+        for channel in 0..3 {
+            assert_eq!(
+                roi.channels[channel].samples,
+                crop_samples(&full.channels[channel].samples, 20, origin, 7, 6)
+            );
+        }
     }
 
     #[test]
@@ -4828,6 +5350,33 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn renders_splines_into_xyb_planes_in_image_space() {
+        let spline = fixture_spline_frame();
+        let plan = spline
+            .render_plan_default_color_correlation(2048, 2048)
+            .unwrap();
+        let segment = plan.segments.first().unwrap();
+        let origin_x = (segment.center_x as i32 - 32).clamp(0, 2048 - 64) as u32;
+        let origin_y = (segment.center_y as i32 - 24).clamp(0, 2048 - 48) as u32;
+        let mut image = VarDctXybImage {
+            width: 64,
+            height: 48,
+            groups_assembled: 0,
+            groups_missing: 0,
+            channels: [vec![0.0; 64 * 48], vec![0.0; 64 * 48], vec![0.0; 64 * 48]],
+        };
+
+        render_splines_into_xyb_image(&mut image, &spline, 2048, 2048, (origin_x, origin_y))
+            .unwrap();
+
+        assert!(image.channels.iter().any(|plane| {
+            plane
+                .iter()
+                .any(|sample| sample.is_finite() && sample.abs() > 0.0)
+        }));
+    }
+
     fn assemble_test_region(
         plan: &ModularDecodePlan,
         residuals: &ModularResiduals,
@@ -4843,6 +5392,37 @@ mod tests {
             height,
             samples: samples.to_vec(),
         }
+    }
+
+    fn crop_channel(
+        samples: &[i32],
+        source_width: usize,
+        origin: (u32, u32),
+        width: u32,
+        height: u32,
+    ) -> ModularImageChannel {
+        ModularImageChannel {
+            width,
+            height,
+            samples: crop_samples(samples, source_width, origin, width, height),
+        }
+    }
+
+    fn crop_samples(
+        samples: &[i32],
+        source_width: usize,
+        origin: (u32, u32),
+        width: u32,
+        height: u32,
+    ) -> Vec<i32> {
+        let mut cropped = Vec::with_capacity((width * height) as usize);
+        let origin_x = origin.0 as usize;
+        let origin_y = origin.1 as usize;
+        for y in 0..height as usize {
+            let start = (origin_y + y) * source_width + origin_x;
+            cropped.extend_from_slice(&samples[start..start + width as usize]);
+        }
+        cropped
     }
 
     fn selected_streams(groups: &[ModularSectionMetadata], rect: ImageRect) -> Vec<usize> {
@@ -4955,6 +5535,7 @@ mod tests {
                 section_logical_id: 0,
                 section_kind: FrameSectionKind::Combined,
                 features: FrameFeatureMetadata::default(),
+                dc_quant_bits: DEFAULT_MODULAR_DC_QUANT.map(f32::to_bits),
                 has_global_tree: true,
                 global_tree: None,
                 global_tree_contexts: None,
@@ -4982,6 +5563,9 @@ mod tests {
                     .collect(),
             },
             groups: Vec::new(),
+            group_dim: 256,
+            upsampling: 1,
+            color_transform: ColorTransform::Xyb,
         }
     }
 

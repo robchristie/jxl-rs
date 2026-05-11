@@ -416,9 +416,9 @@ fn rendered_spline_pixels_match_reference_djxl_when_available() {
 }
 
 #[test]
-fn generated_modular_noise_metadata_decodes_when_available() {
+fn generated_modular_noise_metadata_decodes_when_xyb_rendering_is_unsupported() {
     let Some(cjxl) = reference_cjxl() else {
-        eprintln!("skipping modular noise metadata check; reference cjxl is not built");
+        eprintln!("skipping modular noise rendering check; reference cjxl is not built");
         return;
     };
 
@@ -460,10 +460,10 @@ fn generated_modular_noise_metadata_decodes_when_available() {
     assert!(noise.strength_lut().iter().all(|value| *value >= 0.0));
     assert_eq!(
         modular.image_error,
-        Some(jxl_codec::Error::Unsupported("noise rendering"))
+        Some(jxl_codec::Error::Unsupported("noise rendering with XYB"))
     );
     assert!(modular.residuals.is_some());
-    assert!(modular.image.is_none());
+    assert!(modular.image.is_some());
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

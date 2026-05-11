@@ -50,7 +50,8 @@ pub use modular::{
     ModularImageChannel, ModularPredictor, ModularResiduals, ModularSectionMetadata,
     ModularTransform, ModularTreeMetadata, NoiseFrameMetadata, QuantizedSplineMetadata,
     SplineFloatPoint, SplineFrameMetadata, SplinePoint, SplineRenderPlan, SplineSegmentMetadata,
-    SqueezeParams, TransformId, WeightedPredictorHeader,
+    SqueezeParams, TransformId, WeightedPredictorHeader, render_noise_into_xyb_image,
+    render_splines_into_xyb_image,
 };
 pub use transform::{CustomTransformData, OpsinInverseMatrix};
 pub use vardct::{
@@ -78,5 +79,7 @@ pub use vardct::{
     assemble_vardct_srgb8_image_for_pass, assemble_vardct_srgb16_image,
     assemble_vardct_srgb16_image_for_pass, assemble_vardct_xyb_image,
     assemble_vardct_xyb_image_for_pass, vardct_dc_coefficient_diagnostics,
-    vardct_xyb_inverse_variant_diagnostics, vardct_xyb_rgb_diagnostics,
+    vardct_xyb_inverse_variant_diagnostics, vardct_xyb_rgb_diagnostics, xyb_image_to_linear_rgb,
+    xyb_image_to_srgb8, xyb_image_to_srgb8_with_variant, xyb_image_to_srgb16,
+    xyb_image_to_srgb16_with_variant, xyb_opsin_params,
 };

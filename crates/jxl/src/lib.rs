@@ -380,6 +380,16 @@ fn first_frame_encoding(codestream: &jxl_codec::Codestream) -> Result<FrameEncod
         .encoding)
 }
 
+fn first_frame_color_transform(
+    codestream: &jxl_codec::Codestream,
+) -> Result<jxl_codec::ColorTransform> {
+    Ok(codestream
+        .first_frame
+        .as_ref()
+        .ok_or(Error::Unsupported("image has no decoded frame"))?
+        .color_transform)
+}
+
 fn first_frame_vardct_plan(codestream: &jxl_codec::Codestream) -> Result<&VarDctDecodePlan> {
     codestream
         .first_frame_vardct_plan
@@ -400,6 +410,9 @@ fn decode_channels_codestream(
         .first_frame_modular
         .as_ref()
         .ok_or(Error::Unsupported("modular image metadata"))?;
+    if let Some(error) = &modular.image_error {
+        return Err(error.clone());
+    }
     let image = match modular.image.as_ref() {
         Some(image) => image,
         None => {
@@ -495,13 +508,30 @@ fn decode_buffered(
     }
     reject_vardct_pass_for_non_vardct(vardct_pass)?;
 
-    decode_buffered_codestream(codestream)
+    decode_buffered_codestream(codestream, config.region)
 }
 
-fn decode_buffered_codestream(codestream: jxl_codec::Codestream) -> Result<DecodedImage> {
+fn decode_buffered_codestream(
+    codestream: jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+) -> Result<DecodedImage> {
     let orientation = codestream.metadata.orientation;
     let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
     let transform_data = codestream.transform_data.clone();
+    let color_transform = first_frame_color_transform(&codestream)?;
+    if color_transform == jxl_codec::ColorTransform::Xyb {
+        let channels = if raw_alpha_info(&codestream.metadata)?
+            .is_some_and(|alpha| alpha.bit_depth > u8::BITS)
+        {
+            modular_xyb_decoded_channels_srgb16_from_codestream(&codestream, region)?
+        } else {
+            modular_xyb_decoded_channels_srgb8_from_codestream(&codestream, region)?
+        };
+        return orient_decoded_image(
+            decode_buffered_channels_with_transform_data(channels, alpha_channel_index, None)?,
+            orientation,
+        );
+    }
     let channels = decode_channels_codestream(codestream, None, None)?;
     orient_decoded_image(
         decode_buffered_channels_with_transform_data(
@@ -604,19 +634,27 @@ fn decode_rgba8_buffered(
     }
     reject_vardct_pass_for_non_vardct(vardct_pass)?;
 
-    rgba8_from_modular_codestream(codestream)
+    rgba8_from_modular_codestream(codestream, config.region)
 }
 
-fn rgba8_from_modular_codestream(codestream: jxl_codec::Codestream) -> Result<RgbaImage> {
+fn rgba8_from_modular_codestream(
+    codestream: jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+) -> Result<RgbaImage> {
     let orientation = codestream.metadata.orientation;
     let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
     let transform_data = codestream.transform_data.clone();
-    let channels = decode_channels_codestream(codestream, None, None)?;
+    let color_transform = first_frame_color_transform(&codestream)?;
+    let channels = if color_transform == jxl_codec::ColorTransform::Xyb {
+        modular_xyb_decoded_channels_srgb8_from_codestream(&codestream, region)?
+    } else {
+        decode_channels_codestream(codestream, None, None)?
+    };
     orient_rgba8(
         rgba8_from_decoded_channels_with_transform_data(
             &channels,
             alpha_channel_index,
-            Some(&transform_data),
+            (color_transform != jxl_codec::ColorTransform::Xyb).then_some(&transform_data),
         )?,
         orientation,
     )
@@ -746,6 +784,149 @@ fn decoded_channels_from_vardct_srgb16(
             })
             .collect(),
     })
+}
+
+fn modular_xyb_decoded_channels_srgb8_from_codestream(
+    codestream: &jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+) -> Result<DecodedChannels> {
+    let opsin = jxl_codec::xyb_opsin_params(&codestream.metadata, &codestream.transform_data);
+    let srgb = jxl_codec::xyb_image_to_srgb8_with_variant(
+        &modular_codestream_to_xyb_image(codestream, region)?,
+        &opsin,
+        jxl_codec::VarDctXybInverseVariant::BMinusBias,
+    );
+    let mut channels = decoded_channels_from_vardct_srgb8(srgb)?;
+    append_modular_extra_channels(&mut channels, codestream)?;
+    Ok(channels)
+}
+
+fn modular_xyb_decoded_channels_srgb16_from_codestream(
+    codestream: &jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+) -> Result<DecodedChannels> {
+    let opsin = jxl_codec::xyb_opsin_params(&codestream.metadata, &codestream.transform_data);
+    let srgb = jxl_codec::xyb_image_to_srgb16_with_variant(
+        &modular_codestream_to_xyb_image(codestream, region)?,
+        &opsin,
+        jxl_codec::VarDctXybInverseVariant::BMinusBias,
+    );
+    let mut channels = decoded_channels_from_vardct_srgb16(srgb)?;
+    append_modular_extra_channels(&mut channels, codestream)?;
+    Ok(channels)
+}
+
+fn modular_codestream_to_xyb_image(
+    codestream: &jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+) -> Result<jxl_codec::VarDctXybImage> {
+    let modular = codestream
+        .first_frame_modular
+        .as_ref()
+        .ok_or(Error::Unsupported("modular image metadata"))?;
+    let image = modular.image.as_ref().ok_or_else(|| {
+        modular
+            .image_error
+            .clone()
+            .unwrap_or(Error::Unsupported("modular pixel reconstruction"))
+    })?;
+    if codestream.metadata.num_color_channels() != 3 || image.channels.len() < 3 {
+        return Err(Error::Unsupported("modular XYB color output"));
+    }
+    for channel in image.channels.iter().take(3) {
+        if channel.width != image.width || channel.height != image.height {
+            return Err(Error::Unsupported("modular XYB shifted color output"));
+        }
+    }
+
+    let sample_count = (image.width as usize)
+        .checked_mul(image.height as usize)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let dc_quant = modular.global.dc_quant();
+    let mut xyb = jxl_codec::VarDctXybImage {
+        width: image.width,
+        height: image.height,
+        groups_assembled: 0,
+        groups_missing: 0,
+        channels: [
+            Vec::with_capacity(sample_count),
+            Vec::with_capacity(sample_count),
+            Vec::with_capacity(sample_count),
+        ],
+    };
+    for index in 0..sample_count {
+        let raw_y = image.channels[0].samples[index] as f32;
+        let raw_x = image.channels[1].samples[index] as f32;
+        let raw_b_minus_y = image.channels[2].samples[index] as f32;
+        xyb.channels[0].push(raw_x * dc_quant[0]);
+        xyb.channels[1].push(raw_y * dc_quant[1]);
+        xyb.channels[2].push((raw_b_minus_y + raw_y) * dc_quant[2]);
+    }
+    let frame = codestream
+        .first_frame
+        .as_ref()
+        .ok_or(Error::Unsupported("image has no decoded frame"))?;
+    let full_width = frame.frame_size.width.div_ceil(frame.upsampling);
+    let full_height = frame.frame_size.height.div_ceil(frame.upsampling);
+    let origin = region.map(|region| (region.x, region.y)).unwrap_or((0, 0));
+    if let Some(splines) = &modular.global.features.splines {
+        jxl_codec::render_splines_into_xyb_image(
+            &mut xyb,
+            splines,
+            full_width,
+            full_height,
+            origin,
+        )?;
+    }
+    if let Some(noise) = &modular.global.features.noise {
+        if frame.upsampling != 1 {
+            return Err(Error::Unsupported("noise rendering with frame upsampling"));
+        }
+        jxl_codec::render_noise_into_xyb_image(
+            &mut xyb,
+            noise,
+            full_width,
+            full_height,
+            frame.group_layout.group_dim,
+            origin,
+        )?;
+    }
+    Ok(xyb)
+}
+
+fn append_modular_extra_channels(
+    channels: &mut DecodedChannels,
+    codestream: &jxl_codec::Codestream,
+) -> Result<()> {
+    channels.alpha = raw_alpha_info(&codestream.metadata)?;
+    if codestream.metadata.extra_channels.is_empty() {
+        return Ok(());
+    }
+    let image = codestream
+        .first_frame_modular
+        .as_ref()
+        .and_then(|modular| modular.image.as_ref())
+        .ok_or(Error::Unsupported("modular pixel reconstruction"))?;
+    let color_channels = codestream.metadata.num_color_channels() as usize;
+    let channel_bit_depths = decoded_channel_bit_depths(&codestream.metadata, color_channels)?;
+    for (index, channel) in image.channels.iter().enumerate().skip(color_channels) {
+        let channel_bit_depth =
+            channel_bit_depths
+                .get(index)
+                .copied()
+                .ok_or(Error::InvalidCodestream(
+                    "decoded channel missing bit-depth metadata",
+                ))?;
+        let max_sample = max_sample_value(channel_bit_depth)?;
+        channels.channels.push(decode_channel(
+            image.width,
+            image.height,
+            channel,
+            channel_bit_depth,
+            max_sample,
+        )?);
+    }
+    Ok(())
 }
 
 fn decode_vardct_channels_codestream(
@@ -1037,19 +1218,27 @@ fn decode_rgba16_buffered(
     }
     reject_vardct_pass_for_non_vardct(vardct_pass)?;
 
-    rgba16_from_modular_codestream(codestream)
+    rgba16_from_modular_codestream(codestream, config.region)
 }
 
-fn rgba16_from_modular_codestream(codestream: jxl_codec::Codestream) -> Result<Rgba16Image> {
+fn rgba16_from_modular_codestream(
+    codestream: jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+) -> Result<Rgba16Image> {
     let orientation = codestream.metadata.orientation;
     let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
     let transform_data = codestream.transform_data.clone();
-    let channels = decode_channels_codestream(codestream, None, None)?;
+    let color_transform = first_frame_color_transform(&codestream)?;
+    let channels = if color_transform == jxl_codec::ColorTransform::Xyb {
+        modular_xyb_decoded_channels_srgb16_from_codestream(&codestream, region)?
+    } else {
+        decode_channels_codestream(codestream, None, None)?
+    };
     orient_rgba16(
         rgba16_from_decoded_channels_with_transform_data(
             &channels,
             alpha_channel_index,
-            Some(&transform_data),
+            (color_transform != jxl_codec::ColorTransform::Xyb).then_some(&transform_data),
         )?,
         orientation,
     )
@@ -3091,6 +3280,84 @@ mod tests {
         assert_eq!(rgba8.width, 2048);
         assert_eq!(rgba8.height, 2048);
         assert_eq!(rgba8.pixels.len(), 2048 * 2048 * 4);
+    }
+
+    #[test]
+    fn decode_rgba_supports_generated_modular_xyb_when_available() {
+        let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+            eprintln!("skipping public modular XYB decode; reference tools are not built");
+            return;
+        };
+
+        for (name, extra_args) in [
+            ("jxl-modular-xyb", Vec::<&str>::new()),
+            ("jxl-modular-xyb-noise", vec!["--photon_noise_iso=3200"]),
+        ] {
+            let input = unique_temp_path(&format!("{name}-source"), "ppm");
+            let encoded = unique_temp_path(name, "jxl");
+            let reference_output = unique_temp_path(&format!("{name}-reference"), "ppm");
+            write_split_vardct_source_ppm(&input);
+
+            let mut cjxl_command = Command::new(&cjxl);
+            cjxl_command
+                .arg(&input)
+                .arg(&encoded)
+                .args(["-d", "1", "-m", "1", "--container=0", "--quiet"])
+                .args(extra_args);
+            let cjxl_output = cjxl_command.output().unwrap();
+            let _ = std::fs::remove_file(&input);
+            assert!(
+                cjxl_output.status.success(),
+                "reference cjxl failed for {name}: {}",
+                String::from_utf8_lossy(&cjxl_output.stderr)
+            );
+
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&reference_output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed for {name}: {}",
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+            let reference = std::fs::read(&reference_output).unwrap();
+            let _ = std::fs::remove_file(&reference_output);
+            let reference = parse_ppm_rgb(&reference);
+
+            let encoded_bytes = std::fs::read(&encoded).unwrap();
+            let _ = std::fs::remove_file(&encoded);
+            let info = inspect(&encoded_bytes).unwrap();
+            assert_eq!(
+                info.first_frame.as_ref().unwrap().color_transform,
+                jxl_codec::ColorTransform::Xyb,
+                "{name}"
+            );
+
+            let decoded = decode(&encoded_bytes).unwrap();
+            let rgba = decode_rgba8(&encoded_bytes).unwrap();
+            assert_eq!(rgba.width, 320, "{name}");
+            assert_eq!(rgba.height, 192, "{name}");
+            assert!(rgba.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+
+            let metrics = srgb8_oracle_metrics(
+                &decoded,
+                &reference,
+                &[0, 320 * 192 * 3 / 2, 320 * 192 * 3 - 1],
+            );
+            assert!(
+                metrics.max_abs_error <= 1,
+                "modular XYB max error for {name}: {}",
+                metrics.max_abs_error
+            );
+            assert!(
+                metrics.sum_abs_error <= 50_000,
+                "modular XYB absolute error sum for {name}: {}",
+                metrics.sum_abs_error
+            );
+        }
     }
 
     #[test]

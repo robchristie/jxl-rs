@@ -1011,6 +1011,47 @@ pub fn assemble_vardct_linear_rgb_image(plan: &VarDctDecodePlan) -> Result<Optio
         .map(|image| image.map(|image| vardct_xyb_to_linear_rgb(&image, &plan.opsin_params)))
 }
 
+/// Builds inverse opsin parameters for XYB-to-linear-RGB conversion.
+pub fn xyb_opsin_params(
+    metadata: &ImageMetadata,
+    transform_data: &CustomTransformData,
+) -> VarDctOpsinParams {
+    vardct_opsin_params(metadata, transform_data)
+}
+
+/// Converts an XYB image to linear RGB using the JPEG XL inverse opsin path.
+pub fn xyb_image_to_linear_rgb(xyb: &VarDctXybImage, opsin: &VarDctOpsinParams) -> VarDctRgbImage {
+    vardct_xyb_to_linear_rgb(xyb, opsin)
+}
+
+/// Converts an XYB image to interleaved sRGB8.
+pub fn xyb_image_to_srgb8(xyb: &VarDctXybImage, opsin: &VarDctOpsinParams) -> VarDctSrgb8Image {
+    vardct_linear_rgb_to_srgb8(&vardct_xyb_to_linear_rgb(xyb, opsin))
+}
+
+/// Converts an XYB image to interleaved sRGB8 with an explicit inverse variant.
+pub fn xyb_image_to_srgb8_with_variant(
+    xyb: &VarDctXybImage,
+    opsin: &VarDctOpsinParams,
+    variant: VarDctXybInverseVariant,
+) -> VarDctSrgb8Image {
+    vardct_linear_rgb_to_srgb8(&vardct_xyb_to_linear_rgb_with_variant(xyb, opsin, variant))
+}
+
+/// Converts an XYB image to interleaved sRGB16.
+pub fn xyb_image_to_srgb16(xyb: &VarDctXybImage, opsin: &VarDctOpsinParams) -> VarDctSrgb16Image {
+    vardct_linear_rgb_to_srgb16(&vardct_xyb_to_linear_rgb(xyb, opsin))
+}
+
+/// Converts an XYB image to interleaved sRGB16 with an explicit inverse variant.
+pub fn xyb_image_to_srgb16_with_variant(
+    xyb: &VarDctXybImage,
+    opsin: &VarDctOpsinParams,
+    variant: VarDctXybInverseVariant,
+) -> VarDctSrgb16Image {
+    vardct_linear_rgb_to_srgb16(&vardct_xyb_to_linear_rgb_with_variant(xyb, opsin, variant))
+}
+
 /// Assembles available VarDCT XYB data and converts it to interleaved sRGB8.
 ///
 /// This is a debugging and fixture-oracle convenience layer over
