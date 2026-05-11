@@ -217,10 +217,11 @@ impl Decoder {
     ///
     /// Modular still images return their decoded integer samples, preserving
     /// the decoded sample bit depth. Supported VarDCT still images return 8-bit
-    /// sRGB RGB samples with no alpha channel.
+    /// sRGB RGB samples with no alpha channel. Pixel output applies JPEG XL
+    /// orientation metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
-    /// not yet apply full JPEG XL color management or orientation handling.
+    /// not yet apply full JPEG XL color management.
     /// VarDCT ROI is implemented as post-reconstruction cropping and may decode
     /// the full frame internally. Unreconstructed VarDCT layouts return
     /// [`Error::Unsupported`].
@@ -233,10 +234,10 @@ impl Decoder {
     ///
     /// Modular still images are decoded through the raw-channel path and then
     /// scaled or expanded to RGBA8. Supported VarDCT still images return opaque
-    /// sRGB RGBA8.
+    /// sRGB RGBA8. Pixel output applies JPEG XL orientation metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
-    /// not yet apply full JPEG XL color management or orientation handling.
+    /// not yet apply full JPEG XL color management.
     /// VarDCT ROI is implemented as post-reconstruction cropping and may decode
     /// the full frame internally. Unreconstructed VarDCT layouts return
     /// [`Error::Unsupported`].
@@ -249,10 +250,10 @@ impl Decoder {
     ///
     /// Modular still images are decoded through the raw-channel path and then
     /// scaled or expanded to RGBA16. Supported VarDCT still images return opaque
-    /// sRGB RGBA16.
+    /// sRGB RGBA16. Pixel output applies JPEG XL orientation metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
-    /// not yet apply full JPEG XL color management or orientation handling.
+    /// not yet apply full JPEG XL color management.
     /// VarDCT ROI is implemented as post-reconstruction cropping and may decode
     /// the full frame internally. Unreconstructed VarDCT layouts return
     /// [`Error::Unsupported`].
@@ -420,11 +421,13 @@ fn decode_buffered(
 ) -> Result<DecodedImage> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
-        return decoded_image_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
+        let orientation = codestream.metadata.orientation;
+        let image = decoded_image_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
             &codestream,
             config.region,
             vardct_pass,
-        )?);
+        )?)?;
+        return orient_decoded_image(image, orientation);
     }
     reject_vardct_pass_for_non_vardct(vardct_pass)?;
 
@@ -432,8 +435,9 @@ fn decode_buffered(
 }
 
 fn decode_buffered_codestream(codestream: jxl_codec::Codestream) -> Result<DecodedImage> {
+    let orientation = codestream.metadata.orientation;
     let channels = decode_channels_codestream(codestream, false)?;
-    decode_buffered_channels(channels)
+    orient_decoded_image(decode_buffered_channels(channels)?, orientation)
 }
 
 fn decode_buffered_channels(channels: DecodedChannels) -> Result<DecodedImage> {
@@ -478,11 +482,13 @@ fn decode_rgba8_buffered(
 ) -> Result<RgbaImage> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
-        return rgba8_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
+        let orientation = codestream.metadata.orientation;
+        let image = rgba8_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
             &codestream,
             config.region,
             vardct_pass,
-        )?);
+        )?)?;
+        return orient_rgba8(image, orientation);
     }
     reject_vardct_pass_for_non_vardct(vardct_pass)?;
 
@@ -564,11 +570,13 @@ fn decode_rgba16_buffered(
 ) -> Result<Rgba16Image> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
-        return rgba16_from_vardct_srgb16(vardct_srgb16_image_from_codestream(
+        let orientation = codestream.metadata.orientation;
+        let image = rgba16_from_vardct_srgb16(vardct_srgb16_image_from_codestream(
             &codestream,
             config.region,
             vardct_pass,
-        )?);
+        )?)?;
+        return orient_rgba16(image, orientation);
     }
     reject_vardct_pass_for_non_vardct(vardct_pass)?;
 
@@ -746,6 +754,128 @@ fn crop_interleaved_u16(
         output.extend_from_slice(row);
     }
     Ok(output)
+}
+
+fn orient_decoded_image(image: DecodedImage, orientation: Orientation) -> Result<DecodedImage> {
+    let channels = decoded_image_output_channels(&image);
+    match image.pixels {
+        PixelData::U8(samples) => {
+            let (width, height, pixels) =
+                orient_interleaved(samples, image.width, image.height, channels, orientation)?;
+            Ok(DecodedImage {
+                width,
+                height,
+                color_channels: image.color_channels,
+                alpha: image.alpha,
+                bit_depth: image.bit_depth,
+                pixels: PixelData::U8(pixels),
+            })
+        }
+        PixelData::U16(samples) => {
+            let (width, height, pixels) =
+                orient_interleaved(samples, image.width, image.height, channels, orientation)?;
+            Ok(DecodedImage {
+                width,
+                height,
+                color_channels: image.color_channels,
+                alpha: image.alpha,
+                bit_depth: image.bit_depth,
+                pixels: PixelData::U16(pixels),
+            })
+        }
+    }
+}
+
+fn orient_rgba8(image: RgbaImage, orientation: Orientation) -> Result<RgbaImage> {
+    let (width, height, pixels) =
+        orient_interleaved(image.pixels, image.width, image.height, 4, orientation)?;
+    Ok(RgbaImage {
+        width,
+        height,
+        pixels,
+    })
+}
+
+fn orient_rgba16(image: Rgba16Image, orientation: Orientation) -> Result<Rgba16Image> {
+    let (width, height, pixels) =
+        orient_interleaved(image.pixels, image.width, image.height, 4, orientation)?;
+    Ok(Rgba16Image {
+        width,
+        height,
+        pixels,
+    })
+}
+
+fn orient_interleaved<T: Copy>(
+    samples: Vec<T>,
+    width: u32,
+    height: u32,
+    channels: usize,
+    orientation: Orientation,
+) -> Result<(u32, u32, Vec<T>)> {
+    let sample_count = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let expected_len = sample_count
+        .checked_mul(channels)
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    if samples.len() != expected_len {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+    if orientation == Orientation::Identity {
+        return Ok((width, height, samples));
+    }
+
+    let (output_width, output_height) = oriented_dimensions(width, height, orientation);
+    let mut output = Vec::with_capacity(expected_len);
+    for y in 0..output_height {
+        for x in 0..output_width {
+            let (source_x, source_y) = oriented_source_position(width, height, x, y, orientation);
+            let source_index = ((source_y as usize)
+                .checked_mul(width as usize)
+                .and_then(|index| index.checked_add(source_x as usize))
+                .and_then(|index| index.checked_mul(channels)))
+            .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+            let pixel = samples
+                .get(source_index..source_index + channels)
+                .ok_or(Error::InvalidCodestream("decoded pixel count mismatch"))?;
+            output.extend_from_slice(pixel);
+        }
+    }
+
+    Ok((output_width, output_height, output))
+}
+
+fn oriented_dimensions(width: u32, height: u32, orientation: Orientation) -> (u32, u32) {
+    match orientation {
+        Orientation::Transpose
+        | Orientation::Rotate90Cw
+        | Orientation::AntiTranspose
+        | Orientation::Rotate90Ccw => (height, width),
+        Orientation::Identity
+        | Orientation::FlipHorizontal
+        | Orientation::Rotate180
+        | Orientation::FlipVertical => (width, height),
+    }
+}
+
+fn oriented_source_position(
+    width: u32,
+    height: u32,
+    x: u32,
+    y: u32,
+    orientation: Orientation,
+) -> (u32, u32) {
+    match orientation {
+        Orientation::Identity => (x, y),
+        Orientation::FlipHorizontal => (width - 1 - x, y),
+        Orientation::Rotate180 => (width - 1 - x, height - 1 - y),
+        Orientation::FlipVertical => (x, height - 1 - y),
+        Orientation::Transpose => (y, x),
+        Orientation::Rotate90Cw => (y, height - 1 - x),
+        Orientation::AntiTranspose => (width - 1 - y, height - 1 - x),
+        Orientation::Rotate90Ccw => (width - 1 - y, x),
+    }
 }
 
 fn vardct_srgb_sample_count(width: u32, height: u32) -> Result<usize> {
@@ -1153,6 +1283,42 @@ mod tests {
             out_of_bounds_roi_decoder.decode_channels(&bytes),
             Err(Error::InvalidCodestream("modular region is outside image"))
         );
+    }
+
+    #[test]
+    fn interleaved_orientation_matches_jpeg_xl_codes() {
+        let samples = vec![1u8, 2, 3, 4, 5, 6];
+        let cases = [
+            (Orientation::Identity, 2, 3, vec![1, 2, 3, 4, 5, 6]),
+            (Orientation::FlipHorizontal, 2, 3, vec![2, 1, 4, 3, 6, 5]),
+            (Orientation::Rotate180, 2, 3, vec![6, 5, 4, 3, 2, 1]),
+            (Orientation::FlipVertical, 2, 3, vec![5, 6, 3, 4, 1, 2]),
+            (Orientation::Transpose, 3, 2, vec![1, 3, 5, 2, 4, 6]),
+            (Orientation::Rotate90Cw, 3, 2, vec![5, 3, 1, 6, 4, 2]),
+            (Orientation::AntiTranspose, 3, 2, vec![6, 4, 2, 5, 3, 1]),
+            (Orientation::Rotate90Ccw, 3, 2, vec![2, 4, 6, 1, 3, 5]),
+        ];
+
+        for (orientation, width, height, expected) in cases {
+            let (actual_width, actual_height, actual) =
+                orient_interleaved(samples.clone(), 2, 3, 1, orientation).unwrap();
+            assert_eq!(
+                (actual_width, actual_height, actual),
+                (width, height, expected),
+                "orientation {orientation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn interleaved_orientation_preserves_pixel_components() {
+        let samples = vec![1u8, 10, 2, 20, 3, 30, 4, 40];
+        let (width, height, oriented) =
+            orient_interleaved(samples, 2, 2, 2, Orientation::Rotate90Cw).unwrap();
+
+        assert_eq!(width, 2);
+        assert_eq!(height, 2);
+        assert_eq!(oriented, vec![3, 30, 1, 10, 4, 40, 2, 20]);
     }
 
     #[test]
