@@ -2369,6 +2369,60 @@ mod tests {
     }
 
     #[test]
+    fn decode_rgba16_ignores_non_alpha_extra_channels_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping 16-bit extra-channel RGBA comparison; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-rgba16-alpha-depth-source", "pam");
+        let encoded = unique_temp_path("jxl-rgba16-alpha-depth", "jxl");
+        let source = write_alpha_depth_source_pam16(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "0", "-m", "1", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, source.width);
+        assert_eq!(decoded.height, source.height);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(
+            decoded.alpha,
+            Some(AlphaInfo {
+                bit_depth: 16,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(decoded_samples_u16(&decoded), source.rgba);
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.channels.len(), 5);
+        assert_eq!(channels.alpha, decoded.alpha);
+        let ChannelData::U16(depth) = &channels.channels[3].samples else {
+            panic!("expected 16-bit depth extra channel");
+        };
+        assert_eq!(depth, &source.depth);
+
+        let rgba = decode_rgba16(&encoded_bytes).unwrap();
+        assert_eq!(rgba.width, source.width);
+        assert_eq!(rgba.height, source.height);
+        assert_eq!(rgba.pixels, source.rgba);
+    }
+
+    #[test]
     fn decode_rgba8_unpremultiplies_associated_alpha_when_available() {
         let Some(cjxl) = reference_cjxl() else {
             eprintln!("skipping premultiplied alpha comparison; reference cjxl is not built");
@@ -2418,6 +2472,57 @@ mod tests {
     }
 
     #[test]
+    fn decode_rgba16_unpremultiplies_associated_alpha_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!(
+                "skipping 16-bit premultiplied alpha comparison; reference cjxl is not built"
+            );
+            return;
+        };
+
+        let input = unique_temp_path("jxl-rgba16-premul-alpha-source", "pam");
+        let encoded = unique_temp_path("jxl-rgba16-premul-alpha", "jxl");
+        let expected_rgba = write_premultiplied_alpha_source_pam16(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args([
+                "-d",
+                "0",
+                "-m",
+                "1",
+                "--container=0",
+                "--premultiply=1",
+                "--quiet",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let decoded = decode(&encoded_bytes).unwrap();
+
+        assert_eq!(
+            decoded.alpha,
+            Some(AlphaInfo {
+                bit_depth: 16,
+                premultiplied: true,
+            })
+        );
+        let rgba = decode_rgba16(&encoded_bytes).unwrap();
+        assert_eq!(rgba.width, decoded.width);
+        assert_eq!(rgba.height, decoded.height);
+        assert_eq!(rgba.pixels, expected_rgba);
+    }
+
+    #[test]
     fn scales_samples_to_u8_with_rounding() {
         assert_eq!(scale_sample_to_u8(0, 16), 0);
         assert_eq!(scale_sample_to_u8(65_535, 16), 255);
@@ -2452,6 +2557,14 @@ mod tests {
         height: u32,
         rgba: Vec<u8>,
         depth: Vec<u8>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct AlphaDepthPam16 {
+        width: u32,
+        height: u32,
+        rgba: Vec<u16>,
+        depth: Vec<u16>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2860,6 +2973,40 @@ mod tests {
         }
     }
 
+    fn write_alpha_depth_source_pam16(path: &Path) -> AlphaDepthPam16 {
+        let width = 21u32;
+        let height = 13u32;
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 5\nMAXVAL 65535\nTUPLTYPE RGB\nTUPLTYPE Depth\nTUPLTYPE Alpha\nENDHDR\n"
+        )
+        .into_bytes();
+        let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        let mut depth = Vec::with_capacity(width as usize * height as usize);
+        for y in 0..height {
+            for x in 0..width {
+                let pixel = [
+                    ((x * 1021 + y * 137 + 17) & 0xffff) as u16,
+                    ((x * 257 + y * 1879 + 29) & 0xffff) as u16,
+                    ((x * 4093 + y * 383 + 43) & 0xffff) as u16,
+                    ((x * 1723 + y * 3253 + 61) & 0xffff) as u16,
+                ];
+                let depth_sample = ((x * 2017 + y * 1543 + 73) & 0xffff) as u16;
+                for sample in pixel[..3].iter().copied().chain([depth_sample, pixel[3]]) {
+                    bytes.extend_from_slice(&sample.to_be_bytes());
+                }
+                rgba.extend_from_slice(&pixel);
+                depth.push(depth_sample);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+        AlphaDepthPam16 {
+            width,
+            height,
+            rgba,
+            depth,
+        }
+    }
+
     fn write_premultiplied_alpha_source_pam(path: &Path) -> Vec<u8> {
         let width = 17u32;
         let height = 11u32;
@@ -2896,6 +3043,49 @@ mod tests {
                 }
                 bytes.push(alpha as u8);
                 expected_rgba.push(alpha as u8);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+        expected_rgba
+    }
+
+    fn write_premultiplied_alpha_source_pam16(path: &Path) -> Vec<u16> {
+        let width = 19u32;
+        let height = 15u32;
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 4\nMAXVAL 65535\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+        )
+        .into_bytes();
+        let mut expected_rgba = Vec::with_capacity(width as usize * height as usize * 4);
+        for y in 0..height {
+            for x in 0..width {
+                let alpha = match (x + y * 5) % 11 {
+                    0 => 0,
+                    1 => 1,
+                    2 => 257,
+                    3 => 4096,
+                    4 => 16_384,
+                    5 => 32_768,
+                    6 => 49_152,
+                    7 => 65_534,
+                    _ => 65_535,
+                };
+                let straight = [
+                    ((x * 2971 + y * 359 + 11) & 0xffff) as u16,
+                    ((x * 811 + y * 2371 + 37) & 0xffff) as u16,
+                    ((x * 1237 + y * 1597 + 91) & 0xffff) as u16,
+                ];
+                for sample in straight {
+                    let premultiplied = ((u32::from(sample) * alpha + 32_767) / 65_535) as u16;
+                    bytes.extend_from_slice(&premultiplied.to_be_bytes());
+                    expected_rgba.push(unpremultiply_sample_to(
+                        u32::from(premultiplied),
+                        alpha,
+                        u16::MAX as u32,
+                    ) as u16);
+                }
+                bytes.extend_from_slice(&(alpha as u16).to_be_bytes());
+                expected_rgba.push(alpha as u16);
             }
         }
         std::fs::write(path, bytes).unwrap();
