@@ -202,9 +202,9 @@ impl Decoder {
     /// samples are ROI-local: sample `(0, 0)` corresponds to the requested
     /// image-space coordinate `(roi.x, roi.y)`.
     ///
-    /// ROI decode is currently supported for modular still images. VarDCT raw
-    /// channel output remains unsupported because VarDCT reconstruction exposes
-    /// image-space RGB/XYB data rather than original raw channels.
+    /// Modular still images return decoded integer channels. Supported VarDCT
+    /// still images return reconstructed 8-bit sRGB RGB channels, not original
+    /// codestream channels.
     pub fn decode_channels(&self, input: &[u8]) -> Result<DecodedChannels> {
         self.validate_shared_options()?;
         if self.options.vardct_pass.is_some() {
@@ -334,8 +334,8 @@ fn decode_channels_buffered(
     input: &[u8],
     config: jxl_codec::DecodeConfig,
 ) -> Result<DecodedChannels> {
-    let (_, codestream) = jxl_codec::parse_file_with_config(input, config)?;
-    decode_channels_codestream(codestream, config.region.is_some())
+    let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
+    decode_channels_codestream(codestream, config.region)
 }
 
 fn parse_file_for_public_pixel_decode(
@@ -371,10 +371,12 @@ fn first_frame_vardct_plan(codestream: &jxl_codec::Codestream) -> Result<&VarDct
 
 fn decode_channels_codestream(
     codestream: jxl_codec::Codestream,
-    region_requested: bool,
+    region: Option<jxl_codec::ImageRegion>,
 ) -> Result<DecodedChannels> {
-    if first_frame_encoding(&codestream)? != FrameEncoding::Modular {
-        return Err(Error::Unsupported("VarDCT image decode"));
+    if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
+        let orientation = codestream.metadata.orientation;
+        let image = vardct_srgb8_image_from_codestream(&codestream, region, None)?;
+        return decoded_channels_from_vardct_srgb8(image, orientation);
     }
     let modular = codestream
         .first_frame_modular
@@ -383,7 +385,7 @@ fn decode_channels_codestream(
     let image = match modular.image.as_ref() {
         Some(image) => image,
         None => {
-            return Err(modular.image_error.clone().unwrap_or(if region_requested {
+            return Err(modular.image_error.clone().unwrap_or(if region.is_some() {
                 Error::Unsupported("region-of-interest raw channel decode")
             } else {
                 Error::Unsupported("modular pixel reconstruction")
@@ -436,7 +438,7 @@ fn decode_buffered(
 
 fn decode_buffered_codestream(codestream: jxl_codec::Codestream) -> Result<DecodedImage> {
     let orientation = codestream.metadata.orientation;
-    let channels = decode_channels_codestream(codestream, false)?;
+    let channels = decode_channels_codestream(codestream, None)?;
     orient_decoded_image(decode_buffered_channels(channels)?, orientation)
 }
 
@@ -543,6 +545,43 @@ fn decoded_image_from_vardct_srgb8(image: jxl_codec::VarDctSrgb8Image) -> Result
         alpha: None,
         bit_depth: 8,
         pixels: PixelData::U8(image.pixels),
+    })
+}
+
+fn decoded_channels_from_vardct_srgb8(
+    image: jxl_codec::VarDctSrgb8Image,
+    orientation: Orientation,
+) -> Result<DecodedChannels> {
+    let (width, height, pixels) =
+        orient_interleaved(image.pixels, image.width, image.height, 3, orientation)?;
+    let sample_count = vardct_srgb_sample_count(width, height)?;
+    let mut channels = [
+        Vec::with_capacity(sample_count),
+        Vec::with_capacity(sample_count),
+        Vec::with_capacity(sample_count),
+    ];
+    for pixel in pixels.chunks_exact(3) {
+        channels[0].push(pixel[0]);
+        channels[1].push(pixel[1]);
+        channels[2].push(pixel[2]);
+    }
+
+    Ok(DecodedChannels {
+        width,
+        height,
+        color_channels: 3,
+        alpha: None,
+        bit_depth: 8,
+        channels: channels
+            .into_iter()
+            .map(|samples| DecodedChannel {
+                width,
+                height,
+                hshift: 0,
+                vshift: 0,
+                samples: ChannelData::U8(samples),
+            })
+            .collect(),
     })
 }
 
@@ -1597,7 +1636,7 @@ mod tests {
         );
         assert_eq!(
             decode_channels(&bytes),
-            Err(Error::Unsupported("VarDCT image decode"))
+            Err(Error::Unsupported("VarDCT image reconstruction"))
         );
         assert_eq!(
             decode_rgba8(&bytes),
@@ -1605,7 +1644,7 @@ mod tests {
         );
         assert_eq!(
             roi_decoder.decode_channels(&bytes),
-            Err(Error::Unsupported("VarDCT image decode"))
+            Err(Error::Unsupported("VarDCT image reconstruction"))
         );
         assert_eq!(
             roi_decoder.decode(&bytes),
@@ -1697,15 +1736,8 @@ mod tests {
             height: 1,
         });
 
-        assert_eq!(
-            decode_channels(&encoded_bytes),
-            Err(Error::Unsupported("VarDCT image decode"))
-        );
-        assert_eq!(
-            roi_decoder.decode_channels(&encoded_bytes),
-            Err(Error::Unsupported("VarDCT image decode"))
-        );
-
+        let decoded_channels = decode_channels(&encoded_bytes).unwrap();
+        let roi_channels = roi_decoder.decode_channels(&encoded_bytes).unwrap();
         let decoded = decode(&encoded_bytes).unwrap();
         let rgba = decode_rgba8(&encoded_bytes).unwrap();
         let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
@@ -1745,6 +1777,8 @@ mod tests {
                 .chunks_exact(3)
                 .any(|pixel| pixel[0] != 0 || pixel[1] != 0 || pixel[2] != 0)
         );
+        assert_decoded_channels_match_image(&decoded_channels, &decoded);
+        assert_roi_matches_full_channels(&roi_channels, &decoded_channels, roi);
         if let Some(reference) = &reference {
             assert_eq!(decoded.width, reference.width);
             assert_eq!(decoded.height, reference.height);
@@ -2389,6 +2423,51 @@ mod tests {
             roi_image.pixels,
             window_interleaved_u16(&full.pixels, full.width, 4, roi)
         );
+    }
+
+    fn assert_decoded_channels_match_image(channels: &DecodedChannels, image: &DecodedImage) {
+        assert_eq!(channels.width, image.width);
+        assert_eq!(channels.height, image.height);
+        assert_eq!(channels.color_channels, image.color_channels);
+        assert_eq!(channels.alpha, image.alpha);
+        assert_eq!(channels.bit_depth, image.bit_depth);
+        assert_eq!(
+            channels.channels.len(),
+            decoded_image_output_channels(image)
+        );
+        for channel in &channels.channels {
+            assert_eq!(channel.width, image.width);
+            assert_eq!(channel.height, image.height);
+            assert_eq!(channel.hshift, 0);
+            assert_eq!(channel.vshift, 0);
+        }
+
+        match &image.pixels {
+            PixelData::U8(pixels) => {
+                let mut interleaved = Vec::with_capacity(pixels.len());
+                for index in 0..decoded_image_sample_count(image).unwrap() {
+                    for channel in &channels.channels {
+                        let ChannelData::U8(samples) = &channel.samples else {
+                            panic!("channel bit depth did not match decoded image");
+                        };
+                        interleaved.push(samples[index]);
+                    }
+                }
+                assert_eq!(&interleaved, pixels);
+            }
+            PixelData::U16(pixels) => {
+                let mut interleaved = Vec::with_capacity(pixels.len());
+                for index in 0..decoded_image_sample_count(image).unwrap() {
+                    for channel in &channels.channels {
+                        let ChannelData::U16(samples) = &channel.samples else {
+                            panic!("channel bit depth did not match decoded image");
+                        };
+                        interleaved.push(samples[index]);
+                    }
+                }
+                assert_eq!(&interleaved, pixels);
+            }
+        }
     }
 
     fn assert_roi_matches_full_channels(
