@@ -66,6 +66,10 @@ pub struct DecodedChannel {
     pub height: u32,
     pub hshift: i32,
     pub vshift: i32,
+    /// Integer sample bit depth for this decoded channel.
+    ///
+    /// This usually equals [`DecodedChannels::bit_depth`] for color channels,
+    /// but JPEG XL extra channels may use their own bit depth.
     pub bit_depth: u32,
     pub samples: ChannelData,
 }
@@ -202,6 +206,10 @@ impl Decoder {
     /// [`DecodedChannels::height`] are the requested region dimensions. Channel
     /// samples are ROI-local: sample `(0, 0)` corresponds to the requested
     /// image-space coordinate `(roi.x, roi.y)`.
+    ///
+    /// [`DecodedChannels::bit_depth`] is the main image bit depth. Individual
+    /// channels also expose [`DecodedChannel::bit_depth`] because JPEG XL extra
+    /// channels, including alpha, may use a different sample depth.
     ///
     /// Modular still images return decoded integer channels. Supported VarDCT
     /// still images return reconstructed 8-bit sRGB RGB channels, not original
@@ -2439,6 +2447,14 @@ mod tests {
         let channels = decode_channels(&encoded_bytes).unwrap();
         assert_eq!(channels.channels.len(), 5);
         assert_eq!(channels.alpha, decoded.alpha);
+        assert_eq!(
+            channels
+                .channels
+                .iter()
+                .map(|channel| channel.bit_depth)
+                .collect::<Vec<_>>(),
+            vec![8, 8, 8, 8, 8]
+        );
         let ChannelData::U8(depth) = &channels.channels[3].samples else {
             panic!("expected 8-bit depth extra channel");
         };
@@ -2493,6 +2509,14 @@ mod tests {
         let channels = decode_channels(&encoded_bytes).unwrap();
         assert_eq!(channels.channels.len(), 5);
         assert_eq!(channels.alpha, decoded.alpha);
+        assert_eq!(
+            channels
+                .channels
+                .iter()
+                .map(|channel| channel.bit_depth)
+                .collect::<Vec<_>>(),
+            vec![16, 16, 16, 16, 16]
+        );
         let ChannelData::U16(depth) = &channels.channels[3].samples else {
             panic!("expected 16-bit depth extra channel");
         };
@@ -2652,6 +2676,14 @@ mod tests {
                 },
             ],
         };
+        assert_eq!(
+            channels
+                .channels
+                .iter()
+                .map(|channel| channel.bit_depth)
+                .collect::<Vec<_>>(),
+            vec![16, 16, 16, 8]
+        );
 
         let rgba8 = rgba8_from_decoded_channels(&channels, Some(3)).unwrap();
         assert_eq!(rgba8.pixels, vec![128, 255, 255, 128, 0, 0, 255, 0]);
