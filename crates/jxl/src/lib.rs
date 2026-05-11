@@ -214,8 +214,7 @@ impl Decoder {
     /// Modular still images return decoded integer channels. Supported VarDCT
     /// still images return reconstructed 8-bit sRGB RGB channels, not original
     /// codestream channels. VarDCT extra channels are exposed when their
-    /// modular AC side streams are decoded; VarDCT presentation output still
-    /// rejects alpha until compositing is implemented.
+    /// modular AC side streams are decoded.
     pub fn decode_channels(&self, input: &[u8]) -> Result<DecodedChannels> {
         self.validate_shared_options()?;
         decode_channels_buffered(input, self.codec_config(), self.options.vardct_pass)
@@ -227,10 +226,8 @@ impl Decoder {
     /// the decoded sample bit depth. The interleaved output includes color
     /// channels plus the first alpha channel when present; other extra channels
     /// remain available through [`Decoder::decode_channels`]. Supported VarDCT
-    /// still images return 8-bit sRGB RGB samples when no alpha channel is
-    /// present; VarDCT alpha output is rejected until extra-channel
-    /// reconstruction is implemented. Pixel output applies JPEG XL orientation
-    /// metadata.
+    /// still images return 8-bit sRGB RGB samples plus decoded alpha when
+    /// present. Pixel output applies JPEG XL orientation metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management.
@@ -248,10 +245,8 @@ impl Decoder {
     /// scaled or expanded to RGBA8. If the codestream marks alpha as
     /// associated/premultiplied, color samples are unpremultiplied for this
     /// presentation output. Non-alpha extra channels are ignored. Supported
-    /// VarDCT still images return opaque sRGB RGBA8 when no alpha channel is
-    /// present; VarDCT alpha output is rejected until extra-channel
-    /// reconstruction is implemented. Pixel output applies JPEG XL orientation
-    /// metadata.
+    /// VarDCT still images return sRGB RGBA8 with decoded alpha when present.
+    /// Pixel output applies JPEG XL orientation metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management.
@@ -269,10 +264,8 @@ impl Decoder {
     /// scaled or expanded to RGBA16. If the codestream marks alpha as
     /// associated/premultiplied, color samples are unpremultiplied for this
     /// presentation output. Non-alpha extra channels are ignored. Supported
-    /// VarDCT still images return opaque sRGB RGBA16 when no alpha channel is
-    /// present; VarDCT alpha output is rejected until extra-channel
-    /// reconstruction is implemented. Pixel output applies JPEG XL orientation
-    /// metadata.
+    /// VarDCT still images return sRGB RGBA16 with decoded alpha when present.
+    /// Pixel output applies JPEG XL orientation metadata.
     ///
     /// VarDCT output is currently a reconstruction convenience path: it does
     /// not yet apply full JPEG XL color management.
@@ -398,11 +391,7 @@ fn decode_channels_codestream(
     vardct_pass: Option<usize>,
 ) -> Result<DecodedChannels> {
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
-        let orientation = codestream.metadata.orientation;
-        let image = vardct_srgb8_image_from_codestream(&codestream, region, vardct_pass)?;
-        let mut channels = decoded_channels_from_vardct_srgb8(image)?;
-        append_vardct_extra_channels(&mut channels, &codestream, region, vardct_pass)?;
-        return orient_decoded_channels(channels, orientation);
+        return decode_vardct_channels_codestream(&codestream, region, vardct_pass);
     }
     reject_vardct_pass_for_non_vardct(vardct_pass)?;
     let modular = codestream
@@ -467,6 +456,12 @@ fn decode_buffered(
 ) -> Result<DecodedImage> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
+        let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
+        if alpha_channel_index.is_some() {
+            let channels =
+                decode_vardct_channels_codestream(&codestream, config.region, vardct_pass)?;
+            return decode_buffered_channels(channels, alpha_channel_index);
+        }
         reject_vardct_alpha_output(&codestream.metadata)?;
         let orientation = codestream.metadata.orientation;
         let image = decoded_image_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
@@ -538,6 +533,12 @@ fn decode_rgba8_buffered(
 ) -> Result<RgbaImage> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
+        let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
+        if alpha_channel_index.is_some() {
+            let channels =
+                decode_vardct_channels_codestream(&codestream, config.region, vardct_pass)?;
+            return rgba8_from_decoded_channels(&channels, alpha_channel_index);
+        }
         reject_vardct_alpha_output(&codestream.metadata)?;
         let orientation = codestream.metadata.orientation;
         let image = rgba8_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
@@ -642,6 +643,65 @@ fn decoded_channels_from_vardct_srgb8(
             })
             .collect(),
     })
+}
+
+fn decoded_channels_from_vardct_srgb16(
+    image: jxl_codec::VarDctSrgb16Image,
+) -> Result<DecodedChannels> {
+    let sample_count = vardct_srgb_sample_count(image.width, image.height)?;
+    let mut channels = [
+        Vec::with_capacity(sample_count),
+        Vec::with_capacity(sample_count),
+        Vec::with_capacity(sample_count),
+    ];
+    for pixel in image.pixels.chunks_exact(3) {
+        channels[0].push(pixel[0]);
+        channels[1].push(pixel[1]);
+        channels[2].push(pixel[2]);
+    }
+
+    Ok(DecodedChannels {
+        width: image.width,
+        height: image.height,
+        color_channels: 3,
+        alpha: None,
+        bit_depth: 16,
+        channels: channels
+            .into_iter()
+            .map(|samples| DecodedChannel {
+                width: image.width,
+                height: image.height,
+                hshift: 0,
+                vshift: 0,
+                bit_depth: 16,
+                samples: ChannelData::U16(samples),
+            })
+            .collect(),
+    })
+}
+
+fn decode_vardct_channels_codestream(
+    codestream: &jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+    vardct_pass: Option<usize>,
+) -> Result<DecodedChannels> {
+    let orientation = codestream.metadata.orientation;
+    let image = vardct_srgb8_image_from_codestream(codestream, region, vardct_pass)?;
+    let mut channels = decoded_channels_from_vardct_srgb8(image)?;
+    append_vardct_extra_channels(&mut channels, codestream, region, vardct_pass)?;
+    orient_decoded_channels(channels, orientation)
+}
+
+fn decode_vardct_channels_codestream_rgb16(
+    codestream: &jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+    vardct_pass: Option<usize>,
+) -> Result<DecodedChannels> {
+    let orientation = codestream.metadata.orientation;
+    let image = vardct_srgb16_image_from_codestream(codestream, region, vardct_pass)?;
+    let mut channels = decoded_channels_from_vardct_srgb16(image)?;
+    append_vardct_extra_channels(&mut channels, codestream, region, vardct_pass)?;
+    orient_decoded_channels(channels, orientation)
 }
 
 fn append_vardct_extra_channels(
@@ -848,6 +908,12 @@ fn decode_rgba16_buffered(
 ) -> Result<Rgba16Image> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
+        let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
+        if alpha_channel_index.is_some() {
+            let channels =
+                decode_vardct_channels_codestream_rgb16(&codestream, config.region, vardct_pass)?;
+            return rgba16_from_decoded_channels(&channels, alpha_channel_index);
+        }
         reject_vardct_alpha_output(&codestream.metadata)?;
         let orientation = codestream.metadata.orientation;
         let image = rgba16_from_vardct_srgb16(vardct_srgb16_image_from_codestream(
@@ -2430,17 +2496,50 @@ mod tests {
         };
         assert_eq!(roi_alpha, &window_u8(&expected_alpha, 320, roi));
 
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, 320);
+        assert_eq!(decoded.height, 192);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.alpha, channels.alpha);
+        let PixelData::U8(decoded_pixels) = &decoded.pixels else {
+            panic!("expected 8-bit VarDCT decoded image");
+        };
+        assert_eq!(decoded_pixels.len(), expected_alpha.len() * 4);
         assert_eq!(
-            decode(&encoded_bytes),
-            Err(Error::Unsupported("VarDCT alpha output"))
+            decoded_pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>(),
+            expected_alpha
         );
+
+        let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba8.width, 320);
+        assert_eq!(rgba8.height, 192);
+        assert_eq!(rgba8.pixels.len(), expected_alpha.len() * 4);
         assert_eq!(
-            decode_rgba8(&encoded_bytes),
-            Err(Error::Unsupported("VarDCT alpha output"))
+            rgba8
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>(),
+            expected_alpha
         );
+
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        assert_eq!(rgba16.width, 320);
+        assert_eq!(rgba16.height, 192);
+        assert_eq!(rgba16.pixels.len(), expected_alpha.len() * 4);
         assert_eq!(
-            decode_rgba16(&encoded_bytes),
-            Err(Error::Unsupported("VarDCT alpha output"))
+            rgba16
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>(),
+            expected_alpha
+                .iter()
+                .map(|&alpha| u16::from(alpha) * 257)
+                .collect::<Vec<_>>()
         );
     }
 
