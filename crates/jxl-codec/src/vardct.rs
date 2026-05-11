@@ -983,6 +983,7 @@ pub struct VarDctPassGroupPayloadMetadata {
     pub modular_ac_stream_id: usize,
     pub modular_ac_min_shift: i32,
     pub modular_ac_max_shift: i32,
+    pub modular_ac_channels: Vec<ModularGroupChannelPlan>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2564,6 +2565,13 @@ pub fn read_vardct_decode_plan(
                     + section.group.group,
                 modular_ac_min_shift,
                 modular_ac_max_shift,
+                modular_ac_channels: vardct_modular_ac_channel_plan(
+                    metadata,
+                    frame_header,
+                    section.group,
+                    modular_ac_min_shift,
+                    modular_ac_max_shift,
+                )?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -6110,6 +6118,84 @@ fn vardct_dc_channel_plan(
     Ok(channels)
 }
 
+fn vardct_modular_ac_channel_plan(
+    metadata: &ImageMetadata,
+    frame_header: &FrameHeader,
+    group: VarDctGroupMetadata,
+    min_shift: i32,
+    max_shift: i32,
+) -> Result<Vec<ModularGroupChannelPlan>> {
+    let frame_upsampling_log = ceil_log2_nonzero(frame_header.upsampling as usize) as i32;
+    let mut channels = Vec::new();
+    for (extra_index, _) in metadata.extra_channels.iter().enumerate() {
+        let upsampling = *frame_header
+            .extra_channel_upsampling
+            .get(extra_index)
+            .ok_or(Error::InvalidCodestream(
+                "missing extra-channel upsampling factor",
+            ))?;
+        if upsampling == 0 {
+            return Err(Error::InvalidCodestream("zero extra-channel upsampling"));
+        }
+        let shift = ceil_log2_nonzero(upsampling as usize) as i32 - frame_upsampling_log;
+        if shift < min_shift || shift > max_shift {
+            continue;
+        }
+
+        let channel_width = frame_header.frame_size.width.div_ceil(upsampling);
+        let channel_height = frame_header.frame_size.height.div_ceil(upsampling);
+        let Some((x0, width)) =
+            shifted_vardct_extra_axis(group.x, group.width, channel_width, shift)?
+        else {
+            continue;
+        };
+        let Some((y0, height)) =
+            shifted_vardct_extra_axis(group.y, group.height, channel_height, shift)?
+        else {
+            continue;
+        };
+        channels.push(ModularGroupChannelPlan {
+            channel_index: 3 + extra_index,
+            width,
+            height,
+            x0,
+            y0,
+            hshift: shift,
+            vshift: shift,
+        });
+    }
+    Ok(channels)
+}
+
+fn shifted_vardct_extra_axis(
+    start: u32,
+    size: u32,
+    channel_size: u32,
+    shift: i32,
+) -> Result<Option<(u32, u32)>> {
+    let (start, size) = if shift >= 0 {
+        let shift = shift as u32;
+        (start >> shift, size >> shift)
+    } else {
+        let shift = (-shift) as u32;
+        (
+            start
+                .checked_shl(shift)
+                .ok_or(Error::InvalidCodestream("extra-channel region overflow"))?,
+            size.checked_shl(shift)
+                .ok_or(Error::InvalidCodestream("extra-channel region overflow"))?,
+        )
+    };
+    if start >= channel_size {
+        return Ok(None);
+    }
+    let size = size.min(channel_size - start);
+    if size == 0 {
+        return Ok(None);
+    }
+    Ok(Some((start, size)))
+}
+
 fn read_vardct_ac_metadata_count(
     reader: &mut BitReader<'_>,
     payload: &VarDctDcGroupPayloadMetadata,
@@ -7721,6 +7807,7 @@ mod tests {
                 modular_ac_stream_id: 0,
                 modular_ac_min_shift: 0,
                 modular_ac_max_shift: 2,
+                modular_ac_channels: Vec::new(),
             },
             cursor: VarDctAcGroupCursorMetadata {
                 payload_start_bits: 0,

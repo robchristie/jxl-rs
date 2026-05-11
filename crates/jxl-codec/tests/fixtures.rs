@@ -2187,6 +2187,70 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
 }
 
 #[test]
+fn generated_vardct_alpha_exposes_modular_ac_channel_plans_when_available() {
+    let Some(cjxl) = reference_cjxl() else {
+        eprintln!("skipping generated VarDCT alpha channel plan; reference cjxl is not built");
+        return;
+    };
+
+    let input = unique_temp_path("jxl-rs-vardct-alpha-source", "pam");
+    let encoded = unique_temp_path("jxl-rs-vardct-alpha", "jxl");
+    write_vardct_alpha_source_pam(&input);
+
+    let cjxl_output = Command::new(&cjxl)
+        .arg(&input)
+        .arg(&encoded)
+        .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&input);
+    assert!(
+        cjxl_output.status.success(),
+        "reference cjxl failed: {}",
+        String::from_utf8_lossy(&cjxl_output.stderr)
+    );
+
+    let encoded_bytes = std::fs::read(&encoded).unwrap();
+    let _ = std::fs::remove_file(&encoded);
+    let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+    assert_eq!(codestream.metadata.extra_channels.len(), 1);
+    assert_eq!(
+        codestream.metadata.extra_channels[0].channel_type,
+        ExtraChannelType::Alpha
+    );
+    let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+    assert_eq!(
+        plan.ac_group_payloads
+            .iter()
+            .map(|payload| (
+                payload.pass,
+                payload.group.group,
+                payload.modular_ac_stream_id,
+                payload.modular_ac_min_shift,
+                payload.modular_ac_max_shift,
+                payload
+                    .modular_ac_channels
+                    .iter()
+                    .map(|channel| (
+                        channel.channel_index,
+                        channel.width,
+                        channel.height,
+                        channel.x0,
+                        channel.y0,
+                        channel.hshift,
+                        channel.vshift,
+                    ))
+                    .collect::<Vec<_>>(),
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, 0, 21, 0, 2, vec![(3, 256, 192, 0, 0, 0, 0)]),
+            (0, 1, 22, 0, 2, vec![(3, 64, 192, 256, 0, 0, 0)]),
+        ]
+    );
+}
+
+#[test]
 fn generated_vardct_xyb_inverse_variants_compare_against_oracle_when_available() {
     let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
         eprintln!("skipping generated VarDCT XYB inverse sweep; reference tools are not built");
@@ -3574,6 +3638,25 @@ fn write_split_vardct_source_ppm(path: &Path) {
             bytes.push(((x * 255 / (width - 1)) ^ checker) as u8);
             bytes.push(((y * 255 / (height - 1)) ^ checker) as u8);
             bytes.push((((x + y) * 255 / (width + height - 2)) ^ checker) as u8);
+        }
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn write_vardct_alpha_source_pam(path: &Path) {
+    let width = 320u32;
+    let height = 192u32;
+    let mut bytes = format!(
+        "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n"
+    )
+    .into_bytes();
+    for y in 0..height {
+        for x in 0..width {
+            let checker = (((x / 16) ^ (y / 16)) & 1) * 48;
+            bytes.push(((x * 255 / (width - 1)) ^ checker) as u8);
+            bytes.push(((y * 255 / (height - 1)) ^ checker) as u8);
+            bytes.push((((x + y) * 255 / (width + height - 2)) ^ checker) as u8);
+            bytes.push(((x * 17 + y * 31 + 53) & 0xff) as u8);
         }
     }
     std::fs::write(path, bytes).unwrap();
