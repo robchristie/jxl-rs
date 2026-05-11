@@ -9,7 +9,8 @@ use jxl_codec::{
     FrameEncoding, FrameSectionKind, FrameType, ImageRegion, ModularGroupExecution,
     TransferFunction, TransformId, VarDctSrgb8Image, VarDctXybInverseVariant,
     assemble_vardct_dc_srgb8_image, assemble_vardct_dc_srgb8_image_with_multiplier,
-    assemble_vardct_dc_xyb_image, assemble_vardct_linear_rgb_image, assemble_vardct_srgb8_image,
+    assemble_vardct_dc_xyb_image, assemble_vardct_linear_rgb_image,
+    assemble_vardct_rgb_srgb8_image, assemble_vardct_srgb8_image,
     assemble_vardct_srgb8_image_for_pass, assemble_vardct_xyb_image,
     assemble_vardct_ycbcr_srgb8_image, parse_file, parse_file_with_config,
     vardct_dc_coefficient_diagnostics, vardct_xyb_inverse_variant_diagnostics,
@@ -3470,6 +3471,78 @@ fn generated_vardct_ycbcr_420_decodes_shifted_dc_and_ac_metadata_when_available(
     assert_eq!(metrics.checksum, 1795393261726045634);
     assert_eq!(metrics.anchors, vec![115, 113, 72, 64]);
     assert_eq!(metrics.reference_anchors, vec![111, 126, 51, 67]);
+}
+
+#[test]
+fn generated_vardct_rgb_jpeg_decodes_color_transform_none_when_available() {
+    let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+        eprintln!("skipping generated VarDCT RGB JPEG fixture; reference tools are not built");
+        return;
+    };
+
+    let input = workspace_path("reference/libjxl/testdata/jxl/flower/flower.png.im_q85_rgb.jpg");
+    let encoded = unique_temp_path("jxl-rs-vardct-rgb-jpeg", "jxl");
+    let reference_output = unique_temp_path("jxl-rs-vardct-rgb-jpeg-reference", "ppm");
+    let cjxl_output = Command::new(&cjxl)
+        .arg(&input)
+        .arg(&encoded)
+        .args(["--allow_jpeg_reconstruction=0", "--container=0", "--quiet"])
+        .output()
+        .unwrap();
+    assert!(
+        cjxl_output.status.success(),
+        "reference cjxl failed for RGB JPEG VarDCT: {}",
+        String::from_utf8_lossy(&cjxl_output.stderr)
+    );
+    let djxl_output = Command::new(&djxl)
+        .arg(&encoded)
+        .arg(&reference_output)
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        djxl_output.status.success(),
+        "reference djxl failed for RGB JPEG VarDCT: {}",
+        String::from_utf8_lossy(&djxl_output.stderr)
+    );
+    let reference = std::fs::read(&reference_output).unwrap();
+    let _ = std::fs::remove_file(&reference_output);
+    let reference = parse_ppm_rgb(&reference);
+
+    let encoded_bytes = std::fs::read(&encoded).unwrap();
+    let _ = std::fs::remove_file(&encoded);
+    let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+    let frame = codestream.first_frame.as_ref().unwrap();
+    assert_eq!(frame.color_transform, ColorTransform::None);
+    assert!(frame.chroma_subsampling.is_444());
+
+    let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+    assert!(
+        plan.ac_group_metadata
+            .iter()
+            .all(|metadata| metadata.parse_error.is_none())
+    );
+    let srgb = assemble_vardct_rgb_srgb8_image(plan).unwrap().unwrap();
+    let width = srgb.width as usize;
+    let height = srgb.height as usize;
+    let center = (height / 2 * width + width / 2) * 3;
+    let anchor_indices = [
+        0,
+        center,
+        center + 1,
+        ((height - 1) * width + width - 1) * 3 + 2,
+    ];
+    let metrics = srgb8_oracle_metrics(&srgb, &reference, &anchor_indices);
+    assert_eq!(
+        metrics,
+        Srgb8OracleMetrics {
+            max_abs_error: 172,
+            sum_abs_error: 73_181_470,
+            checksum: 4200784400003621786,
+            anchors: vec![115, 132, 63, 63],
+            reference_anchors: vec![108, 127, 50, 67],
+        }
+    );
 }
 
 #[test]

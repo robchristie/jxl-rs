@@ -1060,6 +1060,13 @@ pub fn assemble_vardct_ycbcr_srgb8_image(
     assemble_vardct_xyb_image(plan).map(|image| image.map(|image| vardct_ycbcr_to_srgb8(&image)))
 }
 
+/// Assembles available VarDCT direct RGB data and converts it to interleaved sRGB8.
+pub fn assemble_vardct_rgb_srgb8_image(
+    plan: &VarDctDecodePlan,
+) -> Result<Option<VarDctSrgb8Image>> {
+    assemble_vardct_xyb_image(plan).map(|image| image.map(|image| vardct_rgb_to_srgb8(&image)))
+}
+
 /// Assembles one VarDCT YCbCr AC pass and converts it to interleaved sRGB8.
 pub fn assemble_vardct_ycbcr_srgb8_image_for_pass(
     plan: &VarDctDecodePlan,
@@ -1069,11 +1076,27 @@ pub fn assemble_vardct_ycbcr_srgb8_image_for_pass(
         .map(|image| image.map(|image| vardct_ycbcr_to_srgb8(&image)))
 }
 
+/// Assembles one VarDCT direct RGB AC pass and converts it to interleaved sRGB8.
+pub fn assemble_vardct_rgb_srgb8_image_for_pass(
+    plan: &VarDctDecodePlan,
+    pass: usize,
+) -> Result<Option<VarDctSrgb8Image>> {
+    assemble_vardct_xyb_image_for_pass(plan, pass)
+        .map(|image| image.map(|image| vardct_rgb_to_srgb8(&image)))
+}
+
 /// Assembles available VarDCT YCbCr data and converts it to interleaved sRGB16.
 pub fn assemble_vardct_ycbcr_srgb16_image(
     plan: &VarDctDecodePlan,
 ) -> Result<Option<VarDctSrgb16Image>> {
     assemble_vardct_xyb_image(plan).map(|image| image.map(|image| vardct_ycbcr_to_srgb16(&image)))
+}
+
+/// Assembles available VarDCT direct RGB data and converts it to interleaved sRGB16.
+pub fn assemble_vardct_rgb_srgb16_image(
+    plan: &VarDctDecodePlan,
+) -> Result<Option<VarDctSrgb16Image>> {
+    assemble_vardct_xyb_image(plan).map(|image| image.map(|image| vardct_rgb_to_srgb16(&image)))
 }
 
 /// Assembles one VarDCT YCbCr AC pass and converts it to interleaved sRGB16.
@@ -1083,6 +1106,15 @@ pub fn assemble_vardct_ycbcr_srgb16_image_for_pass(
 ) -> Result<Option<VarDctSrgb16Image>> {
     assemble_vardct_xyb_image_for_pass(plan, pass)
         .map(|image| image.map(|image| vardct_ycbcr_to_srgb16(&image)))
+}
+
+/// Assembles one VarDCT direct RGB AC pass and converts it to interleaved sRGB16.
+pub fn assemble_vardct_rgb_srgb16_image_for_pass(
+    plan: &VarDctDecodePlan,
+    pass: usize,
+) -> Result<Option<VarDctSrgb16Image>> {
+    assemble_vardct_xyb_image_for_pass(plan, pass)
+        .map(|image| image.map(|image| vardct_rgb_to_srgb16(&image)))
 }
 
 /// Assembles available VarDCT XYB data and converts it to interleaved sRGB8.
@@ -2903,6 +2935,22 @@ fn vardct_ycbcr_to_srgb8(ycbcr: &VarDctXybImage) -> VarDctSrgb8Image {
     }
 }
 
+fn vardct_rgb_to_srgb8(rgb: &VarDctXybImage) -> VarDctSrgb8Image {
+    let sample_count = rgb.channels[0].len();
+    let mut pixels = Vec::with_capacity(sample_count * 3);
+    for index in 0..sample_count {
+        pixels.push(encoded_sample_to_u8(rgb.channels[0][index]));
+        pixels.push(encoded_sample_to_u8(rgb.channels[1][index]));
+        pixels.push(encoded_sample_to_u8(rgb.channels[2][index]));
+    }
+
+    VarDctSrgb8Image {
+        width: rgb.width,
+        height: rgb.height,
+        pixels,
+    }
+}
+
 fn vardct_linear_rgb_to_srgb16(rgb: &VarDctRgbImage) -> VarDctSrgb16Image {
     let sample_count = rgb.channels[0].len();
     let mut pixels = Vec::with_capacity(sample_count * 3);
@@ -2910,6 +2958,22 @@ fn vardct_linear_rgb_to_srgb16(rgb: &VarDctRgbImage) -> VarDctSrgb16Image {
         pixels.push(linear_sample_to_srgb16(rgb.channels[0][index]));
         pixels.push(linear_sample_to_srgb16(rgb.channels[1][index]));
         pixels.push(linear_sample_to_srgb16(rgb.channels[2][index]));
+    }
+
+    VarDctSrgb16Image {
+        width: rgb.width,
+        height: rgb.height,
+        pixels,
+    }
+}
+
+fn vardct_rgb_to_srgb16(rgb: &VarDctXybImage) -> VarDctSrgb16Image {
+    let sample_count = rgb.channels[0].len();
+    let mut pixels = Vec::with_capacity(sample_count * 3);
+    for index in 0..sample_count {
+        pixels.push(encoded_sample_to_u16(rgb.channels[0][index]));
+        pixels.push(encoded_sample_to_u16(rgb.channels[1][index]));
+        pixels.push(encoded_sample_to_u16(rgb.channels[2][index]));
     }
 
     VarDctSrgb16Image {

@@ -499,11 +499,11 @@ fn decode_buffered(
         }
         reject_vardct_alpha_output(&codestream.metadata)?;
         let orientation = codestream.metadata.orientation;
-        let image = decoded_image_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
-            &codestream,
-            config.region,
-            vardct_pass,
-        )?)?;
+        let color_channels = codestream.metadata.num_color_channels() as usize;
+        let image = decoded_image_from_vardct_srgb8(
+            vardct_srgb8_image_from_codestream(&codestream, config.region, vardct_pass)?,
+            color_channels,
+        )?;
         return orient_decoded_image(image, orientation);
     }
     reject_vardct_pass_for_non_vardct(vardct_pass)?;
@@ -700,41 +700,60 @@ fn rgba8_from_vardct_srgb8(image: jxl_codec::VarDctSrgb8Image) -> Result<RgbaIma
     })
 }
 
-fn decoded_image_from_vardct_srgb8(image: jxl_codec::VarDctSrgb8Image) -> Result<DecodedImage> {
+fn decoded_image_from_vardct_srgb8(
+    image: jxl_codec::VarDctSrgb8Image,
+    color_channels: usize,
+) -> Result<DecodedImage> {
     let sample_count = vardct_srgb_sample_count(image.width, image.height)?;
     if image.pixels.len() != sample_count * 3 {
         return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
     }
+    let pixels = match color_channels {
+        1 => image
+            .pixels
+            .chunks_exact(3)
+            .map(|pixel| pixel[0])
+            .collect::<Vec<_>>(),
+        3 => image.pixels,
+        _ => return Err(Error::Unsupported("unsupported color channel count")),
+    };
 
     Ok(DecodedImage {
         width: image.width,
         height: image.height,
-        color_channels: 3,
+        color_channels,
         alpha: None,
         bit_depth: 8,
-        pixels: PixelData::U8(image.pixels),
+        pixels: PixelData::U8(pixels),
     })
 }
 
 fn decoded_channels_from_vardct_srgb8(
     image: jxl_codec::VarDctSrgb8Image,
+    color_channels: usize,
 ) -> Result<DecodedChannels> {
     let sample_count = vardct_srgb_sample_count(image.width, image.height)?;
-    let mut channels = [
-        Vec::with_capacity(sample_count),
-        Vec::with_capacity(sample_count),
-        Vec::with_capacity(sample_count),
-    ];
+    if image.pixels.len() != sample_count * 3 {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+    if !matches!(color_channels, 1 | 3) {
+        return Err(Error::Unsupported("unsupported color channel count"));
+    }
+    let mut channels = (0..color_channels)
+        .map(|_| Vec::with_capacity(sample_count))
+        .collect::<Vec<_>>();
     for pixel in image.pixels.chunks_exact(3) {
         channels[0].push(pixel[0]);
-        channels[1].push(pixel[1]);
-        channels[2].push(pixel[2]);
+        if color_channels == 3 {
+            channels[1].push(pixel[1]);
+            channels[2].push(pixel[2]);
+        }
     }
 
     Ok(DecodedChannels {
         width: image.width,
         height: image.height,
-        color_channels: 3,
+        color_channels,
         alpha: None,
         bit_depth: 8,
         channels: channels
@@ -753,23 +772,30 @@ fn decoded_channels_from_vardct_srgb8(
 
 fn decoded_channels_from_vardct_srgb16(
     image: jxl_codec::VarDctSrgb16Image,
+    color_channels: usize,
 ) -> Result<DecodedChannels> {
     let sample_count = vardct_srgb_sample_count(image.width, image.height)?;
-    let mut channels = [
-        Vec::with_capacity(sample_count),
-        Vec::with_capacity(sample_count),
-        Vec::with_capacity(sample_count),
-    ];
+    if image.pixels.len() != sample_count * 3 {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+    if !matches!(color_channels, 1 | 3) {
+        return Err(Error::Unsupported("unsupported color channel count"));
+    }
+    let mut channels = (0..color_channels)
+        .map(|_| Vec::with_capacity(sample_count))
+        .collect::<Vec<_>>();
     for pixel in image.pixels.chunks_exact(3) {
         channels[0].push(pixel[0]);
-        channels[1].push(pixel[1]);
-        channels[2].push(pixel[2]);
+        if color_channels == 3 {
+            channels[1].push(pixel[1]);
+            channels[2].push(pixel[2]);
+        }
     }
 
     Ok(DecodedChannels {
         width: image.width,
         height: image.height,
-        color_channels: 3,
+        color_channels,
         alpha: None,
         bit_depth: 16,
         channels: channels
@@ -796,7 +822,7 @@ fn modular_xyb_decoded_channels_srgb8_from_codestream(
         &opsin,
         jxl_codec::VarDctXybInverseVariant::BMinusBias,
     );
-    let mut channels = decoded_channels_from_vardct_srgb8(srgb)?;
+    let mut channels = decoded_channels_from_vardct_srgb8(srgb, 3)?;
     append_modular_extra_channels(&mut channels, codestream)?;
     Ok(channels)
 }
@@ -811,7 +837,7 @@ fn modular_xyb_decoded_channels_srgb16_from_codestream(
         &opsin,
         jxl_codec::VarDctXybInverseVariant::BMinusBias,
     );
-    let mut channels = decoded_channels_from_vardct_srgb16(srgb)?;
+    let mut channels = decoded_channels_from_vardct_srgb16(srgb, 3)?;
     append_modular_extra_channels(&mut channels, codestream)?;
     Ok(channels)
 }
@@ -935,8 +961,9 @@ fn decode_vardct_channels_codestream(
     vardct_pass: Option<usize>,
 ) -> Result<DecodedChannels> {
     let orientation = codestream.metadata.orientation;
+    let color_channels = codestream.metadata.num_color_channels() as usize;
     let image = vardct_srgb8_image_from_codestream(codestream, region, vardct_pass)?;
-    let mut channels = decoded_channels_from_vardct_srgb8(image)?;
+    let mut channels = decoded_channels_from_vardct_srgb8(image, color_channels)?;
     append_vardct_extra_channels(&mut channels, codestream, region, vardct_pass)?;
     orient_decoded_channels(channels, orientation)
 }
@@ -947,8 +974,9 @@ fn decode_vardct_channels_codestream_rgb16(
     vardct_pass: Option<usize>,
 ) -> Result<DecodedChannels> {
     let orientation = codestream.metadata.orientation;
+    let color_channels = codestream.metadata.num_color_channels() as usize;
     let image = vardct_srgb16_image_from_codestream(codestream, region, vardct_pass)?;
-    let mut channels = decoded_channels_from_vardct_srgb16(image)?;
+    let mut channels = decoded_channels_from_vardct_srgb16(image, color_channels)?;
     append_vardct_extra_channels(&mut channels, codestream, region, vardct_pass)?;
     orient_decoded_channels(channels, orientation)
 }
@@ -1176,9 +1204,10 @@ fn vardct_srgb8_image_from_codestream(
             Some(pass) => jxl_codec::assemble_vardct_ycbcr_srgb8_image_for_pass(plan, pass)?,
             None => jxl_codec::assemble_vardct_ycbcr_srgb8_image(plan)?,
         },
-        jxl_codec::ColorTransform::None => {
-            return Err(Error::Unsupported("VarDCT non-XYB color transform"));
-        }
+        jxl_codec::ColorTransform::None => match pass {
+            Some(pass) => jxl_codec::assemble_vardct_rgb_srgb8_image_for_pass(plan, pass)?,
+            None => jxl_codec::assemble_vardct_rgb_srgb8_image(plan)?,
+        },
     }
     .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
     if let Some(region) = region {
@@ -1308,9 +1337,10 @@ fn vardct_srgb16_image_from_codestream(
             Some(pass) => jxl_codec::assemble_vardct_ycbcr_srgb16_image_for_pass(plan, pass)?,
             None => jxl_codec::assemble_vardct_ycbcr_srgb16_image(plan)?,
         },
-        jxl_codec::ColorTransform::None => {
-            return Err(Error::Unsupported("VarDCT non-XYB color transform"));
-        }
+        jxl_codec::ColorTransform::None => match pass {
+            Some(pass) => jxl_codec::assemble_vardct_rgb_srgb16_image_for_pass(plan, pass)?,
+            None => jxl_codec::assemble_vardct_rgb_srgb16_image(plan)?,
+        },
     }
     .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
     if let Some(region) = region {
@@ -3318,10 +3348,44 @@ mod tests {
         assert_eq!(decoded.height, reference.height);
         assert_eq!(decoded.color_channels, 3);
         assert_eq!(decoded.bit_depth, 8);
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_decoded_channels_match_image(&channels, &decoded);
+        let roi = Rect {
+            x: 128,
+            y: 96,
+            width: 64,
+            height: 48,
+        };
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_channels(&roi_channels, &channels, roi);
+        let roi_decoded = Decoder::new().roi(roi).decode(&encoded_bytes).unwrap();
+        assert_roi_matches_full_image(&roi_decoded, &decoded, roi);
         let rgba = decode_rgba8(&encoded_bytes).unwrap();
         assert_eq!(rgba.width, decoded.width);
         assert_eq!(rgba.height, decoded.height);
         assert!(rgba.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+        let roi_rgba = Decoder::new()
+            .roi(roi)
+            .decode_rgba8(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_rgba8(&roi_rgba, &rgba, roi);
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        assert_eq!(rgba16.width, decoded.width);
+        assert_eq!(rgba16.height, decoded.height);
+        assert!(
+            rgba16
+                .pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel[3] == u16::MAX)
+        );
+        let roi_rgba16 = Decoder::new()
+            .roi(roi)
+            .decode_rgba16(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_rgba16(&roi_rgba16, &rgba16, roi);
 
         let width = decoded.width as usize;
         let height = decoded.height as usize;
@@ -3346,6 +3410,186 @@ mod tests {
                 reference_anchors: vec![111, 126, 51, 67],
             }
         );
+    }
+
+    #[test]
+    fn decode_supports_generated_rgb_jpeg_var_dct_when_available() {
+        let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+            eprintln!("skipping public RGB JPEG VarDCT decode; reference tools are not built");
+            return;
+        };
+
+        let input =
+            workspace_path("reference/libjxl/testdata/jxl/flower/flower.png.im_q85_rgb.jpg");
+        let encoded = unique_temp_path("jxl-rgb-jpeg-vardct", "jxl");
+        let reference_output = unique_temp_path("jxl-rgb-jpeg-vardct-reference", "ppm");
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["--allow_jpeg_reconstruction=0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed for public RGB JPEG VarDCT: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+        let djxl_output = Command::new(&djxl)
+            .arg(&encoded)
+            .arg(&reference_output)
+            .arg("--quiet")
+            .output()
+            .unwrap();
+        assert!(
+            djxl_output.status.success(),
+            "reference djxl failed for public RGB JPEG VarDCT: {}",
+            String::from_utf8_lossy(&djxl_output.stderr)
+        );
+        let reference = std::fs::read(&reference_output).unwrap();
+        let _ = std::fs::remove_file(&reference_output);
+        let reference = parse_ppm_rgb(&reference);
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        let frame = info.first_frame.as_ref().unwrap();
+        assert_eq!(frame.color_transform, jxl_codec::ColorTransform::None);
+        assert!(frame.chroma_subsampling.is_444());
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, reference.width);
+        assert_eq!(decoded.height, reference.height);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.bit_depth, 8);
+        let rgba = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba.width, decoded.width);
+        assert_eq!(rgba.height, decoded.height);
+        assert!(rgba.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+
+        let width = decoded.width as usize;
+        let height = decoded.height as usize;
+        let center = (height / 2 * width + width / 2) * 3;
+        let metrics = srgb8_oracle_metrics(
+            &decoded,
+            &reference,
+            &[
+                0,
+                center,
+                center + 1,
+                ((height - 1) * width + width - 1) * 3 + 2,
+            ],
+        );
+        assert_eq!(
+            metrics,
+            Srgb8OracleMetrics {
+                max_abs_error: 172,
+                sum_abs_error: 73_181_470,
+                checksum: 10211171078667196464,
+                anchors: vec![115, 132, 63, 63],
+                reference_anchors: vec![108, 127, 50, 67],
+            }
+        );
+    }
+
+    #[test]
+    fn decode_supports_generated_gray_jpeg_var_dct_when_available() {
+        let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+            eprintln!(
+                "skipping public grayscale JPEG VarDCT decode; reference tools are not built"
+            );
+            return;
+        };
+
+        let input =
+            workspace_path("reference/libjxl/testdata/jxl/flower/flower.png.im_q85_gray.jpg");
+        let encoded = unique_temp_path("jxl-gray-jpeg-vardct", "jxl");
+        let reference_output = unique_temp_path("jxl-gray-jpeg-vardct-reference", "pgm");
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["--allow_jpeg_reconstruction=0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed for public grayscale JPEG VarDCT: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+        let djxl_output = Command::new(&djxl)
+            .arg(&encoded)
+            .arg(&reference_output)
+            .arg("--quiet")
+            .output()
+            .unwrap();
+        assert!(
+            djxl_output.status.success(),
+            "reference djxl failed for public grayscale JPEG VarDCT: {}",
+            String::from_utf8_lossy(&djxl_output.stderr)
+        );
+        let reference = std::fs::read(&reference_output).unwrap();
+        let _ = std::fs::remove_file(&reference_output);
+        let reference = parse_pgm_gray(&reference);
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert_eq!(info.metadata.color_encoding.color_space, ColorSpace::Gray);
+        assert_eq!(info.metadata.num_color_channels(), 1);
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, reference.width);
+        assert_eq!(decoded.height, reference.height);
+        assert_eq!(decoded.color_channels, 1);
+        assert_eq!(decoded.bit_depth, 8);
+        let metrics = gray8_oracle_metrics(
+            &decoded,
+            &reference,
+            &[
+                0,
+                (decoded.height as usize / 2) * decoded.width as usize + decoded.width as usize / 2,
+                decoded.width as usize * decoded.height as usize - 1,
+            ],
+        );
+        assert_eq!(
+            metrics,
+            Srgb8OracleMetrics {
+                max_abs_error: 148,
+                sum_abs_error: 25_258_774,
+                checksum: 8569466704890236855,
+                anchors: vec![112, 83, 94],
+                reference_anchors: vec![106, 71, 99],
+            }
+        );
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_decoded_channels_match_image(&channels, &decoded);
+        let roi = Rect {
+            x: 128,
+            y: 96,
+            width: 64,
+            height: 48,
+        };
+        let roi_decoded = Decoder::new().roi(roi).decode(&encoded_bytes).unwrap();
+        assert_roi_matches_full_image(&roi_decoded, &decoded, roi);
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_roi_matches_full_channels(&roi_channels, &channels, roi);
+
+        let PixelData::U8(gray) = &decoded.pixels else {
+            panic!("expected grayscale VarDCT decode to return 8-bit samples");
+        };
+        let rgba = decode_rgba8(&encoded_bytes).unwrap();
+        for (pixel, &gray) in rgba.pixels.chunks_exact(4).zip(gray) {
+            assert_eq!(pixel, &[gray, gray, gray, 255]);
+        }
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        for pixel in rgba16.pixels.chunks_exact(4) {
+            assert_eq!(pixel[0], pixel[1]);
+            assert_eq!(pixel[1], pixel[2]);
+            assert_eq!(pixel[3], u16::MAX);
+        }
     }
 
     #[test]
@@ -5804,6 +6048,13 @@ mod tests {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
+    struct PgmGray {
+        width: u32,
+        height: u32,
+        samples: Vec<u16>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
     struct AlphaDepthPam {
         width: u32,
         height: u32,
@@ -5877,6 +6128,40 @@ mod tests {
             data.iter().copied().map(u16::from).collect()
         };
         PpmRgb {
+            width,
+            height,
+            samples,
+        }
+    }
+
+    fn parse_pgm_gray(bytes: &[u8]) -> PgmGray {
+        let (magic, offset) = netpbm_token(bytes, 0);
+        assert_eq!(magic, b"P5");
+        let (width, offset) = netpbm_token(bytes, offset);
+        let (height, offset) = netpbm_token(bytes, offset);
+        let (maxval, mut offset) = netpbm_token(bytes, offset);
+        let maxval = parse_ascii_u32(maxval);
+        assert!(matches!(maxval, 255 | 65535));
+        assert!(
+            offset < bytes.len() && bytes[offset].is_ascii_whitespace(),
+            "PGM header was not followed by binary sample data"
+        );
+        offset += 1;
+
+        let width = parse_ascii_u32(width);
+        let height = parse_ascii_u32(height);
+        let bytes_per_sample = if maxval > 255 { 2 } else { 1 };
+        let expected_bytes = width as usize * height as usize * bytes_per_sample;
+        let data = &bytes[offset..];
+        assert_eq!(data.len(), expected_bytes);
+        let samples = if bytes_per_sample == 2 {
+            data.chunks_exact(2)
+                .map(|chunk| u16::from_be_bytes([chunk[0], chunk[1]]))
+                .collect()
+        } else {
+            data.iter().copied().map(u16::from).collect()
+        };
+        PgmGray {
             width,
             height,
             samples,
@@ -5985,6 +6270,47 @@ mod tests {
         assert_eq!(decoded.bit_depth, 8);
         let PixelData::U8(samples) = &decoded.pixels else {
             panic!("expected public oracle comparison to use 8-bit RGB output");
+        };
+        assert_eq!(samples.len(), reference.samples.len());
+
+        let mut max_abs_error = 0u16;
+        let mut sum_abs_error = 0u64;
+        let mut checksum = 0xcbf2_9ce4_8422_2325u64;
+        for (index, (&actual, &reference)) in samples.iter().zip(&reference.samples).enumerate() {
+            let actual = u16::from(actual);
+            let error = actual.abs_diff(reference);
+            max_abs_error = max_abs_error.max(error);
+            sum_abs_error += u64::from(error);
+            checksum ^= ((index as u64) << 32) ^ ((actual as u64) << 16) ^ u64::from(reference);
+            checksum = checksum.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+
+        Srgb8OracleMetrics {
+            max_abs_error,
+            sum_abs_error,
+            checksum,
+            anchors: anchor_indices
+                .iter()
+                .map(|&index| u16::from(samples[index]))
+                .collect(),
+            reference_anchors: anchor_indices
+                .iter()
+                .map(|&index| reference.samples[index])
+                .collect(),
+        }
+    }
+
+    fn gray8_oracle_metrics(
+        decoded: &DecodedImage,
+        reference: &PgmGray,
+        anchor_indices: &[usize],
+    ) -> Srgb8OracleMetrics {
+        assert_eq!(decoded.width, reference.width);
+        assert_eq!(decoded.height, reference.height);
+        assert_eq!(decoded.color_channels, 1);
+        assert_eq!(decoded.bit_depth, 8);
+        let PixelData::U8(samples) = &decoded.pixels else {
+            panic!("expected public grayscale oracle comparison to use 8-bit output");
         };
         assert_eq!(samples.len(), reference.samples.len());
 
