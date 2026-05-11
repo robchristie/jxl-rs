@@ -390,6 +390,7 @@ fn decode_channels_codestream(
     vardct_pass: Option<usize>,
 ) -> Result<DecodedChannels> {
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
+        reject_vardct_alpha_output(&codestream.metadata)?;
         let orientation = codestream.metadata.orientation;
         let image = vardct_srgb8_image_from_codestream(&codestream, region, vardct_pass)?;
         return decoded_channels_from_vardct_srgb8(image, orientation);
@@ -457,6 +458,7 @@ fn decode_buffered(
 ) -> Result<DecodedImage> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
+        reject_vardct_alpha_output(&codestream.metadata)?;
         let orientation = codestream.metadata.orientation;
         let image = decoded_image_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
             &codestream,
@@ -527,6 +529,7 @@ fn decode_rgba8_buffered(
 ) -> Result<RgbaImage> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
+        reject_vardct_alpha_output(&codestream.metadata)?;
         let orientation = codestream.metadata.orientation;
         let image = rgba8_from_vardct_srgb8(vardct_srgb8_image_from_codestream(
             &codestream,
@@ -659,6 +662,7 @@ fn decode_rgba16_buffered(
 ) -> Result<Rgba16Image> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
+        reject_vardct_alpha_output(&codestream.metadata)?;
         let orientation = codestream.metadata.orientation;
         let image = rgba16_from_vardct_srgb16(vardct_srgb16_image_from_codestream(
             &codestream,
@@ -733,6 +737,13 @@ fn vardct_srgb16_image_from_codestream(
 fn reject_vardct_pass_for_non_vardct(pass: Option<usize>) -> Result<()> {
     if pass.is_some() {
         return Err(Error::Unsupported("VarDCT progressive pass decode"));
+    }
+    Ok(())
+}
+
+fn reject_vardct_alpha_output(metadata: &ImageMetadata) -> Result<()> {
+    if raw_alpha_channel_index(metadata)?.is_some() {
+        return Err(Error::Unsupported("VarDCT alpha output"));
     }
     Ok(())
 }
@@ -2062,6 +2073,59 @@ mod tests {
         assert_eq!(
             missing_pass_decoder.decode_rgba16(&encoded_bytes),
             Err(Error::Unsupported("VarDCT image reconstruction"))
+        );
+    }
+
+    #[test]
+    fn rejects_generated_var_dct_alpha_until_extra_channels_are_reconstructed() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping VarDCT alpha rejection; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-vardct-alpha-source", "pam");
+        let encoded = unique_temp_path("jxl-vardct-alpha", "jxl");
+        write_alpha_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert!(info.first_frame_vardct.is_some());
+        assert_eq!(
+            raw_alpha_info(&info.metadata).unwrap(),
+            Some(AlphaInfo {
+                bit_depth: 8,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(
+            decode_channels(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT alpha output"))
+        );
+        assert_eq!(
+            decode(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT alpha output"))
+        );
+        assert_eq!(
+            decode_rgba8(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT alpha output"))
+        );
+        assert_eq!(
+            decode_rgba16(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT alpha output"))
         );
     }
 
