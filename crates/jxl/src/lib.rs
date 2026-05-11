@@ -458,14 +458,25 @@ fn decode_buffered(
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
         let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
         if alpha_channel_index.is_some() {
+            let needs_full_alpha = vardct_alpha_is_subsampled(&codestream)?;
+            let decode_region = if needs_full_alpha {
+                None
+            } else {
+                config.region
+            };
             let channels = if raw_alpha_info(&codestream.metadata)?
                 .is_some_and(|alpha| alpha.bit_depth > 8)
             {
-                decode_vardct_channels_codestream_rgb16(&codestream, config.region, vardct_pass)?
+                decode_vardct_channels_codestream_rgb16(&codestream, decode_region, vardct_pass)?
             } else {
-                decode_vardct_channels_codestream(&codestream, config.region, vardct_pass)?
+                decode_vardct_channels_codestream(&codestream, decode_region, vardct_pass)?
             };
-            return decode_buffered_channels(channels, alpha_channel_index);
+            let image = decode_buffered_channels(channels, alpha_channel_index)?;
+            return if let (true, Some(region)) = (needs_full_alpha, config.region) {
+                crop_decoded_image(image, region)
+            } else {
+                Ok(image)
+            };
         }
         reject_vardct_alpha_output(&codestream.metadata)?;
         let orientation = codestream.metadata.orientation;
@@ -497,12 +508,7 @@ fn decode_buffered_channels(
 ) -> Result<DecodedImage> {
     let alpha = decode_interleaved_alpha(&channels, alpha_channel_index)?;
     let output_channel_indices = interleaved_channel_indices(&channels, alpha_channel_index)?;
-    if output_channel_indices.iter().any(|&index| {
-        channels.channels[index].width != channels.width
-            || channels.channels[index].height != channels.height
-    }) {
-        return Err(Error::Unsupported("subsampled raw channel output"));
-    }
+    validate_interleaved_channel_geometry(&channels, &output_channel_indices, alpha_channel_index)?;
     if output_channel_indices
         .iter()
         .any(|&index| channels.channels[index].bit_depth != channels.bit_depth)
@@ -540,9 +546,20 @@ fn decode_rgba8_buffered(
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
         let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
         if alpha_channel_index.is_some() {
+            let needs_full_alpha = vardct_alpha_is_subsampled(&codestream)?;
+            let decode_region = if needs_full_alpha {
+                None
+            } else {
+                config.region
+            };
             let channels =
-                decode_vardct_channels_codestream(&codestream, config.region, vardct_pass)?;
-            return rgba8_from_decoded_channels(&channels, alpha_channel_index);
+                decode_vardct_channels_codestream(&codestream, decode_region, vardct_pass)?;
+            let image = rgba8_from_decoded_channels(&channels, alpha_channel_index)?;
+            return if let (true, Some(region)) = (needs_full_alpha, config.region) {
+                crop_rgba8_image(image, region)
+            } else {
+                Ok(image)
+            };
         }
         reject_vardct_alpha_output(&codestream.metadata)?;
         let orientation = codestream.metadata.orientation;
@@ -942,9 +959,20 @@ fn decode_rgba16_buffered(
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
         let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
         if alpha_channel_index.is_some() {
+            let needs_full_alpha = vardct_alpha_is_subsampled(&codestream)?;
+            let decode_region = if needs_full_alpha {
+                None
+            } else {
+                config.region
+            };
             let channels =
-                decode_vardct_channels_codestream_rgb16(&codestream, config.region, vardct_pass)?;
-            return rgba16_from_decoded_channels(&channels, alpha_channel_index);
+                decode_vardct_channels_codestream_rgb16(&codestream, decode_region, vardct_pass)?;
+            let image = rgba16_from_decoded_channels(&channels, alpha_channel_index)?;
+            return if let (true, Some(region)) = (needs_full_alpha, config.region) {
+                crop_rgba16_image(image, region)
+            } else {
+                Ok(image)
+            };
         }
         reject_vardct_alpha_output(&codestream.metadata)?;
         let orientation = codestream.metadata.orientation;
@@ -1030,6 +1058,76 @@ fn reject_vardct_alpha_output(metadata: &ImageMetadata) -> Result<()> {
         return Err(Error::Unsupported("VarDCT alpha output"));
     }
     Ok(())
+}
+
+fn vardct_alpha_is_subsampled(codestream: &jxl_codec::Codestream) -> Result<bool> {
+    let Some(alpha_channel_index) = raw_alpha_channel_index(&codestream.metadata)? else {
+        return Ok(false);
+    };
+    let color_channels = codestream.metadata.num_color_channels() as usize;
+    if alpha_channel_index < color_channels {
+        return Err(Error::InvalidCodestream(
+            "decoded alpha channel index is in color channels",
+        ));
+    }
+    let extra_index = alpha_channel_index - color_channels;
+    let frame = codestream
+        .first_frame
+        .as_ref()
+        .ok_or(Error::Unsupported("image has no decoded frame"))?;
+    let upsampling =
+        *frame
+            .extra_channel_upsampling
+            .get(extra_index)
+            .ok_or(Error::InvalidCodestream(
+                "missing extra-channel upsampling factor",
+            ))?;
+    Ok(upsampling > 1)
+}
+
+fn crop_decoded_image(image: DecodedImage, region: jxl_codec::ImageRegion) -> Result<DecodedImage> {
+    validate_decode_region(image.width, image.height, region)?;
+    let output_channels = decoded_image_output_channels(&image);
+    let pixels = match image.pixels {
+        PixelData::U8(samples) => PixelData::U8(crop_interleaved_u8(
+            &samples,
+            image.width,
+            output_channels,
+            region,
+        )?),
+        PixelData::U16(samples) => PixelData::U16(crop_interleaved_u16(
+            &samples,
+            image.width,
+            output_channels,
+            region,
+        )?),
+    };
+    Ok(DecodedImage {
+        width: region.width,
+        height: region.height,
+        color_channels: image.color_channels,
+        alpha: image.alpha,
+        bit_depth: image.bit_depth,
+        pixels,
+    })
+}
+
+fn crop_rgba8_image(image: RgbaImage, region: jxl_codec::ImageRegion) -> Result<RgbaImage> {
+    validate_decode_region(image.width, image.height, region)?;
+    Ok(RgbaImage {
+        width: region.width,
+        height: region.height,
+        pixels: crop_interleaved_u8(&image.pixels, image.width, 4, region)?,
+    })
+}
+
+fn crop_rgba16_image(image: Rgba16Image, region: jxl_codec::ImageRegion) -> Result<Rgba16Image> {
+    validate_decode_region(image.width, image.height, region)?;
+    Ok(Rgba16Image {
+        width: region.width,
+        height: region.height,
+        pixels: crop_interleaved_u16(&image.pixels, image.width, 4, region)?,
+    })
 }
 
 fn crop_vardct_srgb8(
@@ -1473,9 +1571,7 @@ fn decode_interleaved_alpha(
                 "decoded alpha channel bit-depth mismatch",
             ));
         }
-        if alpha_channel.hshift != 0 || alpha_channel.vshift != 0 {
-            return Err(Error::Unsupported("subsampled alpha image decode"));
-        }
+        validate_upsampled_channel_geometry(channels, alpha_channel)?;
     } else if alpha_channel_index.is_some() {
         return Err(Error::InvalidCodestream(
             "decoded alpha channel index without alpha metadata",
@@ -1498,6 +1594,53 @@ fn interleaved_channel_indices(
         indices.push(alpha_channel_index);
     }
     Ok(indices)
+}
+
+fn validate_interleaved_channel_geometry(
+    channels: &DecodedChannels,
+    output_channel_indices: &[usize],
+    alpha_channel_index: Option<usize>,
+) -> Result<()> {
+    for &index in output_channel_indices {
+        let channel = channels
+            .channels
+            .get(index)
+            .ok_or(Error::Unsupported("missing color channel output"))?;
+        if Some(index) == alpha_channel_index {
+            validate_upsampled_channel_geometry(channels, channel)?;
+        } else if channel.width != channels.width || channel.height != channels.height {
+            return Err(Error::Unsupported("subsampled raw channel output"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_upsampled_channel_geometry(
+    channels: &DecodedChannels,
+    channel: &DecodedChannel,
+) -> Result<()> {
+    if channel.hshift < 0 || channel.vshift < 0 {
+        return Err(Error::Unsupported("upshifted alpha image decode"));
+    }
+    let expected_width = shifted_len(channels.width, channel.hshift as u32)?;
+    let expected_height = shifted_len(channels.height, channel.vshift as u32)?;
+    if channel.width != expected_width || channel.height != expected_height {
+        return Err(Error::Unsupported("non power-of-two channel geometry"));
+    }
+    if (channel.hshift == 0) != (channel.vshift == 0) {
+        return Err(Error::Unsupported("asymmetric alpha image decode"));
+    }
+    if channel.hshift > 1 || channel.vshift > 1 {
+        return Err(Error::Unsupported("subsampled alpha image decode"));
+    }
+    Ok(())
+}
+
+fn shifted_len(len: u32, shift: u32) -> Result<u32> {
+    if shift >= u32::BITS {
+        return Err(Error::InvalidCodestream("decoded image size overflow"));
+    }
+    Ok(len.div_ceil(1u32 << shift))
 }
 
 fn decode_channel(
@@ -1572,15 +1715,22 @@ fn interleave_channel_u8(image: &DecodedChannels, channel_indices: &[usize]) -> 
         .checked_mul(output_channels)
         .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
     let mut output = Vec::with_capacity(pixels);
-    for index in 0..sample_count {
-        for &channel_index in channel_indices {
-            let channel = &image.channels[channel_index];
-            let ChannelData::U8(samples) = &channel.samples else {
-                return Err(Error::InvalidCodestream(
-                    "decoded channel bit-depth mismatch",
-                ));
-            };
-            output.push(samples[index]);
+    for y in 0..image.height {
+        for x in 0..image.width {
+            let index = (y as usize)
+                .checked_mul(image.width as usize)
+                .and_then(|index| index.checked_add(x as usize))
+                .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+            for &channel_index in channel_indices {
+                let channel = &image.channels[channel_index];
+                let (sample, bit_depth) = channel_sample_at(channel, image.width, x, y, index)?;
+                if bit_depth != image.bit_depth || bit_depth > 8 {
+                    return Err(Error::InvalidCodestream(
+                        "decoded channel bit-depth mismatch",
+                    ));
+                }
+                output.push(sample as u8);
+            }
         }
     }
     Ok(output)
@@ -1593,15 +1743,22 @@ fn interleave_channel_u16(image: &DecodedChannels, channel_indices: &[usize]) ->
         .checked_mul(output_channels)
         .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
     let mut output = Vec::with_capacity(pixels);
-    for index in 0..sample_count {
-        for &channel_index in channel_indices {
-            let channel = &image.channels[channel_index];
-            let ChannelData::U16(samples) = &channel.samples else {
-                return Err(Error::InvalidCodestream(
-                    "decoded channel bit-depth mismatch",
-                ));
-            };
-            output.push(samples[index]);
+    for y in 0..image.height {
+        for x in 0..image.width {
+            let index = (y as usize)
+                .checked_mul(image.width as usize)
+                .and_then(|index| index.checked_add(x as usize))
+                .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+            for &channel_index in channel_indices {
+                let channel = &image.channels[channel_index];
+                let (sample, bit_depth) = channel_sample_at(channel, image.width, x, y, index)?;
+                if bit_depth != image.bit_depth || bit_depth > 16 {
+                    return Err(Error::InvalidCodestream(
+                        "decoded channel bit-depth mismatch",
+                    ));
+                }
+                output.push(sample as u16);
+            }
         }
     }
     Ok(output)
@@ -1629,12 +1786,7 @@ fn rgba_channel_indices(
 ) -> Result<Vec<usize>> {
     let alpha = decode_interleaved_alpha(channels, alpha_channel_index)?;
     let output_channel_indices = interleaved_channel_indices(channels, alpha_channel_index)?;
-    if output_channel_indices.iter().any(|&index| {
-        channels.channels[index].width != channels.width
-            || channels.channels[index].height != channels.height
-    }) {
-        return Err(Error::Unsupported("subsampled raw channel output"));
-    }
+    validate_interleaved_channel_geometry(channels, &output_channel_indices, alpha_channel_index)?;
     if alpha != channels.alpha {
         return Err(Error::InvalidCodestream("decoded alpha metadata mismatch"));
     }
@@ -1647,13 +1799,27 @@ fn rgba8_from_channel_indices(
 ) -> Result<Vec<u8>> {
     let sample_count = decoded_channel_sample_count(channels)?;
     let mut rgba = Vec::with_capacity(sample_count * 4);
-    for index in 0..sample_count {
-        append_rgba8_pixel(
-            &mut rgba,
-            channels.color_channels,
-            channels.alpha,
-            |channel| channel_sample(&channels.channels[channel_indices[channel]], index),
-        )?;
+    for y in 0..channels.height {
+        for x in 0..channels.width {
+            let index = (y as usize)
+                .checked_mul(channels.width as usize)
+                .and_then(|index| index.checked_add(x as usize))
+                .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+            append_rgba8_pixel(
+                &mut rgba,
+                channels.color_channels,
+                channels.alpha,
+                |channel| {
+                    channel_sample_at(
+                        &channels.channels[channel_indices[channel]],
+                        channels.width,
+                        x,
+                        y,
+                        index,
+                    )
+                },
+            )?;
+        }
     }
     Ok(rgba)
 }
@@ -1664,15 +1830,45 @@ fn rgba16_from_channel_indices(
 ) -> Result<Vec<u16>> {
     let sample_count = decoded_channel_sample_count(channels)?;
     let mut rgba = Vec::with_capacity(sample_count * 4);
-    for index in 0..sample_count {
-        append_rgba16_pixel(
-            &mut rgba,
-            channels.color_channels,
-            channels.alpha,
-            |channel| channel_sample(&channels.channels[channel_indices[channel]], index),
-        )?;
+    for y in 0..channels.height {
+        for x in 0..channels.width {
+            let index = (y as usize)
+                .checked_mul(channels.width as usize)
+                .and_then(|index| index.checked_add(x as usize))
+                .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+            append_rgba16_pixel(
+                &mut rgba,
+                channels.color_channels,
+                channels.alpha,
+                |channel| {
+                    channel_sample_at(
+                        &channels.channels[channel_indices[channel]],
+                        channels.width,
+                        x,
+                        y,
+                        index,
+                    )
+                },
+            )?;
+        }
     }
     Ok(rgba)
+}
+
+fn channel_sample_at(
+    channel: &DecodedChannel,
+    image_width: u32,
+    x: u32,
+    y: u32,
+    unshifted_index: usize,
+) -> Result<(u32, u32)> {
+    if channel.hshift == 0 && channel.vshift == 0 {
+        return channel_sample(channel, unshifted_index);
+    }
+    if channel.hshift == 1 && channel.vshift == 1 {
+        return upsample2_channel_sample(channel, image_width, x, y);
+    }
+    Err(Error::Unsupported("subsampled alpha image decode"))
 }
 
 fn channel_sample(channel: &DecodedChannel, index: usize) -> Result<(u32, u32)> {
@@ -1689,6 +1885,100 @@ fn channel_sample(channel: &DecodedChannel, index: usize) -> Result<(u32, u32)> 
         ),
     };
     Ok((sample, channel.bit_depth))
+}
+
+const DEFAULT_UPSAMPLING2_WEIGHTS: [f32; 15] = [
+    -0.017166138,
+    -0.03451538,
+    -0.040222168,
+    -0.029205322,
+    -0.0062446594,
+    0.14111328,
+    0.2890625,
+    0.0027866364,
+    -0.016098022,
+    0.56640625,
+    0.03778076,
+    -0.019866943,
+    -0.031433105,
+    -0.01184845,
+    -0.0021362305,
+];
+
+fn upsample2_channel_sample(
+    channel: &DecodedChannel,
+    image_width: u32,
+    x: u32,
+    y: u32,
+) -> Result<(u32, u32)> {
+    let source_x = (x >> 1) as isize;
+    let source_y = (y >> 1) as isize;
+    let ox = (x & 1) as usize;
+    let oy = (y & 1) as usize;
+    let mut min_sample = f32::INFINITY;
+    let mut max_sample = f32::NEG_INFINITY;
+    let mut acc0 = 0.0f32;
+    let mut acc1 = 0.0f32;
+    let mut acc2 = 0.0f32;
+
+    for i in 0..25 {
+        let px = i % 5;
+        let py = i / 5;
+        let sample = channel_sample_f32(
+            channel,
+            source_x + px as isize - 2,
+            source_y + py as isize - 2,
+        )?;
+        min_sample = min_sample.min(sample);
+        max_sample = max_sample.max(sample);
+        let weight = upsampling2_kernel(ox, oy, px, py);
+        match i % 3 {
+            0 => acc0 = sample.mul_add(weight, acc0),
+            1 => acc1 = sample.mul_add(weight, acc1),
+            _ => acc2 = sample.mul_add(weight, acc2),
+        }
+    }
+
+    let output = (acc1 + acc2) + acc0;
+    let output = output.clamp(min_sample, max_sample).round();
+    let max = max_sample_value(channel.bit_depth)? as f32;
+    let sample = output.clamp(0.0, max) as u32;
+    let expected_width = image_width.div_ceil(2);
+    if expected_width != channel.width {
+        return Err(Error::Unsupported("non power-of-two channel geometry"));
+    }
+    Ok((sample, channel.bit_depth))
+}
+
+fn upsampling2_kernel(ox: usize, oy: usize, px: usize, py: usize) -> f32 {
+    let px = if ox == 0 { px } else { 4 - px };
+    let py = if oy == 0 { py } else { 4 - py };
+    let min = px.min(py);
+    let max = px.max(py);
+    DEFAULT_UPSAMPLING2_WEIGHTS[5 * min - min * min.saturating_sub(1) / 2 + max - min]
+}
+
+fn channel_sample_f32(channel: &DecodedChannel, x: isize, y: isize) -> Result<f32> {
+    let x = mirror_coordinate(x, channel.width as usize);
+    let y = mirror_coordinate(y, channel.height as usize);
+    let index = y
+        .checked_mul(channel.width as usize)
+        .and_then(|index| index.checked_add(x))
+        .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
+    let (sample, _) = channel_sample(channel, index)?;
+    Ok(sample as f32)
+}
+
+fn mirror_coordinate(mut coordinate: isize, size: usize) -> usize {
+    let size = size as isize;
+    while coordinate < 0 || coordinate >= size {
+        if coordinate < 0 {
+            coordinate = -coordinate - 1;
+        } else {
+            coordinate = 2 * size - 1 - coordinate;
+        }
+    }
+    coordinate as usize
 }
 
 fn append_rgba8_pixel(
@@ -2686,6 +2976,7 @@ mod tests {
 
         let input = unique_temp_path("jxl-vardct-alpha-subsampled-source", "pam");
         let encoded = unique_temp_path("jxl-vardct-alpha-subsampled", "jxl");
+        let reference_output = unique_temp_path("jxl-vardct-alpha-subsampled-reference", "pam");
         write_vardct_alpha_source_pam(&input);
 
         let cjxl_output = Command::new(&cjxl)
@@ -2711,7 +3002,6 @@ mod tests {
         );
 
         let encoded_bytes = std::fs::read(&encoded).unwrap();
-        let _ = std::fs::remove_file(&encoded);
         let channels = decode_channels(&encoded_bytes).unwrap();
         assert_eq!(channels.width, 320);
         assert_eq!(channels.height, 192);
@@ -2774,6 +3064,73 @@ mod tests {
             height: 15,
         };
         assert_eq!(roi_alpha, &window_u8(alpha, 160, shifted_roi));
+
+        if let Some(djxl) = reference_djxl() {
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&reference_output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed: {}",
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+
+            let reference = std::fs::read(&reference_output).unwrap();
+            let reference = parse_pam_rgba(&reference);
+            let reference_alpha = reference
+                .samples
+                .chunks_exact(4)
+                .map(|pixel| pixel[3] as u8)
+                .collect::<Vec<_>>();
+
+            let decoded = decode(&encoded_bytes).unwrap();
+            let PixelData::U8(decoded_pixels) = &decoded.pixels else {
+                panic!("expected 8-bit subsampled-alpha VarDCT image");
+            };
+            let decoded_alpha = decoded_pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(&decoded_alpha, &reference_alpha);
+
+            let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+            let rgba8_alpha = rgba8
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(&rgba8_alpha, &reference_alpha);
+
+            let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+            let rgba16_alpha = rgba16
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| ((u32::from(pixel[3]) + 128) / 257) as u8)
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(&rgba16_alpha, &reference_alpha);
+
+            let roi_rgba8 = Decoder::new()
+                .roi(roi)
+                .decode_rgba8(&encoded_bytes)
+                .unwrap();
+            let roi_rgba8_alpha = roi_rgba8
+                .pixels
+                .chunks_exact(4)
+                .map(|pixel| pixel[3])
+                .collect::<Vec<_>>();
+            assert_alpha_matches_reference(
+                &roi_rgba8_alpha,
+                &window_u8(&reference_alpha, reference.width, roi),
+            );
+        } else {
+            eprintln!("skipping subsampled VarDCT alpha djxl comparison; tool is not built");
+        }
+
+        let _ = std::fs::remove_file(&encoded);
+        let _ = std::fs::remove_file(&reference_output);
     }
 
     #[test]
@@ -4274,6 +4631,34 @@ mod tests {
                 _ => panic!("ROI and full channel bit depths differed"),
             }
         }
+    }
+
+    fn assert_alpha_matches_reference(actual: &[u8], expected: &[u8]) {
+        if actual == expected {
+            return;
+        }
+        let first_mismatch = actual
+            .iter()
+            .zip(expected)
+            .position(|(actual, expected)| actual != expected);
+        let max_abs_error = actual
+            .iter()
+            .zip(expected)
+            .map(|(&actual, &expected)| actual.abs_diff(expected))
+            .max()
+            .unwrap_or(0);
+        if actual.len() == expected.len() && max_abs_error <= 1 {
+            return;
+        }
+        panic!(
+            "alpha mismatch: len actual={} expected={}, first_mismatch={:?}, max_abs_error={}, actual_prefix={:?}, expected_prefix={:?}",
+            actual.len(),
+            expected.len(),
+            first_mismatch,
+            max_abs_error,
+            &actual[..actual.len().min(16)],
+            &expected[..expected.len().min(16)]
+        );
     }
 
     fn window_interleaved_u8(samples: &[u8], width: u32, channels: usize, roi: Rect) -> Vec<u8> {
