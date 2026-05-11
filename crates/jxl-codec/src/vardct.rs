@@ -516,6 +516,8 @@ pub struct VarDctDecodePlan {
     pub modular_global_tree_start_remaining_bits: Option<usize>,
     pub modular_global_tree_direct_error: Option<Error>,
     pub modular_global_tree_error: Option<Error>,
+    pub modular_global: Option<ModularDecodedGroup>,
+    pub modular_global_error: Option<Error>,
     pub global_payload: Option<VarDctSectionPayloadMetadata>,
     pub ac_global_payload: Option<VarDctSectionPayloadMetadata>,
     pub ac_global_metadata: Option<VarDctAcGlobalMetadata>,
@@ -2500,6 +2502,21 @@ pub fn read_vardct_decode_plan(
             None,
         ),
     };
+    let (modular_global, modular_global_error) = match (&global_payload, &global) {
+        (Some(payload), Some(global)) => {
+            match read_vardct_global_modular_stream(
+                codestream,
+                metadata,
+                frame_header,
+                payload,
+                global,
+            ) {
+                Ok(decoded) => (decoded, None),
+                Err(error) => (None, Some(error)),
+            }
+        }
+        _ => (None, None),
+    };
     let dc_group_payloads = frame
         .dc_group_sections
         .iter()
@@ -2674,6 +2691,8 @@ pub fn read_vardct_decode_plan(
         modular_global_tree_start_remaining_bits: remaining_bits(modular_global_tree_start_bits),
         modular_global_tree_direct_error,
         modular_global_tree_error,
+        modular_global,
+        modular_global_error,
         global_payload,
         ac_global_payload,
         ac_global_metadata,
@@ -6092,6 +6111,69 @@ fn read_vardct_modular_global_tree(
     }
 }
 
+fn read_vardct_global_modular_stream(
+    codestream: &[u8],
+    metadata: &ImageMetadata,
+    frame_header: &FrameHeader,
+    payload: &VarDctSectionPayloadMetadata,
+    global: &VarDctGlobalMetadata,
+) -> Result<Option<ModularDecodedGroup>> {
+    let channels = vardct_global_modular_channel_plan(metadata, frame_header)?;
+    if channels.is_empty() {
+        return Ok(None);
+    }
+    let bytes = codestream
+        .get(payload.payload_range.clone())
+        .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
+    let mut reader = BitReader::new(bytes);
+    reader.skip_bits(global.bits_consumed)?;
+    let global_tree = read_modular_global_tree_coding(&mut reader, metadata, frame_header)?;
+    let (_, decoded) = decode_modular_stream_from_reader(
+        &mut reader,
+        payload.section.section_physical_index,
+        0,
+        &channels,
+        Some(&global_tree),
+    )?;
+    Ok(Some(decoded))
+}
+
+fn vardct_global_modular_channel_plan(
+    metadata: &ImageMetadata,
+    frame_header: &FrameHeader,
+) -> Result<Vec<ModularGroupChannelPlan>> {
+    let frame_upsampling_log = ceil_log2_nonzero(frame_header.upsampling as usize) as i32;
+    let group_dim = frame_header.group_layout.group_dim;
+    let mut channels = Vec::new();
+    for (extra_index, _) in metadata.extra_channels.iter().enumerate() {
+        let upsampling = *frame_header
+            .extra_channel_upsampling
+            .get(extra_index)
+            .ok_or(Error::InvalidCodestream(
+                "missing extra-channel upsampling factor",
+            ))?;
+        if upsampling == 0 {
+            return Err(Error::InvalidCodestream("zero extra-channel upsampling"));
+        }
+        let width = frame_header.frame_size.width.div_ceil(upsampling);
+        let height = frame_header.frame_size.height.div_ceil(upsampling);
+        if width > group_dim || height > group_dim {
+            break;
+        }
+        let shift = ceil_log2_nonzero(upsampling as usize) as i32 - frame_upsampling_log;
+        channels.push(ModularGroupChannelPlan {
+            channel_index: 3 + extra_index,
+            width,
+            height,
+            x0: 0,
+            y0: 0,
+            hshift: shift,
+            vshift: shift,
+        });
+    }
+    Ok(channels)
+}
+
 struct VarDctModularGlobalTreeRead {
     direct_start_bits: usize,
     direct_tree_end_bits: Option<usize>,
@@ -7310,6 +7392,8 @@ mod tests {
             modular_global_tree_start_remaining_bits: None,
             modular_global_tree_direct_error: None,
             modular_global_tree_error: None,
+            modular_global: None,
+            modular_global_error: None,
             global_payload: None,
             ac_global_payload: None,
             ac_global_metadata: None,

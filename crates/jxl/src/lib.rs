@@ -784,6 +784,24 @@ fn vardct_extra_channels_from_ac(
         .collect::<Result<Vec<_>>>()?;
 
     let mut saw_extra_channel = vec![false; planes.len()];
+    if let Some(group) = &plan.modular_global {
+        for channel in &group.channels {
+            if channel.channel_index < color_channels {
+                continue;
+            }
+            let extra_index = channel.channel_index - color_channels;
+            let Some(plane) = planes.get_mut(extra_index) else {
+                return Err(Error::InvalidCodestream(
+                    "decoded VarDCT extra channel index is out of range",
+                ));
+            };
+            copy_vardct_extra_channel_chunk(plane, channel)?;
+            saw_extra_channel[extra_index] = true;
+        }
+    } else if let Some(error) = &plan.modular_global_error {
+        return Err(error.clone());
+    }
+
     for group_metadata in plan.ac_group_metadata.iter().filter(|group| {
         vardct_pass
             .map(|pass| group.payload.pass == pass)
@@ -2655,6 +2673,107 @@ mod tests {
                 .map(|&alpha| u16::from(alpha) * 257)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn decode_channels_exposes_subsampled_var_dct_alpha_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!(
+                "skipping subsampled VarDCT alpha raw-channel decode; reference cjxl is not built"
+            );
+            return;
+        };
+
+        let input = unique_temp_path("jxl-vardct-alpha-subsampled-source", "pam");
+        let encoded = unique_temp_path("jxl-vardct-alpha-subsampled", "jxl");
+        write_vardct_alpha_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args([
+                "-d",
+                "1.0",
+                "-m",
+                "0",
+                "--container=0",
+                "--ec_resampling",
+                "2",
+                "--quiet",
+            ])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, 320);
+        assert_eq!(channels.height, 192);
+        assert_eq!(
+            channels.alpha,
+            Some(AlphaInfo {
+                bit_depth: 8,
+                premultiplied: false,
+            })
+        );
+        assert_eq!(channels.channels.len(), 4);
+        let alpha_channel = &channels.channels[3];
+        assert_eq!(alpha_channel.width, 160);
+        assert_eq!(alpha_channel.height, 96);
+        assert_eq!(alpha_channel.hshift, 1);
+        assert_eq!(alpha_channel.vshift, 1);
+        assert_eq!(alpha_channel.bit_depth, 8);
+        let ChannelData::U8(alpha) = &alpha_channel.samples else {
+            panic!("expected 8-bit subsampled VarDCT alpha channel");
+        };
+        assert_eq!(alpha.len(), 160 * 96);
+        assert_eq!(alpha.iter().copied().min(), Some(31));
+        assert_eq!(alpha.iter().copied().max(), Some(225));
+        let alpha_checksum = alpha
+            .iter()
+            .enumerate()
+            .fold(0u64, |checksum, (index, sample)| {
+                checksum
+                    .wrapping_mul(1_099_511_628_211)
+                    .wrapping_add(index as u64)
+                    .rotate_left(11)
+                    ^ u64::from(*sample)
+            });
+        assert_eq!(alpha_checksum, 497_137_486_042_797_447);
+
+        let roi = Rect {
+            x: 17,
+            y: 19,
+            width: 37,
+            height: 29,
+        };
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_eq!(roi_channels.width, roi.width);
+        assert_eq!(roi_channels.height, roi.height);
+        let roi_alpha_channel = &roi_channels.channels[3];
+        assert_eq!(roi_alpha_channel.width, 19);
+        assert_eq!(roi_alpha_channel.height, 15);
+        assert_eq!(roi_alpha_channel.hshift, 1);
+        assert_eq!(roi_alpha_channel.vshift, 1);
+        let ChannelData::U8(roi_alpha) = &roi_alpha_channel.samples else {
+            panic!("expected 8-bit subsampled VarDCT ROI alpha channel");
+        };
+        let shifted_roi = Rect {
+            x: 8,
+            y: 9,
+            width: 19,
+            height: 15,
+        };
+        assert_eq!(roi_alpha, &window_u8(alpha, 160, shifted_roi));
     }
 
     #[test]

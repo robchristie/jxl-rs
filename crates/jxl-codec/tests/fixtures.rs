@@ -2365,6 +2365,44 @@ fn generated_vardct_subsampled_alpha_stays_out_of_modular_ac_when_available() {
     );
     let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
     assert_eq!(
+        plan.modular_global.as_ref().map(|group| (
+            group.stream_id,
+            group.bits_consumed,
+            group
+                .channels
+                .iter()
+                .map(|channel| {
+                    let checksum = channel.samples.iter().enumerate().fold(
+                        0u64,
+                        |checksum, (index, sample)| {
+                            checksum
+                                .wrapping_mul(1_099_511_628_211)
+                                .wrapping_add(index as u64)
+                                .rotate_left(11)
+                                ^ *sample as u64
+                        },
+                    );
+                    (
+                        channel.channel_index,
+                        channel.width,
+                        channel.height,
+                        channel.x0,
+                        channel.y0,
+                        channel.samples.len(),
+                        channel.samples.iter().copied().min().unwrap_or(0),
+                        channel.samples.iter().copied().max().unwrap_or(0),
+                        checksum,
+                    )
+                })
+                .collect::<Vec<_>>()
+        )),
+        Some((
+            0,
+            40206,
+            vec![(3, 160, 96, 0, 0, 15360, 25, 231, 17873756192008889981)],
+        ))
+    );
+    assert_eq!(
         plan.ac_group_payloads
             .iter()
             .map(|payload| (
