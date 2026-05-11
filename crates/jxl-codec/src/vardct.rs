@@ -3055,6 +3055,8 @@ fn read_vardct_ac_group_metadata(
                         };
                         match probe_result {
                             Ok(probe) => {
+                                metadata.cursor.modular_ac_start_bits =
+                                    Some(reader.bits_consumed());
                                 metadata.coefficient_probe = Some(probe);
                                 metadata.parse_error = Some(Error::Unsupported(
                                     "VarDCT AC coefficient stream decoding",

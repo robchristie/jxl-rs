@@ -545,7 +545,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
                 Some(0),
                 Some(32),
                 Some(32),
-                None,
+                Some(35936),
                 Some(false),
                 Some(jxl_codec::Error::Unsupported(
                     "VarDCT AC coefficient stream decoding"
@@ -561,7 +561,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
                 Some(0),
                 Some(32),
                 Some(32),
-                None,
+                Some(8185),
                 Some(false),
                 Some(jxl_codec::Error::Unsupported(
                     "VarDCT AC coefficient stream decoding"
@@ -2620,7 +2620,7 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
                 0,
                 11952,
                 Some(32),
-                None,
+                Some(11951),
                 Some(jxl_codec::Error::Unsupported(
                     "VarDCT AC coefficient stream decoding"
                 )),
@@ -2630,7 +2630,7 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
                 1,
                 2912,
                 Some(32),
-                None,
+                Some(2909),
                 Some(jxl_codec::Error::Unsupported(
                     "VarDCT AC coefficient stream decoding"
                 )),
@@ -2640,7 +2640,7 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
                 0,
                 8384,
                 Some(32),
-                None,
+                Some(8377),
                 Some(jxl_codec::Error::Unsupported(
                     "VarDCT AC coefficient stream decoding"
                 )),
@@ -2650,7 +2650,7 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
                 1,
                 1888,
                 Some(32),
-                None,
+                Some(1888),
                 Some(jxl_codec::Error::Unsupported(
                     "VarDCT AC coefficient stream decoding"
                 )),
@@ -2660,7 +2660,7 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
                 0,
                 17968,
                 Some(32),
-                None,
+                Some(17964),
                 Some(jxl_codec::Error::Unsupported(
                     "VarDCT AC coefficient stream decoding"
                 )),
@@ -2670,7 +2670,7 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
                 1,
                 4000,
                 Some(32),
-                None,
+                Some(3996),
                 Some(jxl_codec::Error::Unsupported(
                     "VarDCT AC coefficient stream decoding"
                 )),

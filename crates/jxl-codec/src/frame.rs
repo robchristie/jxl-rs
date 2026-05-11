@@ -186,6 +186,39 @@ impl Default for Passes {
     }
 }
 
+impl Passes {
+    pub fn downsampling_bracket(&self, pass: usize) -> Result<(i32, i32)> {
+        if pass >= self.num_passes as usize {
+            return Err(Error::InvalidCodestream("pass index exceeds pass count"));
+        }
+
+        let mut max_shift = 2;
+        let mut min_shift = 3;
+        for index in 0..=pass {
+            for (&last_pass, &downsample) in self.last_pass.iter().zip(&self.downsample) {
+                if index as u32 == last_pass {
+                    min_shift = match downsample {
+                        1 => 0,
+                        2 => 1,
+                        4 => 2,
+                        8 => 3,
+                        _ => return Err(Error::InvalidCodestream("invalid pass downsample")),
+                    };
+                }
+            }
+            if index as u32 == self.num_passes - 1 {
+                min_shift = 0;
+            }
+            if index == pass {
+                return Ok((min_shift, max_shift));
+            }
+            max_shift = min_shift - 1;
+        }
+
+        Err(Error::InvalidCodestream("pass index exceeds pass count"))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum BlendMode {
@@ -786,5 +819,27 @@ mod tests {
         assert!(frame.is_last);
         assert_eq!(frame.group_layout.group_dim, 256);
         assert_eq!(frame.group_layout.num_groups, 2);
+    }
+
+    #[test]
+    fn pass_downsampling_brackets_match_reference_progression() {
+        let default = Passes::default();
+        assert_eq!(default.downsampling_bracket(0).unwrap(), (0, 2));
+        assert_eq!(
+            default.downsampling_bracket(1),
+            Err(Error::InvalidCodestream("pass index exceeds pass count"))
+        );
+
+        let progressive = Passes {
+            num_passes: 4,
+            num_downsample: 2,
+            downsample: vec![8, 2],
+            last_pass: vec![0, 2],
+            shift: vec![0, 0, 0, 0],
+        };
+        assert_eq!(progressive.downsampling_bracket(0).unwrap(), (3, 2));
+        assert_eq!(progressive.downsampling_bracket(1).unwrap(), (3, 2));
+        assert_eq!(progressive.downsampling_bracket(2).unwrap(), (1, 2));
+        assert_eq!(progressive.downsampling_bracket(3).unwrap(), (0, 0));
     }
 }
