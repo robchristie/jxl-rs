@@ -114,7 +114,7 @@ pub struct DecodeOptions {
     ///
     /// `None` uses final VarDCT reconstruction. `Some(pass)` is intended for
     /// progressive preview-style output and does not merge earlier or later AC
-    /// passes. Modular decode and raw-channel decode reject this option.
+    /// passes. Modular decode rejects this option.
     pub vardct_pass: Option<usize>,
     pub threads: ThreadingMode,
     pub memory_limit: Option<usize>,
@@ -207,10 +207,7 @@ impl Decoder {
     /// codestream channels.
     pub fn decode_channels(&self, input: &[u8]) -> Result<DecodedChannels> {
         self.validate_shared_options()?;
-        if self.options.vardct_pass.is_some() {
-            return Err(Error::Unsupported("VarDCT progressive pass decode"));
-        }
-        decode_channels_buffered(input, self.codec_config())
+        decode_channels_buffered(input, self.codec_config(), self.options.vardct_pass)
     }
 
     /// Decodes an interleaved image.
@@ -333,9 +330,10 @@ pub fn decode_rgba16(input: &[u8]) -> Result<Rgba16Image> {
 fn decode_channels_buffered(
     input: &[u8],
     config: jxl_codec::DecodeConfig,
+    vardct_pass: Option<usize>,
 ) -> Result<DecodedChannels> {
     let (_, codestream) = parse_file_for_public_pixel_decode(input, config)?;
-    decode_channels_codestream(codestream, config.region)
+    decode_channels_codestream(codestream, config.region, vardct_pass)
 }
 
 fn parse_file_for_public_pixel_decode(
@@ -372,12 +370,14 @@ fn first_frame_vardct_plan(codestream: &jxl_codec::Codestream) -> Result<&VarDct
 fn decode_channels_codestream(
     codestream: jxl_codec::Codestream,
     region: Option<jxl_codec::ImageRegion>,
+    vardct_pass: Option<usize>,
 ) -> Result<DecodedChannels> {
     if first_frame_encoding(&codestream)? == FrameEncoding::VarDct {
         let orientation = codestream.metadata.orientation;
-        let image = vardct_srgb8_image_from_codestream(&codestream, region, None)?;
+        let image = vardct_srgb8_image_from_codestream(&codestream, region, vardct_pass)?;
         return decoded_channels_from_vardct_srgb8(image, orientation);
     }
+    reject_vardct_pass_for_non_vardct(vardct_pass)?;
     let modular = codestream
         .first_frame_modular
         .as_ref()
@@ -438,7 +438,7 @@ fn decode_buffered(
 
 fn decode_buffered_codestream(codestream: jxl_codec::Codestream) -> Result<DecodedImage> {
     let orientation = codestream.metadata.orientation;
-    let channels = decode_channels_codestream(codestream, None)?;
+    let channels = decode_channels_codestream(codestream, None, None)?;
     orient_decoded_image(decode_buffered_channels(channels)?, orientation)
 }
 
@@ -1806,7 +1806,18 @@ mod tests {
         assert_eq!(pass0_decoded.color_channels, 3);
         assert_eq!(pass0_decoded.alpha, None);
         assert_eq!(pass0_decoded.bit_depth, 8);
+        let pass0_channels = Decoder::new()
+            .vardct_pass(0)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        let pass0_roi_channels = Decoder::new()
+            .vardct_pass(0)
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_decoded_channels_match_image(&pass0_channels, &pass0_decoded);
         assert_roi_matches_full_image(&pass0_roi, &pass0_decoded, roi);
+        assert_roi_matches_full_channels(&pass0_roi_channels, &pass0_channels, roi);
 
         assert_eq!(rgba.width, 320);
         assert_eq!(rgba.height, 192);
@@ -1867,6 +1878,10 @@ mod tests {
         );
         assert_eq!(
             missing_pass_decoder.decode(&encoded_bytes),
+            Err(Error::Unsupported("VarDCT image reconstruction"))
+        );
+        assert_eq!(
+            missing_pass_decoder.decode_channels(&encoded_bytes),
             Err(Error::Unsupported("VarDCT image reconstruction"))
         );
         assert_eq!(
