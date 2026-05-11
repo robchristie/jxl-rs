@@ -44,12 +44,13 @@ pub use metadata::{
     TransferFunction, WhitePoint,
 };
 pub use modular::{
-    FrameFeatureMetadata, MaTree, MaTreeNode, ModularChannel, ModularChannelPlan,
-    ModularDecodedChannel, ModularDecodedGroup, ModularFrameMetadata, ModularGlobalSection,
-    ModularGroupChannelPlan, ModularGroupHeader, ModularImage, ModularImageChannel,
-    ModularPredictor, ModularResiduals, ModularSectionMetadata, ModularTransform,
-    ModularTreeMetadata, QuantizedSplineMetadata, SplineFrameMetadata, SplinePoint, SqueezeParams,
-    TransformId, WeightedPredictorHeader,
+    DequantizedSplineMetadata, FrameFeatureMetadata, MaTree, MaTreeNode, ModularChannel,
+    ModularChannelPlan, ModularDecodedChannel, ModularDecodedGroup, ModularFrameMetadata,
+    ModularGlobalSection, ModularGroupChannelPlan, ModularGroupHeader, ModularImage,
+    ModularImageChannel, ModularPredictor, ModularResiduals, ModularSectionMetadata,
+    ModularTransform, ModularTreeMetadata, NoiseFrameMetadata, QuantizedSplineMetadata,
+    SplineFloatPoint, SplineFrameMetadata, SplinePoint, SplineRenderPlan, SplineSegmentMetadata,
+    SqueezeParams, TransformId, WeightedPredictorHeader,
 };
 pub use transform::{CustomTransformData, OpsinInverseMatrix};
 pub use vardct::{

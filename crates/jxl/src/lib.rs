@@ -7,20 +7,22 @@
 
 pub use jxl_codec::{
     BasicInfo, BitDepth, BlendMode, BlendingInfo, BoxRecord, ColorEncoding, ColorSpace, Container,
-    CustomTransformData, Error, ExtraChannelInfo, ExtraChannelType, FileFormat, FrameData,
-    FrameEncoding, FrameGroupLayout, FrameHeader, FrameSection, FrameSectionKind, FrameToc,
-    FrameType, ImageMetadata, MaTree, MaTreeNode, ModularChannel, ModularChannelPlan,
-    ModularDecodedChannel, ModularDecodedGroup, ModularFrameMetadata, ModularGlobalSection,
-    ModularGroupChannelPlan, ModularGroupHeader, ModularImage, ModularImageChannel,
-    ModularPredictor, ModularResiduals, ModularSectionMetadata, ModularTransform,
-    ModularTreeMetadata, OpsinInverseMatrix, Orientation, Primaries, RenderingIntent, Result,
-    SqueezeParams, TocEntry, ToneMapping, TransferFunction, TransformId,
-    VarDctBlockContextMapMetadata, VarDctColorCorrelationMetadata, VarDctDcDequantMetadata,
-    VarDctDcGroupCursorMetadata, VarDctDcGroupMetadata, VarDctDcGroupPayloadMetadata,
-    VarDctDecodePlan, VarDctFrameMetadata, VarDctGlobalCursorMetadata, VarDctGlobalMetadata,
-    VarDctGroupMetadata, VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata,
-    VarDctPassGroupPayloadMetadata, VarDctPassGroupSectionMetadata, VarDctQuantizerMetadata,
-    VarDctSectionMetadata, VarDctSectionPayloadMetadata, WeightedPredictorHeader, WhitePoint,
+    CustomTransformData, DequantizedSplineMetadata, Error, ExtraChannelInfo, ExtraChannelType,
+    FileFormat, FrameData, FrameEncoding, FrameFeatureMetadata, FrameGroupLayout, FrameHeader,
+    FrameSection, FrameSectionKind, FrameToc, FrameType, ImageMetadata, MaTree, MaTreeNode,
+    ModularChannel, ModularChannelPlan, ModularDecodedChannel, ModularDecodedGroup,
+    ModularFrameMetadata, ModularGlobalSection, ModularGroupChannelPlan, ModularGroupHeader,
+    ModularImage, ModularImageChannel, ModularPredictor, ModularResiduals, ModularSectionMetadata,
+    ModularTransform, ModularTreeMetadata, NoiseFrameMetadata, OpsinInverseMatrix, Orientation,
+    Primaries, QuantizedSplineMetadata, RenderingIntent, Result, SplineFloatPoint,
+    SplineFrameMetadata, SplinePoint, SplineRenderPlan, SplineSegmentMetadata, SqueezeParams,
+    TocEntry, ToneMapping, TransferFunction, TransformId, VarDctBlockContextMapMetadata,
+    VarDctColorCorrelationMetadata, VarDctDcDequantMetadata, VarDctDcGroupCursorMetadata,
+    VarDctDcGroupMetadata, VarDctDcGroupPayloadMetadata, VarDctDecodePlan, VarDctFrameMetadata,
+    VarDctGlobalCursorMetadata, VarDctGlobalMetadata, VarDctGroupMetadata,
+    VarDctGroupPayloadMetadata, VarDctGroupSectionMetadata, VarDctPassGroupPayloadMetadata,
+    VarDctPassGroupSectionMetadata, VarDctQuantizerMetadata, VarDctSectionMetadata,
+    VarDctSectionPayloadMetadata, WeightedPredictorHeader, WhitePoint,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -3059,25 +3061,36 @@ mod tests {
     }
 
     #[test]
-    fn rejects_public_spline_rendering_until_supported() {
+    fn decodes_public_spline_rendering() {
         let bytes =
             std::fs::read(workspace_path("reference/libjxl/testdata/jxl/splines.jxl")).unwrap();
-        let info = inspect(&bytes).unwrap();
-        let modular = info.first_frame_modular.as_ref().unwrap();
-        assert!(modular.global.features.splines.is_some());
-        assert_eq!(decode(&bytes), Err(Error::Unsupported("spline rendering")));
-        assert_eq!(
-            decode_channels(&bytes),
-            Err(Error::Unsupported("spline rendering"))
-        );
-        assert_eq!(
-            decode_rgba8(&bytes),
-            Err(Error::Unsupported("spline rendering"))
-        );
-        assert_eq!(
-            decode_rgba16(&bytes),
-            Err(Error::Unsupported("spline rendering"))
-        );
+
+        let channels = decode_channels(&bytes).unwrap();
+        assert_eq!(channels.width, 2048);
+        assert_eq!(channels.height, 2048);
+        assert_eq!(channels.channels.len(), 3);
+        let channel_max = channels
+            .channels
+            .iter()
+            .filter_map(|channel| match &channel.samples {
+                ChannelData::U8(samples) => samples.iter().copied().max(),
+                ChannelData::U16(_) => None,
+            })
+            .max();
+        assert_eq!(channel_max, Some(230));
+        let roi = Rect {
+            x: 512,
+            y: 256,
+            width: 64,
+            height: 48,
+        };
+        let roi_channels = Decoder::new().roi(roi).decode_channels(&bytes).unwrap();
+        assert_roi_matches_full_channels(&roi_channels, &channels, roi);
+
+        let rgba8 = decode_rgba8(&bytes).unwrap();
+        assert_eq!(rgba8.width, 2048);
+        assert_eq!(rgba8.height, 2048);
+        assert_eq!(rgba8.pixels.len(), 2048 * 2048 * 4);
     }
 
     #[test]

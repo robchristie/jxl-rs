@@ -199,6 +199,53 @@ fn region_config_selects_intersecting_modular_groups() {
 }
 
 #[test]
+fn region_config_renders_spline_roi_in_image_space() {
+    let bytes = std::fs::read(workspace_path("reference/libjxl/testdata/jxl/splines.jxl")).unwrap();
+    let region = ImageRegion {
+        x: 512,
+        y: 256,
+        width: 64,
+        height: 48,
+    };
+    let (_, roi_codestream) = parse_file_with_config(
+        &bytes,
+        DecodeConfig {
+            modular_group_execution: ModularGroupExecution::Serial,
+            region: Some(region),
+        },
+    )
+    .unwrap();
+    let roi = roi_codestream
+        .first_frame_modular
+        .as_ref()
+        .unwrap()
+        .image
+        .as_ref()
+        .unwrap();
+    assert_eq!(roi.width, region.width);
+    assert_eq!(roi.height, region.height);
+    assert_eq!(roi.channels.len(), 3);
+
+    let (_, full_codestream) = parse_file(&bytes).unwrap();
+    let full = full_codestream
+        .first_frame_modular
+        .as_ref()
+        .unwrap()
+        .image
+        .as_ref()
+        .unwrap();
+
+    for (roi_channel, full_channel) in roi.channels.iter().zip(&full.channels) {
+        let mut expected = Vec::with_capacity((region.width * region.height) as usize);
+        for y in 0..region.height as usize {
+            let start = (region.y as usize + y) * full_channel.width as usize + region.x as usize;
+            expected.extend_from_slice(&full_channel.samples[start..start + region.width as usize]);
+        }
+        assert_eq!(roi_channel.samples, expected);
+    }
+}
+
+#[test]
 fn rejects_empty_decode_region() {
     let bytes = std::fs::read(workspace_path(
         "crates/jxl-codec/tests/generated/icc_rec2020_lossless.jxl",
@@ -308,6 +355,115 @@ fn assembled_rgb_modular_pixels_match_reference_djxl_when_available() {
     }
 
     assert_eq!(actual, reference.samples);
+}
+
+#[test]
+fn rendered_spline_pixels_match_reference_djxl_when_available() {
+    let Some(djxl) = reference_djxl() else {
+        eprintln!("skipping spline djxl comparison; tool is not built");
+        return;
+    };
+
+    let fixture = workspace_path("reference/libjxl/testdata/jxl/splines.jxl");
+    let output = unique_temp_path("jxl-rs-splines-reference", "ppm");
+    let djxl_output = Command::new(&djxl)
+        .arg(&fixture)
+        .arg(&output)
+        .arg("--quiet")
+        .output()
+        .unwrap();
+    assert!(
+        djxl_output.status.success(),
+        "reference djxl failed for {}: {}",
+        fixture.display(),
+        String::from_utf8_lossy(&djxl_output.stderr)
+    );
+
+    let reference = std::fs::read(&output).unwrap();
+    let _ = std::fs::remove_file(&output);
+    let reference = parse_ppm_rgb(&reference);
+    assert_eq!(reference.width, 2048);
+    assert_eq!(reference.height, 2048);
+    assert_eq!(reference.maxval, 255);
+
+    let codestream = parse_fixture("reference/libjxl/testdata/jxl/splines.jxl");
+    let image = codestream
+        .first_frame_modular
+        .as_ref()
+        .unwrap()
+        .image
+        .as_ref()
+        .unwrap();
+    assert_eq!(image.channels.len(), 3);
+
+    let mut max_abs_error = 0u16;
+    let mut sum_abs_error = 0u64;
+    for index in 0..(image.width as usize * image.height as usize) {
+        for channel in 0..3 {
+            let actual = u16::try_from(image.channels[channel].samples[index]).unwrap();
+            let expected = reference.samples[index * 3 + channel];
+            let error = actual.abs_diff(expected);
+            max_abs_error = max_abs_error.max(error);
+            sum_abs_error += u64::from(error);
+        }
+    }
+
+    assert!(max_abs_error <= 1, "max spline error {max_abs_error}");
+    assert!(
+        sum_abs_error <= 550_000,
+        "spline absolute error sum {sum_abs_error}"
+    );
+}
+
+#[test]
+fn generated_modular_noise_metadata_decodes_when_available() {
+    let Some(cjxl) = reference_cjxl() else {
+        eprintln!("skipping modular noise metadata check; reference cjxl is not built");
+        return;
+    };
+
+    let input = unique_temp_path("jxl-rs-noise-source", "ppm");
+    let encoded = unique_temp_path("jxl-rs-noise", "jxl");
+    write_split_vardct_source_ppm(&input);
+
+    let cjxl_output = Command::new(&cjxl)
+        .arg(&input)
+        .arg(&encoded)
+        .args([
+            "-d",
+            "1",
+            "-m",
+            "1",
+            "--photon_noise_iso=3200",
+            "--container=0",
+            "--quiet",
+        ])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&input);
+    assert!(
+        cjxl_output.status.success(),
+        "reference cjxl failed: {}",
+        String::from_utf8_lossy(&cjxl_output.stderr)
+    );
+
+    let encoded_bytes = std::fs::read(&encoded).unwrap();
+    let _ = std::fs::remove_file(&encoded);
+    let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+    let frame = codestream.first_frame.as_ref().unwrap();
+    assert_eq!(frame.encoding, FrameEncoding::Modular);
+    assert_eq!(frame.flags & 1, 1);
+
+    let modular = codestream.first_frame_modular.as_ref().unwrap();
+    let noise = modular.global.features.noise.as_ref().unwrap();
+    assert!(noise.lut.iter().any(|value| *value != 0));
+    assert!(noise.strength_lut().iter().all(|value| *value >= 0.0));
+    assert_eq!(
+        modular.image_error,
+        Some(jxl_codec::Error::Unsupported("noise rendering"))
+    );
+    assert!(modular.residuals.is_some());
+    assert!(modular.image.is_none());
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -4343,10 +4499,7 @@ fn parses_checked_in_fixture_modular_global_metadata() {
     assert_eq!(spline.sigma_dct[0], 51);
     assert_eq!(spline.sigma_dct[7], 12);
     assert_eq!(spline.sigma_dct[31], 21);
-    assert_eq!(
-        modular.image_error,
-        Some(jxl_codec::Error::Unsupported("spline rendering"))
-    );
+    assert_eq!(modular.image_error, None);
     let residuals = modular.residuals.as_ref().unwrap();
     assert!(residuals.global.is_none());
     assert_eq!(residuals.groups.len(), 4);
@@ -4365,7 +4518,16 @@ fn parses_checked_in_fixture_modular_global_metadata() {
             assert!(channel.samples.iter().all(|sample| *sample == 0));
         }
     }
-    assert!(modular.image.is_none());
+    let image = modular.image.as_ref().unwrap();
+    assert_eq!(image.width, 2048);
+    assert_eq!(image.height, 2048);
+    assert_eq!(image.channels.len(), 3);
+    assert_eq!(image.channels[0].samples.iter().min(), Some(&0));
+    assert_eq!(image.channels[0].samples.iter().max(), Some(&198));
+    assert_eq!(image.channels[1].samples.iter().min(), Some(&0));
+    assert_eq!(image.channels[1].samples.iter().max(), Some(&230));
+    assert_eq!(image.channels[2].samples.iter().min(), Some(&0));
+    assert_eq!(image.channels[2].samples.iter().max(), Some(&152));
 }
 
 #[test]

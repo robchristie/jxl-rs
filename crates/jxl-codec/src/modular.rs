@@ -36,7 +36,9 @@ const WP_DIV_LOOKUP: [u32; 64] = [
 const FLAG_NOISE: u64 = 1;
 const FLAG_PATCHES: u64 = 2;
 const FLAG_SPLINES: u64 = 16;
-const UNSUPPORTED_DC_GLOBAL_FEATURES: u64 = FLAG_NOISE | FLAG_PATCHES;
+const UNSUPPORTED_DC_GLOBAL_FEATURES: u64 = FLAG_PATCHES;
+const NOISE_LUT_SIZE: usize = 8;
+const NOISE_PRECISION: f32 = 1024.0;
 const SPLINE_CONTEXTS: usize = 6;
 const SPLINE_QUANTIZATION_ADJUSTMENT_CONTEXT: usize = 0;
 const SPLINE_STARTING_POSITION_CONTEXT: usize = 1;
@@ -49,6 +51,10 @@ const MAX_SPLINE_CONTROL_POINTS: usize = 1 << 20;
 const MAX_SPLINE_CONTROL_POINTS_PER_PIXEL_RATIO: usize = 2;
 const SPLINE_POS_LIMIT: i32 = 1 << 23;
 const SPLINE_DELTA_LIMIT: i32 = 1 << 30;
+const SPLINE_DESIRED_RENDERING_DISTANCE: f32 = 1.0;
+const SPLINE_DEFAULT_Y_TO_X: f32 = 0.0;
+const SPLINE_DEFAULT_Y_TO_B: f32 = 1.0;
+const SPLINE_CHANNEL_WEIGHTS: [f32; 4] = [0.0042, 0.075, 0.07, 0.3333];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModularFrameMetadata {
@@ -191,7 +197,20 @@ pub struct ModularGlobalSection {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FrameFeatureMetadata {
+    pub noise: Option<NoiseFrameMetadata>,
     pub splines: Option<SplineFrameMetadata>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoiseFrameMetadata {
+    pub lut: [u16; NOISE_LUT_SIZE],
+    pub bits_consumed: usize,
+}
+
+impl NoiseFrameMetadata {
+    pub fn strength_lut(&self) -> [f32; NOISE_LUT_SIZE] {
+        self.lut.map(|value| value as f32 / NOISE_PRECISION)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +232,149 @@ pub struct QuantizedSplineMetadata {
     pub control_points: Vec<(i32, i32)>,
     pub color_dct: [[i32; SPLINE_DCT_SIZE]; 3],
     pub sigma_dct: [i32; SPLINE_DCT_SIZE],
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct DequantizedSplineMetadata {
+    pub control_points: Vec<SplineFloatPoint>,
+    pub color_dct: [[f32; SPLINE_DCT_SIZE]; 3],
+    pub sigma_dct: [f32; SPLINE_DCT_SIZE],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplineFloatPoint {
+    pub x: f32,
+    pub y: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SplineRenderPlan {
+    pub splines: Vec<DequantizedSplineMetadata>,
+    pub segments: Vec<SplineSegmentMetadata>,
+    pub segment_indices: Vec<usize>,
+    pub segment_y_start: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplineSegmentMetadata {
+    pub center_x: f32,
+    pub center_y: f32,
+    pub maximum_distance: f32,
+    pub inv_sigma: f32,
+    pub sigma_over_4_times_intensity: f32,
+    pub color: [f32; 3],
+}
+
+impl SplineFrameMetadata {
+    pub fn dequantize_default_color_correlation(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<DequantizedSplineMetadata>> {
+        self.dequantize_splines(width, height, SPLINE_DEFAULT_Y_TO_X, SPLINE_DEFAULT_Y_TO_B)
+    }
+
+    pub fn render_plan_default_color_correlation(
+        &self,
+        width: u32,
+        height: u32,
+    ) -> Result<SplineRenderPlan> {
+        self.render_plan(width, height, SPLINE_DEFAULT_Y_TO_X, SPLINE_DEFAULT_Y_TO_B)
+    }
+
+    fn dequantize_splines(
+        &self,
+        width: u32,
+        height: u32,
+        y_to_x: f32,
+        y_to_b: f32,
+    ) -> Result<Vec<DequantizedSplineMetadata>> {
+        if self.starting_points.len() != self.splines.len() {
+            return Err(Error::InvalidCodestream("spline metadata length mismatch"));
+        }
+        let image_size = (width as u64)
+            .checked_mul(height as u64)
+            .ok_or(Error::InvalidCodestream("spline frame is too large"))?;
+        let mut total_estimated_area = 0u64;
+        self.splines
+            .iter()
+            .zip(&self.starting_points)
+            .map(|(spline, starting_point)| {
+                dequantize_spline(
+                    spline,
+                    *starting_point,
+                    self.quantization_adjustment,
+                    y_to_x,
+                    y_to_b,
+                    image_size,
+                    &mut total_estimated_area,
+                )
+            })
+            .collect()
+    }
+
+    fn render_plan(
+        &self,
+        width: u32,
+        height: u32,
+        y_to_x: f32,
+        y_to_b: f32,
+    ) -> Result<SplineRenderPlan> {
+        let splines = self.dequantize_splines(width, height, y_to_x, y_to_b)?;
+        if splines.iter().any(|spline| {
+            spline
+                .control_points
+                .windows(2)
+                .any(|points| points[0] == points[1])
+        }) {
+            return Err(Error::InvalidCodestream(
+                "identical successive spline control points",
+            ));
+        }
+
+        let mut segments = Vec::new();
+        let mut segments_by_y = Vec::new();
+        for spline in &splines {
+            let interpolated = centripetal_catmull_rom_points(&spline.control_points)?;
+            let points_to_draw = equally_spaced_spline_points(&interpolated)?;
+            let Some(last) = points_to_draw.last() else {
+                continue;
+            };
+            let arc_length = (points_to_draw.len().saturating_sub(2)) as f32
+                * SPLINE_DESIRED_RENDERING_DISTANCE
+                + last.1;
+            if arc_length <= 0.0 {
+                continue;
+            }
+            spline_segments_from_points(
+                spline,
+                &points_to_draw,
+                arc_length,
+                &mut segments,
+                &mut segments_by_y,
+            );
+        }
+
+        segments_by_y.sort_unstable();
+        let mut segment_indices = vec![0usize; segments_by_y.len()];
+        let mut segment_y_start = vec![0usize; height as usize + 1];
+        for (index, (y, segment_index)) in segments_by_y.into_iter().enumerate() {
+            segment_indices[index] = segment_index;
+            if y < height as usize {
+                segment_y_start[y + 1] += 1;
+            }
+        }
+        for y in 0..height as usize {
+            segment_y_start[y + 1] += segment_y_start[y];
+        }
+
+        Ok(SplineRenderPlan {
+            splines,
+            segments,
+            segment_indices,
+            segment_y_start,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -429,12 +591,6 @@ pub fn read_modular_frame_metadata(
         Some(Err(error)) => (None, Some(error)),
         None => (None, None),
     };
-    let feature_image_error = plan
-        .global
-        .features
-        .splines
-        .is_some()
-        .then_some(Error::Unsupported("spline rendering"));
     let decode_region = region_plan
         .as_ref()
         .map(|region_plan| region_plan.decode_rect);
@@ -458,15 +614,12 @@ pub fn read_modular_frame_metadata(
         }
         None => None,
     };
-    if image_error.is_none() {
-        image_error = feature_image_error;
+    if image_error.is_none() && plan.global.features.noise.is_some() {
+        image_error = Some(Error::Unsupported("noise rendering"));
     }
     let image = if image_error.is_none() {
         residuals.as_ref().and_then(|residuals| {
-            let result = match &region_plan {
-                Some(region_plan) => assemble_modular_image_region(&plan, residuals, region_plan),
-                None => assemble_modular_image(&plan, residuals),
-            };
+            let result = assemble_modular_frame_image(&plan, residuals, region_plan.as_ref());
             match result {
                 Ok(image) => Some(image),
                 Err(error) => {
@@ -491,6 +644,31 @@ pub fn read_modular_frame_metadata(
         image,
         image_error,
     }))
+}
+
+fn assemble_modular_frame_image(
+    plan: &ModularDecodePlan,
+    residuals: &ModularResiduals,
+    region_plan: Option<&ModularRegionPlan>,
+) -> Result<ModularImage> {
+    let mut image = match region_plan {
+        Some(region_plan) => assemble_modular_image_region(plan, residuals, region_plan)?,
+        None => assemble_modular_image(plan, residuals)?,
+    };
+    if let Some(splines) = &plan.global.features.splines {
+        let image_origin = region_plan
+            .map(|region_plan| (region_plan.requested_rect.x, region_plan.requested_rect.y))
+            .unwrap_or((0, 0));
+        render_splines_into_modular_image(
+            &mut image,
+            splines,
+            plan.channel_plan.bit_depth,
+            plan.channel_plan.width,
+            plan.channel_plan.height,
+            image_origin,
+        )?;
+    }
+    Ok(image)
 }
 
 fn read_modular_decode_plan(
@@ -528,12 +706,28 @@ fn read_dc_global_features(
     reader: &mut BitReader<'_>,
     frame_header: &FrameHeader,
 ) -> Result<FrameFeatureMetadata> {
+    let noise = if frame_header.flags & FLAG_NOISE != 0 {
+        Some(read_noise_frame_metadata(reader)?)
+    } else {
+        None
+    };
     let splines = if frame_header.flags & FLAG_SPLINES != 0 {
         Some(read_spline_frame_metadata(reader, frame_header)?)
     } else {
         None
     };
-    Ok(FrameFeatureMetadata { splines })
+    Ok(FrameFeatureMetadata { noise, splines })
+}
+
+fn read_noise_frame_metadata(reader: &mut BitReader<'_>) -> Result<NoiseFrameMetadata> {
+    let mut lut = [0u16; NOISE_LUT_SIZE];
+    for value in &mut lut {
+        *value = reader.read_bits(10)? as u16;
+    }
+    Ok(NoiseFrameMetadata {
+        lut,
+        bits_consumed: reader.bits_consumed(),
+    })
 }
 
 fn read_spline_frame_metadata(
@@ -715,6 +909,482 @@ fn read_spline_dct(
         }
     }
     Ok(())
+}
+
+fn dequantize_spline(
+    quantized: &QuantizedSplineMetadata,
+    starting_point: SplinePoint,
+    quantization_adjustment: i32,
+    y_to_x: f32,
+    y_to_b: f32,
+    image_size: u64,
+    total_estimated_area: &mut u64,
+) -> Result<DequantizedSplineMetadata> {
+    let area_limit = (1024u64
+        .checked_mul(image_size)
+        .and_then(|area| area.checked_add(1u64 << 32)))
+    .unwrap_or(u64::MAX)
+    .min(1u64 << 42);
+
+    validate_spline_point_pos(starting_point.x, starting_point.y)?;
+    let mut control_points = Vec::with_capacity(quantized.control_points.len() + 1);
+    let mut current_x = starting_point.x;
+    let mut current_y = starting_point.y;
+    control_points.push(SplineFloatPoint {
+        x: current_x as f32,
+        y: current_y as f32,
+    });
+
+    let mut current_delta_x = 0i32;
+    let mut current_delta_y = 0i32;
+    let mut manhattan_distance = 0u64;
+    for (delta_delta_x, delta_delta_y) in &quantized.control_points {
+        current_delta_x = current_delta_x
+            .checked_add(*delta_delta_x)
+            .ok_or(Error::InvalidCodestream("spline delta out of bounds"))?;
+        current_delta_y = current_delta_y
+            .checked_add(*delta_delta_y)
+            .ok_or(Error::InvalidCodestream("spline delta out of bounds"))?;
+        manhattan_distance = manhattan_distance
+            .checked_add(current_delta_x.unsigned_abs() as u64)
+            .and_then(|distance| distance.checked_add(current_delta_y.unsigned_abs() as u64))
+            .ok_or(Error::InvalidCodestream("spline area is too large"))?;
+        if manhattan_distance > area_limit {
+            return Err(Error::InvalidCodestream("spline area is too large"));
+        }
+        validate_spline_point_pos(current_delta_x, current_delta_y)?;
+        current_x = current_x
+            .checked_add(current_delta_x)
+            .ok_or(Error::InvalidCodestream("spline coordinate out of bounds"))?;
+        current_y = current_y
+            .checked_add(current_delta_y)
+            .ok_or(Error::InvalidCodestream("spline coordinate out of bounds"))?;
+        validate_spline_point_pos(current_x, current_y)?;
+        control_points.push(SplineFloatPoint {
+            x: current_x as f32,
+            y: current_y as f32,
+        });
+    }
+
+    let inv_quant = inv_spline_adjusted_quant(quantization_adjustment);
+    let mut color_dct = [[0.0f32; SPLINE_DCT_SIZE]; 3];
+    for (channel, dct) in color_dct.iter_mut().enumerate() {
+        for (index, value) in dct.iter_mut().enumerate() {
+            let inv_dct_factor = if index == 0 {
+                std::f32::consts::FRAC_1_SQRT_2
+            } else {
+                1.0
+            };
+            *value = quantized.color_dct[channel][index] as f32
+                * inv_dct_factor
+                * SPLINE_CHANNEL_WEIGHTS[channel]
+                * inv_quant;
+        }
+    }
+    for index in 0..SPLINE_DCT_SIZE {
+        color_dct[0][index] += y_to_x * color_dct[1][index];
+        color_dct[2][index] += y_to_b * color_dct[1][index];
+    }
+
+    let mut width_estimate = 0u64;
+    let mut color = [0u64; 3];
+    for (channel, color_sum) in color.iter_mut().enumerate() {
+        for value in &quantized.color_dct[channel] {
+            *color_sum = color_sum
+                .checked_add((inv_quant * value.abs() as f32).ceil() as u64)
+                .ok_or(Error::InvalidCodestream("spline area is too large"))?;
+        }
+    }
+    color[0] = color[0]
+        .checked_add((y_to_x.abs().ceil() as u64).saturating_mul(color[1]))
+        .ok_or(Error::InvalidCodestream("spline area is too large"))?;
+    color[2] = color[2]
+        .checked_add((y_to_b.abs().ceil() as u64).saturating_mul(color[1]))
+        .ok_or(Error::InvalidCodestream("spline area is too large"))?;
+    let max_color = color.into_iter().max().unwrap_or(0);
+    let log_color = ceil_log2_nonzero(1 + max_color).max(1);
+    let weight_limit = ((area_limit as f32 / log_color as f32) / manhattan_distance.max(1) as f32)
+        .sqrt()
+        .ceil();
+
+    let mut sigma_dct = [0.0f32; SPLINE_DCT_SIZE];
+    for (index, value) in sigma_dct.iter_mut().enumerate() {
+        let inv_dct_factor = if index == 0 {
+            std::f32::consts::FRAC_1_SQRT_2
+        } else {
+            1.0
+        };
+        let quantized_sigma = quantized.sigma_dct[index];
+        *value = quantized_sigma as f32 * inv_dct_factor * SPLINE_CHANNEL_WEIGHTS[3] * inv_quant;
+        let weight_f = (inv_quant * quantized_sigma.abs() as f32).ceil();
+        let weight = weight_limit.min(weight_f.max(1.0)) as u64;
+        width_estimate = width_estimate
+            .checked_add(weight.saturating_mul(weight).saturating_mul(log_color))
+            .ok_or(Error::InvalidCodestream("spline area is too large"))?;
+    }
+    *total_estimated_area = total_estimated_area
+        .checked_add(width_estimate.saturating_mul(manhattan_distance))
+        .ok_or(Error::InvalidCodestream("spline area is too large"))?;
+    if *total_estimated_area > area_limit {
+        return Err(Error::InvalidCodestream("spline area is too large"));
+    }
+
+    Ok(DequantizedSplineMetadata {
+        control_points,
+        color_dct,
+        sigma_dct,
+    })
+}
+
+fn inv_spline_adjusted_quant(adjustment: i32) -> f32 {
+    if adjustment >= 0 {
+        1.0 / (1.0 + 0.125 * adjustment as f32)
+    } else {
+        1.0 - 0.125 * adjustment as f32
+    }
+}
+
+fn ceil_log2_nonzero(value: u64) -> u64 {
+    debug_assert!(value != 0);
+    if value <= 1 {
+        0
+    } else {
+        u64::BITS as u64 - (value - 1).leading_zeros() as u64
+    }
+}
+
+fn centripetal_catmull_rom_points(points: &[SplineFloatPoint]) -> Result<Vec<SplineFloatPoint>> {
+    if points.is_empty() {
+        return Ok(Vec::new());
+    }
+    if points.len() == 1 {
+        return Ok(vec![points[0]]);
+    }
+
+    let mut control = Vec::with_capacity(points.len() + 2);
+    control.push(point_add(points[0], point_sub(points[0], points[1])));
+    control.extend_from_slice(points);
+    control.push(point_add(
+        points[points.len() - 1],
+        point_sub(points[points.len() - 1], points[points.len() - 2]),
+    ));
+
+    const INTERPOLATED_POINTS_PER_SEGMENT: usize = 16;
+    let mut result = Vec::with_capacity((points.len() - 1) * INTERPOLATED_POINTS_PER_SEGMENT + 1);
+    for start in 0..control.len() - 3 {
+        let p = &control[start..start + 4];
+        result.push(p[1]);
+        let mut d = [0.0f32; 3];
+        let mut t = [0.0f32; 4];
+        for index in 0..3 {
+            d[index] = point_distance(p[index + 1], p[index]).sqrt();
+            if d[index] == 0.0 {
+                return Err(Error::InvalidCodestream(
+                    "identical successive spline control points",
+                ));
+            }
+            t[index + 1] = t[index] + d[index];
+        }
+        for index in 1..INTERPOLATED_POINTS_PER_SEGMENT {
+            let tt = d[0] + (index as f32 / INTERPOLATED_POINTS_PER_SEGMENT as f32) * d[1];
+            let mut a = [SplineFloatPoint { x: 0.0, y: 0.0 }; 3];
+            for k in 0..3 {
+                a[k] = point_lerp(p[k], p[k + 1], (tt - t[k]) / d[k]);
+            }
+            let mut b = [SplineFloatPoint { x: 0.0, y: 0.0 }; 2];
+            for k in 0..2 {
+                b[k] = point_lerp(a[k], a[k + 1], (tt - t[k]) / (d[k] + d[k + 1]));
+            }
+            result.push(point_lerp(b[0], b[1], (tt - t[1]) / d[1]));
+        }
+    }
+    result.push(control[control.len() - 2]);
+    Ok(result)
+}
+
+fn equally_spaced_spline_points(
+    points: &[SplineFloatPoint],
+) -> Result<Vec<(SplineFloatPoint, f32)>> {
+    if points.is_empty() {
+        return Err(Error::InvalidCodestream("empty spline"));
+    }
+    let mut result = Vec::new();
+    let mut current = points[0];
+    result.push((current, SPLINE_DESIRED_RENDERING_DISTANCE));
+    let mut next_index = 0usize;
+    while next_index < points.len() {
+        let mut previous = current;
+        let mut arclength_from_previous = 0.0f32;
+        loop {
+            if next_index == points.len() {
+                result.push((previous, arclength_from_previous));
+                return Ok(result);
+            }
+            let arclength_to_next = point_distance(points[next_index], previous);
+            if arclength_from_previous + arclength_to_next >= SPLINE_DESIRED_RENDERING_DISTANCE {
+                current = point_lerp(
+                    previous,
+                    points[next_index],
+                    (SPLINE_DESIRED_RENDERING_DISTANCE - arclength_from_previous)
+                        / arclength_to_next,
+                );
+                result.push((current, SPLINE_DESIRED_RENDERING_DISTANCE));
+                break;
+            }
+            arclength_from_previous += arclength_to_next;
+            previous = points[next_index];
+            next_index += 1;
+        }
+    }
+    Ok(result)
+}
+
+fn spline_segments_from_points(
+    spline: &DequantizedSplineMetadata,
+    points_to_draw: &[(SplineFloatPoint, f32)],
+    arc_length: f32,
+    segments: &mut Vec<SplineSegmentMetadata>,
+    segments_by_y: &mut Vec<(usize, usize)>,
+) {
+    let inv_arc_length = 1.0 / arc_length;
+    for (index, (point, intensity)) in points_to_draw.iter().enumerate() {
+        let progress_along_arc =
+            (index as f32 * SPLINE_DESIRED_RENDERING_DISTANCE * inv_arc_length).min(1.0);
+        let mut color = [0.0f32; 3];
+        for (channel, color_sample) in color.iter_mut().enumerate() {
+            *color_sample = continuous_idct(
+                &spline.color_dct[channel],
+                (SPLINE_DCT_SIZE - 1) as f32 * progress_along_arc,
+            );
+        }
+        let sigma = continuous_idct(
+            &spline.sigma_dct,
+            (SPLINE_DCT_SIZE - 1) as f32 * progress_along_arc,
+        );
+        compute_spline_segment(*point, *intensity, color, sigma, segments, segments_by_y);
+    }
+}
+
+fn continuous_idct(dct: &[f32; SPLINE_DCT_SIZE], t: f32) -> f32 {
+    let mut result = 0.0f32;
+    for (index, value) in dct.iter().enumerate() {
+        let cos_arg = std::f32::consts::PI / SPLINE_DCT_SIZE as f32 * index as f32 * (t + 0.5);
+        result += std::f32::consts::SQRT_2 * value * fast_cosf(cos_arg);
+    }
+    result
+}
+
+fn compute_spline_segment(
+    center: SplineFloatPoint,
+    intensity: f32,
+    color: [f32; 3],
+    sigma: f32,
+    segments: &mut Vec<SplineSegmentMetadata>,
+    segments_by_y: &mut Vec<(usize, usize)>,
+) {
+    if !(sigma.is_finite() && sigma != 0.0 && (1.0 / sigma).is_finite() && intensity.is_finite()) {
+        return;
+    }
+    let mut max_color = 0.01f32;
+    for sample in color {
+        max_color = max_color.max((sample * intensity).abs());
+    }
+    let maximum_distance = (-2.0 * sigma * sigma * (0.1f32.ln() * 3.0 - max_color.ln())).sqrt();
+    let segment = SplineSegmentMetadata {
+        center_x: center.x,
+        center_y: center.y,
+        maximum_distance,
+        inv_sigma: 1.0 / sigma,
+        sigma_over_4_times_intensity: 0.25 * sigma * intensity,
+        color,
+    };
+    let y0 = (center.y - maximum_distance).round() as isize;
+    let y1 = (center.y + maximum_distance).round() as isize + 1;
+    let segment_index = segments.len();
+    for y in y0.max(0)..y1 {
+        segments_by_y.push((y as usize, segment_index));
+    }
+    segments.push(segment);
+}
+
+fn point_sub(a: SplineFloatPoint, b: SplineFloatPoint) -> SplineFloatPoint {
+    SplineFloatPoint {
+        x: a.x - b.x,
+        y: a.y - b.y,
+    }
+}
+
+fn point_add(a: SplineFloatPoint, b: SplineFloatPoint) -> SplineFloatPoint {
+    SplineFloatPoint {
+        x: a.x + b.x,
+        y: a.y + b.y,
+    }
+}
+
+fn point_lerp(a: SplineFloatPoint, b: SplineFloatPoint, t: f32) -> SplineFloatPoint {
+    SplineFloatPoint {
+        x: a.x + t * (b.x - a.x),
+        y: a.y + t * (b.y - a.y),
+    }
+}
+
+fn point_distance(a: SplineFloatPoint, b: SplineFloatPoint) -> f32 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    dx.hypot(dy)
+}
+
+fn render_splines_into_modular_image(
+    image: &mut ModularImage,
+    splines: &SplineFrameMetadata,
+    bit_depth: u32,
+    full_width: u32,
+    full_height: u32,
+    image_origin: (u32, u32),
+) -> Result<()> {
+    if image.channels.len() < 3 {
+        return Err(Error::Unsupported("spline rendering"));
+    }
+    if bit_depth == 0 || bit_depth > 30 {
+        return Err(Error::Unsupported("spline rendering"));
+    }
+    let width = image.width as usize;
+    let height = image.height as usize;
+    for channel in image.channels.iter().take(3) {
+        if channel.width as usize != width || channel.height as usize != height {
+            return Err(Error::Unsupported("spline rendering"));
+        }
+    }
+
+    let pixel_count = channel_sample_count(image.width, image.height)?;
+    let max_sample = ((1u64 << bit_depth) - 1) as f32;
+    let mut planes = [
+        image.channels[0]
+            .samples
+            .iter()
+            .map(|sample| *sample as f32 / max_sample)
+            .collect::<Vec<_>>(),
+        image.channels[1]
+            .samples
+            .iter()
+            .map(|sample| *sample as f32 / max_sample)
+            .collect::<Vec<_>>(),
+        image.channels[2]
+            .samples
+            .iter()
+            .map(|sample| *sample as f32 / max_sample)
+            .collect::<Vec<_>>(),
+    ];
+    if planes.iter().any(|plane| plane.len() != pixel_count) {
+        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+    }
+
+    let plan = splines.render_plan_default_color_correlation(full_width, full_height)?;
+    render_spline_plan_into_planes(&plan, width, height, image_origin, &mut planes)?;
+
+    for (channel, plane) in image.channels.iter_mut().take(3).zip(planes) {
+        for (sample, value) in channel.samples.iter_mut().zip(plane) {
+            *sample = (value * max_sample).round().clamp(0.0, max_sample) as i32;
+        }
+    }
+    Ok(())
+}
+
+fn render_spline_plan_into_planes(
+    plan: &SplineRenderPlan,
+    width: usize,
+    height: usize,
+    image_origin: (u32, u32),
+    planes: &mut [Vec<f32>; 3],
+) -> Result<()> {
+    let origin_x = image_origin.0 as usize;
+    let origin_y = image_origin.1 as usize;
+    let image_y_end = origin_y
+        .checked_add(height)
+        .ok_or(Error::InvalidCodestream("spline ROI size overflow"))?;
+    if image_y_end >= plan.segment_y_start.len() {
+        return Err(Error::InvalidCodestream("spline ROI outside render plan"));
+    }
+
+    for local_y in 0..height {
+        let image_y = origin_y + local_y;
+        let row_start = local_y * width;
+        for index in plan.segment_y_start[image_y]..plan.segment_y_start[image_y + 1] {
+            let segment = &plan.segments[plan.segment_indices[index]];
+            render_spline_segment_row(segment, width, origin_x, image_y, row_start, planes);
+        }
+    }
+    Ok(())
+}
+
+fn render_spline_segment_row(
+    segment: &SplineSegmentMetadata,
+    width: usize,
+    origin_x: usize,
+    y: usize,
+    row_start: usize,
+    planes: &mut [Vec<f32>; 3],
+) {
+    let start = (segment.center_x - segment.maximum_distance).round() as isize;
+    let end = (segment.center_x + segment.maximum_distance).round() as isize;
+    let image_x0 = origin_x as isize;
+    let image_x1 = origin_x.saturating_add(width) as isize;
+    if end < image_x0 || start >= image_x1 {
+        return;
+    }
+    let x0 = start.max(image_x0) as usize;
+    let x1 = (end + 1).clamp(image_x0, image_x1) as usize;
+    for image_x in x0..x1 {
+        let dx = image_x as f32 - segment.center_x;
+        let dy = y as f32 - segment.center_y;
+        let distance = dx.hypot(dy);
+        let positive = (distance * 0.5 + 0.353553391) * segment.inv_sigma;
+        let negative = (distance * 0.5 - 0.353553391) * segment.inv_sigma;
+        let one_dimensional_factor = fast_erff(positive) - fast_erff(negative);
+        let local_intensity =
+            segment.sigma_over_4_times_intensity * one_dimensional_factor * one_dimensional_factor;
+        let pixel = row_start + image_x - origin_x;
+        for (channel, plane) in planes.iter_mut().enumerate() {
+            plane[pixel] += segment.color[channel] * local_intensity;
+        }
+    }
+}
+
+fn fast_cosf(value: f32) -> f32 {
+    let pi2 = std::f32::consts::PI * 2.0;
+    let pi2_inv = 0.5 / std::f32::consts::PI;
+    let npi2 = (value * pi2_inv).floor() * pi2;
+    let xmodpi2 = value - npi2;
+    let x_pi = xmodpi2.min(pi2 - xmodpi2);
+    let above_pihalf = x_pi >= std::f32::consts::FRAC_PI_2;
+    let x_pihalf = if above_pihalf {
+        std::f32::consts::PI - x_pi
+    } else {
+        x_pi
+    };
+    let xs = x_pihalf * 0.25;
+    let x2 = xs * xs;
+    let x4 = x2 * x2;
+    let cosx_prescaling = x4.mul_add(0.06960438, x2.mul_add(-0.84087373, 1.68179268));
+    let cosx_scale1 = cosx_prescaling.mul_add(cosx_prescaling, -1.414213562);
+    let cosx_scale2 = cosx_scale1.mul_add(cosx_scale1, -1.0);
+    if above_pihalf {
+        -cosx_scale2
+    } else {
+        cosx_scale2
+    }
+}
+
+fn fast_erff(value: f32) -> f32 {
+    let x = value.abs();
+    let denom1 = x.mul_add(7.77394369e-02, 2.05260015e-04);
+    let denom2 = denom1.mul_add(x, 2.32120216e-01);
+    let denom3 = denom2.mul_add(x, 2.77820801e-01);
+    let denom4 = denom3.mul_add(x, 1.0);
+    let denom5 = denom4 * denom4;
+    let inv_denom5 = 1.0 / denom5;
+    let result = 1.0 - inv_denom5 * inv_denom5;
+    if value <= 0.0 { -result } else { result }
 }
 
 fn read_global_section(
@@ -4074,6 +4744,90 @@ mod tests {
         );
     }
 
+    #[test]
+    fn dequantizes_spline_metadata_with_default_color_correlation() {
+        let frame = fixture_spline_frame();
+        let dequantized = frame
+            .dequantize_default_color_correlation(2048, 2048)
+            .unwrap();
+
+        assert_eq!(dequantized.len(), 1);
+        assert_eq!(
+            dequantized[0].control_points,
+            vec![
+                SplineFloatPoint { x: 64.0, y: 378.0 },
+                SplineFloatPoint {
+                    x: 826.0,
+                    y: 1113.0
+                },
+                SplineFloatPoint { x: 679.0, y: 56.0 },
+                SplineFloatPoint { x: 70.0, y: 280.0 },
+                SplineFloatPoint {
+                    x: 1540.0,
+                    y: 125.0
+                },
+                SplineFloatPoint {
+                    x: 1540.0,
+                    y: 1920.0
+                },
+                SplineFloatPoint {
+                    x: 420.0,
+                    y: 1540.0
+                },
+            ]
+        );
+        assert_close(dequantized[0].color_dct[0][0], 0.49893454);
+        assert_close(dequantized[0].color_dct[0][1], 0.4998);
+        assert_close(dequantized[0].color_dct[1][0], 0.7424621);
+        assert_close(dequantized[0].color_dct[1][30], 0.225);
+        assert_close(dequantized[0].color_dct[2][0], 0.0);
+        assert_close(dequantized[0].color_dct[2][1], 0.49);
+        assert_close(dequantized[0].color_dct[2][2], 0.56);
+        assert_close(dequantized[0].color_dct[2][30], 0.015);
+        assert_close(dequantized[0].sigma_dct[0], 12.019613);
+        assert_close(dequantized[0].sigma_dct[7], 3.9996);
+        assert_close(dequantized[0].sigma_dct[31], 6.9993);
+    }
+
+    #[test]
+    fn spline_catmull_rom_uses_centripetal_parameterization() {
+        let points = [
+            SplineFloatPoint { x: 0.0, y: 0.0 },
+            SplineFloatPoint { x: 4.0, y: 0.0 },
+            SplineFloatPoint { x: 13.0, y: 0.0 },
+        ];
+        let interpolated = centripetal_catmull_rom_points(&points).unwrap();
+
+        assert_eq!(interpolated.len(), 33);
+        assert_close(interpolated[1].x, 0.24707031);
+        assert_close(interpolated[8].x, 1.9);
+        assert_close(interpolated[17].x, 4.463623);
+        assert_close(interpolated[24].x, 8.275);
+        assert_eq!(interpolated[32], SplineFloatPoint { x: 13.0, y: 0.0 });
+    }
+
+    #[test]
+    fn builds_spline_render_plan_row_index() {
+        let plan = fixture_spline_frame()
+            .render_plan_default_color_correlation(2048, 2048)
+            .unwrap();
+
+        assert_eq!(plan.splines.len(), 1);
+        assert!(!plan.segments.is_empty());
+        assert_eq!(plan.segment_y_start.len(), 2049);
+        assert!(plan.segment_indices.len() >= *plan.segment_y_start.last().unwrap());
+        assert!(
+            plan.segment_y_start
+                .windows(2)
+                .all(|window| window[0] <= window[1])
+        );
+        assert!(plan.segments.iter().all(|segment| {
+            segment.maximum_distance.is_finite()
+                && segment.maximum_distance >= 0.0
+                && segment.inv_sigma.is_finite()
+        }));
+    }
+
     fn assemble_test_region(
         plan: &ModularDecodePlan,
         residuals: &ModularResiduals,
@@ -4156,6 +4910,43 @@ mod tests {
             width,
             height,
         }
+    }
+
+    fn fixture_spline_frame() -> SplineFrameMetadata {
+        let mut color_dct = [[0i32; SPLINE_DCT_SIZE]; 3];
+        color_dct[0][0] = 168;
+        color_dct[0][1] = 119;
+        color_dct[1][0] = 14;
+        color_dct[1][30] = 3;
+        color_dct[2][0] = -15;
+        color_dct[2][1] = 7;
+        color_dct[2][2] = 8;
+        color_dct[2][30] = -3;
+        let mut sigma_dct = [0i32; SPLINE_DCT_SIZE];
+        sigma_dct[0] = 51;
+        sigma_dct[7] = 12;
+        sigma_dct[31] = 21;
+        SplineFrameMetadata {
+            quantization_adjustment: 0,
+            starting_points: vec![SplinePoint { x: 64, y: 378 }],
+            splines: vec![QuantizedSplineMetadata {
+                control_points: vec![
+                    (762, 735),
+                    (-909, -1792),
+                    (-462, 1281),
+                    (2079, -379),
+                    (-1470, 1950),
+                    (-1120, -2175),
+                ],
+                color_dct,
+                sigma_dct,
+            }],
+            bits_consumed: 423,
+        }
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!((actual - expected).abs() < 1.0e-5, "{actual} != {expected}");
     }
 
     fn region_test_plan(width: u32, height: u32, channels: usize) -> ModularDecodePlan {
