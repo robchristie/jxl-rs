@@ -747,6 +747,10 @@ fn vardct_extra_channels_from_ac(
     vardct_pass: Option<usize>,
 ) -> Result<Vec<DecodedChannel>> {
     let plan = first_frame_vardct_plan(codestream)?;
+    let frame = codestream
+        .first_frame
+        .as_ref()
+        .ok_or(Error::Unsupported("image has no decoded frame"))?;
     let color_channels = codestream.metadata.num_color_channels() as usize;
     let channel_bit_depths = decoded_channel_bit_depths(&codestream.metadata, color_channels)?;
     let mut planes = codestream
@@ -754,13 +758,18 @@ fn vardct_extra_channels_from_ac(
         .extra_channels
         .iter()
         .enumerate()
-        .map(|(extra_index, extra)| {
+        .map(|(extra_index, _)| {
             let bit_depth = *channel_bit_depths.get(color_channels + extra_index).ok_or(
                 Error::InvalidCodestream("decoded channel missing bit-depth metadata"),
             )?;
-            let shift = extra.dim_shift;
-            let width = codestream.basic_info.width.div_ceil(1u32 << shift);
-            let height = codestream.basic_info.height.div_ceil(1u32 << shift);
+            let upsampling = *frame.extra_channel_upsampling.get(extra_index).ok_or(
+                Error::InvalidCodestream("missing extra-channel upsampling factor"),
+            )?;
+            if upsampling == 0 {
+                return Err(Error::InvalidCodestream("zero extra-channel upsampling"));
+            }
+            let width = frame.frame_size.width.div_ceil(upsampling);
+            let height = frame.frame_size.height.div_ceil(upsampling);
             let sample_count = (width as usize)
                 .checked_mul(height as usize)
                 .ok_or(Error::InvalidCodestream("decoded image size overflow"))?;
@@ -1123,30 +1132,74 @@ fn crop_decoded_channel(
     channel: DecodedChannel,
     region: jxl_codec::ImageRegion,
 ) -> Result<DecodedChannel> {
-    if channel.hshift != 0 || channel.vshift != 0 {
+    if channel.hshift < 0 || channel.vshift < 0 {
         return Err(Error::Unsupported(
             "subsampled VarDCT extra-channel ROI output",
         ));
     }
-    validate_decode_region(channel.width, channel.height, region)?;
+    let channel_region = shifted_decode_region(region, channel.hshift, channel.vshift)?;
+    validate_decode_region(channel.width, channel.height, channel_region)?;
     match channel.samples {
         ChannelData::U8(samples) => Ok(DecodedChannel {
-            width: region.width,
-            height: region.height,
-            hshift: 0,
-            vshift: 0,
+            width: channel_region.width,
+            height: channel_region.height,
+            hshift: channel.hshift,
+            vshift: channel.vshift,
             bit_depth: channel.bit_depth,
-            samples: ChannelData::U8(crop_interleaved_u8(&samples, channel.width, 1, region)?),
+            samples: ChannelData::U8(crop_interleaved_u8(
+                &samples,
+                channel.width,
+                1,
+                channel_region,
+            )?),
         }),
         ChannelData::U16(samples) => Ok(DecodedChannel {
-            width: region.width,
-            height: region.height,
-            hshift: 0,
-            vshift: 0,
+            width: channel_region.width,
+            height: channel_region.height,
+            hshift: channel.hshift,
+            vshift: channel.vshift,
             bit_depth: channel.bit_depth,
-            samples: ChannelData::U16(crop_interleaved_u16(&samples, channel.width, 1, region)?),
+            samples: ChannelData::U16(crop_interleaved_u16(
+                &samples,
+                channel.width,
+                1,
+                channel_region,
+            )?),
         }),
     }
+}
+
+fn shifted_decode_region(
+    region: jxl_codec::ImageRegion,
+    hshift: i32,
+    vshift: i32,
+) -> Result<jxl_codec::ImageRegion> {
+    if hshift < 0 || vshift < 0 {
+        return Err(Error::Unsupported("upshifted raw channel ROI output"));
+    }
+    Ok(jxl_codec::ImageRegion {
+        x: shifted_region_start(region.x, hshift as u32)?,
+        y: shifted_region_start(region.y, vshift as u32)?,
+        width: shifted_region_len(region.x, region.width, hshift as u32)?,
+        height: shifted_region_len(region.y, region.height, vshift as u32)?,
+    })
+}
+
+fn shifted_region_start(start: u32, shift: u32) -> Result<u32> {
+    if shift >= u32::BITS {
+        return Err(Error::InvalidCodestream("decode region is outside image"));
+    }
+    Ok(start >> shift)
+}
+
+fn shifted_region_len(start: u32, len: u32, shift: u32) -> Result<u32> {
+    if shift >= u32::BITS {
+        return Err(Error::InvalidCodestream("decode region is outside image"));
+    }
+    let end = start
+        .checked_add(len)
+        .ok_or(Error::InvalidCodestream("decode region is outside image"))?;
+    Ok(end.div_ceil(1u32 << shift) - (start >> shift))
 }
 
 fn orient_decoded_channels(
@@ -3730,6 +3783,46 @@ mod tests {
         assert_eq!(
             decode_buffered_channels(channels, Some(3)),
             Err(Error::Unsupported("mixed bit-depth interleaved output"))
+        );
+    }
+
+    #[test]
+    fn shifted_raw_channel_roi_crops_in_channel_space() {
+        let samples = (0u8..12).collect::<Vec<_>>();
+        let channel = DecodedChannel {
+            width: 4,
+            height: 3,
+            hshift: 1,
+            vshift: 1,
+            bit_depth: 8,
+            samples: ChannelData::U8(samples.clone()),
+        };
+        let roi = jxl_codec::ImageRegion {
+            x: 3,
+            y: 1,
+            width: 4,
+            height: 4,
+        };
+        let shifted = shifted_decode_region(roi, 1, 1).unwrap();
+        assert_eq!(
+            shifted,
+            jxl_codec::ImageRegion {
+                x: 1,
+                y: 0,
+                width: 3,
+                height: 3,
+            }
+        );
+
+        let cropped = crop_decoded_channel(channel, roi).unwrap();
+        assert_eq!(cropped.width, 3);
+        assert_eq!(cropped.height, 3);
+        assert_eq!(cropped.hshift, 1);
+        assert_eq!(cropped.vshift, 1);
+        assert_eq!(cropped.bit_depth, 8);
+        assert_eq!(
+            cropped.samples,
+            ChannelData::U8(vec![1, 2, 3, 5, 6, 7, 9, 10, 11])
         );
     }
 
