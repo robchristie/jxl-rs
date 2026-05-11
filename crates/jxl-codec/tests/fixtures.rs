@@ -4109,6 +4109,51 @@ fn parses_checked_in_fixture_vardct_metadata() {
             .is_empty()
     );
 
+    let jpeg = parse_fixture("reference/libjxl/testdata/jxl/jpeg_reconstruction/1x1_exif_xmp.jxl");
+    let jpeg_plan = jpeg.first_frame_vardct_plan.as_ref().unwrap();
+    let ac_global = jpeg_plan.ac_global_metadata.as_ref().unwrap();
+    assert_eq!(ac_global.all_default_quant_matrices, Some(false));
+    let quant_matrices = ac_global.quant_matrices.as_ref().unwrap();
+    assert_eq!(quant_matrices.tables.len(), 17);
+    assert!(
+        quant_matrices
+            .tables
+            .iter()
+            .flatten()
+            .any(|table| table.mode == jxl_codec::VarDctAcQuantMode::Raw)
+    );
+    for table in quant_matrices.tables.iter().flatten() {
+        assert_eq!(table.per_channel.len(), 3);
+        assert!(table.per_channel.iter().all(|channel| !channel.is_empty()));
+        assert!(
+            table
+                .per_channel
+                .iter()
+                .flatten()
+                .all(|sample| sample.is_finite() && *sample > 0.0)
+        );
+    }
+    assert_eq!(ac_global.num_histograms, Some(1));
+    assert_eq!(ac_global.used_acs, Some(1));
+    assert_eq!(ac_global.bits_consumed, Some(1015));
+    assert_eq!(ac_global.parse_error, None);
+    assert_eq!(ac_global.passes.len(), 1);
+    assert_eq!(ac_global.passes[0].histogram_contexts, Some(990));
+    assert_eq!(ac_global.passes[0].histogram_count, Some(1));
+    assert_eq!(ac_global.passes[0].histogram_end_bits, Some(1015));
+    assert_eq!(ac_global.passes[0].error, None);
+    let ac_group = &jpeg_plan.ac_group_metadata[0];
+    assert_eq!(ac_group.cursor.coefficient_stream_start_bits, Some(1015));
+    assert_eq!(ac_group.cursor.modular_ac_start_bits, Some(1015));
+    assert_eq!(ac_group.parse_error, None);
+    assert_eq!(
+        ac_group
+            .coefficient_summary
+            .as_ref()
+            .map(|summary| (summary.blocks_decoded, summary.final_bits)),
+        Some((3, 1015))
+    );
+
     let pq = parse_fixture("reference/libjxl/testdata/jxl/pq_gradient.jxl");
     assert!(pq.first_frame_vardct.is_none());
     assert!(pq.first_frame_vardct_plan.is_none());

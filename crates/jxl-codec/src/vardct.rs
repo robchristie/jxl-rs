@@ -22,6 +22,11 @@ use crate::transform::CustomTransformData;
 use std::ops::Range;
 
 const NUM_QUANT_TABLES: usize = 17;
+const QUANT_REQUIRED_SIZE_X: [usize; NUM_QUANT_TABLES] =
+    [1, 1, 1, 1, 2, 4, 1, 1, 2, 1, 1, 8, 4, 16, 8, 32, 16];
+const QUANT_REQUIRED_SIZE_Y: [usize; NUM_QUANT_TABLES] =
+    [1, 1, 1, 1, 2, 4, 2, 4, 4, 1, 1, 8, 8, 16, 16, 32, 32];
+const QUANT_ALMOST_ZERO: f32 = 1.0e-8;
 
 const DEFAULT_UPSAMPLING2_WEIGHTS: [f32; 15] = [
     -0.017166138,
@@ -1151,10 +1156,11 @@ pub fn assemble_vardct_srgb16_image_for_pass(
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VarDctAcGlobalMetadata {
     pub section: VarDctSectionPayloadMetadata,
     pub all_default_quant_matrices: Option<bool>,
+    pub quant_matrices: Option<VarDctAcQuantMatrices>,
     pub quant_matrices_end_bits: Option<usize>,
     pub num_histograms: Option<usize>,
     pub num_histograms_end_bits: Option<usize>,
@@ -1162,6 +1168,28 @@ pub struct VarDctAcGlobalMetadata {
     pub passes: Vec<VarDctAcGlobalPassMetadata>,
     pub bits_consumed: Option<usize>,
     pub parse_error: Option<Error>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VarDctAcQuantMatrices {
+    pub tables: Vec<Option<VarDctAcQuantTable>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct VarDctAcQuantTable {
+    pub mode: VarDctAcQuantMode,
+    pub per_channel: [Vec<f32>; 3],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VarDctAcQuantMode {
+    Identity,
+    Dct2,
+    Dct4,
+    Dct4x8,
+    Afv,
+    Dct,
+    Raw,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3076,7 +3104,15 @@ pub fn read_vardct_decode_plan(
         .as_ref()
         .zip(global.as_ref())
         .map(|(payload, global)| {
-            read_vardct_ac_global_metadata(codestream, frame_header, payload, global, used_acs)
+            read_vardct_ac_global_metadata(
+                codestream,
+                frame_header,
+                payload,
+                global,
+                global_tree.as_ref(),
+                frame.dc_groups.len(),
+                used_acs,
+            )
         })
         .transpose()?;
     let ac_global_entropy = ac_global_payload
@@ -3088,7 +3124,14 @@ pub fn read_vardct_decode_plan(
                 .and_then(|metadata| metadata.parse_error.is_none().then_some((payload, global)))
         })
         .map(|(payload, global)| {
-            read_vardct_ac_global_entropy_tables(codestream, frame_header, payload, global)
+            read_vardct_ac_global_entropy_tables(
+                codestream,
+                frame_header,
+                payload,
+                global,
+                global_tree.as_ref(),
+                frame.dc_groups.len(),
+            )
         })
         .transpose()?;
     let ac_group_payloads = frame
@@ -3396,6 +3439,8 @@ fn read_single_section_vardct_decode_plan(
         frame_header,
         &ac_global_payload,
         &global,
+        global_tree.as_ref(),
+        frame.dc_groups.len(),
         used_acs,
     )?;
     let ac_global_entropy = if ac_global_metadata.parse_error.is_none() {
@@ -3403,6 +3448,9 @@ fn read_single_section_vardct_decode_plan(
             &mut reader,
             frame_header,
             &global,
+            global_tree.as_ref(),
+            frame.dc_groups.len(),
+            ac_global_payload.section.section_physical_index,
         )?)
     } else {
         reader = ac_global_metadata_reader;
@@ -3901,6 +3949,7 @@ fn read_vardct_ac_group_metadata_from_reader(
                                 let dequantized_grid = dequantize_vardct_ac_grid(
                                     &grid,
                                     global,
+                                    ac_global,
                                     &metadata,
                                     frame_header,
                                     dc_groups,
@@ -4022,23 +4071,37 @@ fn read_vardct_ac_global_entropy_tables(
     frame_header: &FrameHeader,
     payload: &VarDctSectionPayloadMetadata,
     global: &VarDctGlobalMetadata,
+    global_tree: Option<&ModularTreeCoding>,
+    dc_group_count: usize,
 ) -> Result<Vec<Option<VarDctAcPassEntropy>>> {
     let bytes = codestream
         .get(payload.payload_range.clone())
         .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
     let mut reader = BitReader::new(bytes);
-    read_vardct_ac_global_entropy_tables_from_reader(&mut reader, frame_header, global)
+    read_vardct_ac_global_entropy_tables_from_reader(
+        &mut reader,
+        frame_header,
+        global,
+        global_tree,
+        dc_group_count,
+        payload.section.section_physical_index,
+    )
 }
 
 fn read_vardct_ac_global_entropy_tables_from_reader(
     mut reader: &mut BitReader<'_>,
     frame_header: &FrameHeader,
     global: &VarDctGlobalMetadata,
+    global_tree: Option<&ModularTreeCoding>,
+    dc_group_count: usize,
+    section_physical_index: usize,
 ) -> Result<Vec<Option<VarDctAcPassEntropy>>> {
-    let all_default_quant_matrices = reader.read_bool()?;
-    if !all_default_quant_matrices {
-        return Err(Error::Unsupported("custom VarDCT AC quant matrices"));
-    }
+    read_vardct_ac_quant_matrices(
+        &mut reader,
+        global_tree,
+        dc_group_count,
+        section_physical_index,
+    )?;
     let num_histo_bits = ceil_log2_nonzero(frame_header.group_layout.num_groups as usize);
     let num_histograms = reader.read_bits(num_histo_bits)? as usize + 1;
     let mut passes = Vec::with_capacity(frame_header.passes.num_passes as usize);
@@ -4052,6 +4115,489 @@ fn read_vardct_ac_global_entropy_tables_from_reader(
         passes.push(Some(VarDctAcPassEntropy { code, context_map }));
     }
     Ok(passes)
+}
+
+fn read_vardct_ac_quant_matrices(
+    reader: &mut BitReader<'_>,
+    global_tree: Option<&ModularTreeCoding>,
+    dc_group_count: usize,
+    section_physical_index: usize,
+) -> Result<(bool, Option<VarDctAcQuantMatrices>)> {
+    let all_default = reader.read_bool()?;
+    if all_default {
+        return Ok((true, None));
+    }
+
+    let mut tables = Vec::with_capacity(NUM_QUANT_TABLES);
+    for table in 0..NUM_QUANT_TABLES {
+        tables.push(read_vardct_ac_quant_encoding(
+            reader,
+            QUANT_REQUIRED_SIZE_X[table],
+            QUANT_REQUIRED_SIZE_Y[table],
+            global_tree,
+            quant_table_modular_stream_id(dc_group_count, table)?,
+            section_physical_index,
+        )?);
+    }
+    Ok((false, Some(VarDctAcQuantMatrices { tables })))
+}
+
+fn read_vardct_ac_quant_encoding(
+    reader: &mut BitReader<'_>,
+    required_size_x: usize,
+    required_size_y: usize,
+    global_tree: Option<&ModularTreeCoding>,
+    stream_id: usize,
+    section_physical_index: usize,
+) -> Result<Option<VarDctAcQuantTable>> {
+    let required_size =
+        required_size_x
+            .checked_mul(required_size_y)
+            .ok_or(Error::InvalidCodestream(
+                "invalid VarDCT AC quant matrix size",
+            ))?;
+    match reader.read_bits(3)? {
+        0 => Ok(None),
+        1 => {
+            if required_size != 1 {
+                return Err(Error::InvalidCodestream(
+                    "invalid identity VarDCT AC quant matrix",
+                ));
+            }
+            let weights = read_vardct_identity_quant_weights(reader)?;
+            Ok(Some(quant_table_from_weights(
+                VarDctAcQuantMode::Identity,
+                weights,
+            )?))
+        }
+        2 => {
+            if required_size != 1 {
+                return Err(Error::InvalidCodestream(
+                    "invalid DCT2 VarDCT AC quant matrix",
+                ));
+            }
+            let weights = read_vardct_dct2_quant_weights(reader)?;
+            Ok(Some(quant_table_from_weights(
+                VarDctAcQuantMode::Dct2,
+                weights,
+            )?))
+        }
+        3 => {
+            if required_size != 1 {
+                return Err(Error::InvalidCodestream(
+                    "invalid DCT4 VarDCT AC quant matrix",
+                ));
+            }
+            let weights = read_vardct_dct4_quant_weights(reader)?;
+            Ok(Some(quant_table_from_weights(
+                VarDctAcQuantMode::Dct4,
+                weights,
+            )?))
+        }
+        4 => {
+            if required_size != 1 {
+                return Err(Error::InvalidCodestream(
+                    "invalid DCT4x8 VarDCT AC quant matrix",
+                ));
+            }
+            let weights = read_vardct_dct4x8_quant_weights(reader)?;
+            Ok(Some(quant_table_from_weights(
+                VarDctAcQuantMode::Dct4x8,
+                weights,
+            )?))
+        }
+        5 => {
+            if required_size != 1 {
+                return Err(Error::InvalidCodestream(
+                    "invalid AFV VarDCT AC quant matrix",
+                ));
+            }
+            let weights = read_vardct_afv_quant_weights(reader)?;
+            Ok(Some(quant_table_from_weights(
+                VarDctAcQuantMode::Afv,
+                weights,
+            )?))
+        }
+        6 => {
+            let weights =
+                read_vardct_dct_quant_weights(reader, required_size_x * 8, required_size_y * 8)?;
+            Ok(Some(quant_table_from_weights(
+                VarDctAcQuantMode::Dct,
+                weights,
+            )?))
+        }
+        7 => {
+            let denominator = reader.read_f16()?;
+            if denominator < QUANT_ALMOST_ZERO {
+                return Err(Error::InvalidCodestream(
+                    "invalid raw VarDCT AC quant matrix denominator",
+                ));
+            }
+            let channels = vardct_raw_quant_table_channel_plan(required_size_x, required_size_y)?;
+            let (_, decoded) = decode_modular_stream_from_reader(
+                reader,
+                section_physical_index,
+                stream_id,
+                &channels,
+                global_tree,
+            )?;
+            if decoded
+                .channels
+                .iter()
+                .any(|channel| channel.samples.iter().any(|sample| *sample <= 0))
+            {
+                return Err(Error::InvalidCodestream(
+                    "invalid raw VarDCT AC quant matrix",
+                ));
+            }
+            Ok(Some(raw_quant_table_from_decoded(
+                denominator,
+                required_size,
+                decoded,
+            )?))
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn quant_table_from_weights(
+    mode: VarDctAcQuantMode,
+    weights: [Vec<f32>; 3],
+) -> Result<VarDctAcQuantTable> {
+    Ok(VarDctAcQuantTable {
+        mode,
+        per_channel: weights
+            .map(|channel| weights_to_dequant_matrix(channel))
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?
+            .try_into()
+            .map_err(|_| Error::InvalidCodestream("invalid VarDCT AC quant matrix"))?,
+    })
+}
+
+fn weights_to_dequant_matrix(weights: Vec<f32>) -> Result<Vec<f32>> {
+    weights
+        .into_iter()
+        .map(|weight| {
+            if !weight.is_finite()
+                || !(QUANT_ALMOST_ZERO..(1.0 / QUANT_ALMOST_ZERO)).contains(&weight)
+            {
+                return Err(Error::InvalidCodestream("invalid VarDCT AC quant matrix"));
+            }
+            Ok(1.0 / weight)
+        })
+        .collect()
+}
+
+fn read_vardct_identity_quant_weights(reader: &mut BitReader<'_>) -> Result<[Vec<f32>; 3]> {
+    let mut weights = [Vec::new(), Vec::new(), Vec::new()];
+    for channel_weights in &mut weights {
+        let base = read_scaled_nonzero_f16_array::<3>(reader, "identity VarDCT AC quant matrix")?;
+        let mut table = vec![base[0]; DCT_BLOCK_SIZE];
+        table[1] = base[1];
+        table[8] = base[1];
+        table[9] = base[2];
+        *channel_weights = table;
+    }
+    Ok(weights)
+}
+
+fn read_vardct_dct2_quant_weights(reader: &mut BitReader<'_>) -> Result<[Vec<f32>; 3]> {
+    let mut weights = [Vec::new(), Vec::new(), Vec::new()];
+    for channel_weights in &mut weights {
+        let d = read_scaled_nonzero_f16_array::<6>(reader, "DCT2 VarDCT AC quant matrix")?;
+        let mut table = vec![0.0; DCT_BLOCK_SIZE];
+        table[1] = d[0];
+        table[8] = d[0];
+        table[9] = d[1];
+        for y in 0..2 {
+            for x in 0..2 {
+                table[y * 8 + x + 2] = d[2];
+                table[(y + 2) * 8 + x] = d[2];
+                table[(y + 2) * 8 + x + 2] = d[3];
+            }
+        }
+        for y in 0..4 {
+            for x in 0..4 {
+                table[y * 8 + x + 4] = d[4];
+                table[(y + 4) * 8 + x] = d[4];
+                table[(y + 4) * 8 + x + 4] = d[5];
+            }
+        }
+        table[0] = d[0];
+        *channel_weights = table;
+    }
+    Ok(weights)
+}
+
+fn read_vardct_dct4_quant_weights(reader: &mut BitReader<'_>) -> Result<[Vec<f32>; 3]> {
+    let multipliers =
+        read_channel_scaled_nonzero_f16_array::<2>(reader, "DCT4 VarDCT AC quant matrix", 1.0)?;
+    let params = read_vardct_dct_quant_params(reader)?;
+    let mut weights = [Vec::new(), Vec::new(), Vec::new()];
+    for channel in 0..3 {
+        let base = quant_weights_from_bands(4, 4, &params[channel])?;
+        let mut table = vec![0.0; DCT_BLOCK_SIZE];
+        for y in 0..8 {
+            for x in 0..8 {
+                table[y * 8 + x] = base[(y / 2) * 4 + (x / 2)];
+            }
+        }
+        table[1] /= multipliers[channel][0];
+        table[8] /= multipliers[channel][0];
+        table[9] /= multipliers[channel][1];
+        weights[channel] = table;
+    }
+    Ok(weights)
+}
+
+fn read_vardct_dct4x8_quant_weights(reader: &mut BitReader<'_>) -> Result<[Vec<f32>; 3]> {
+    let multipliers =
+        read_channel_scaled_nonzero_f16_array::<1>(reader, "DCT4x8 VarDCT AC quant matrix", 1.0)?;
+    let params = read_vardct_dct_quant_params(reader)?;
+    let mut weights = [Vec::new(), Vec::new(), Vec::new()];
+    for channel in 0..3 {
+        let base = quant_weights_from_bands(8, 4, &params[channel])?;
+        let mut table = vec![0.0; DCT_BLOCK_SIZE];
+        for y in 0..8 {
+            for x in 0..8 {
+                table[y * 8 + x] = base[(y / 2) * 8 + x];
+            }
+        }
+        table[8] /= multipliers[channel][0];
+        weights[channel] = table;
+    }
+    Ok(weights)
+}
+
+fn read_vardct_dct_quant_weights(
+    reader: &mut BitReader<'_>,
+    width: usize,
+    height: usize,
+) -> Result<[Vec<f32>; 3]> {
+    let params = read_vardct_dct_quant_params(reader)?;
+    Ok([
+        quant_weights_from_bands(width, height, &params[0])?,
+        quant_weights_from_bands(width, height, &params[1])?,
+        quant_weights_from_bands(width, height, &params[2])?,
+    ])
+}
+
+fn read_vardct_afv_quant_weights(reader: &mut BitReader<'_>) -> Result<[Vec<f32>; 3]> {
+    let mut afv_weights = [[0.0f32; 9]; 3];
+    for channel in &mut afv_weights {
+        for (index, value) in channel.iter_mut().enumerate() {
+            *value = reader.read_f16()?;
+            if value.abs() < QUANT_ALMOST_ZERO {
+                return Err(Error::InvalidCodestream("AFV VarDCT AC quant matrix"));
+            }
+            if index < 6 {
+                *value *= 64.0;
+            }
+        }
+    }
+    let dct4x8_params = read_vardct_dct_quant_params(reader)?;
+    let dct4x4_params = read_vardct_dct_quant_params(reader)?;
+    let mut weights = [Vec::new(), Vec::new(), Vec::new()];
+    for channel in 0..3 {
+        let weights4x8 = quant_weights_from_bands(8, 4, &dct4x8_params[channel])?;
+        let weights4x4 = quant_weights_from_bands(4, 4, &dct4x4_params[channel])?;
+        let afv = afv_weights[channel];
+        let mut table = vec![0.0; DCT_BLOCK_SIZE];
+        table[0] = 1.0;
+        table[8] = afv[0];
+        table[1] = afv[1];
+        table[16] = afv[2];
+        table[2] = afv[3];
+        table[18] = afv[4];
+        let mut bands = [0.0; 4];
+        bands[0] = afv[5];
+        if bands[0] < QUANT_ALMOST_ZERO {
+            return Err(Error::InvalidCodestream(
+                "invalid AFV VarDCT AC quant matrix",
+            ));
+        }
+        for i in 1..4 {
+            bands[i] = bands[i - 1] * quant_multiplier(afv[i + 5]);
+            if bands[i] < QUANT_ALMOST_ZERO {
+                return Err(Error::InvalidCodestream(
+                    "invalid AFV VarDCT AC quant matrix",
+                ));
+            }
+        }
+        const FREQS: [f32; 16] = [
+            0.0, 0.0, 0.8517779, 5.3777843, 0.0, 0.0, 4.734748, 5.4492455, 1.659827, 4.0, 7.275749,
+            10.423228, 2.6629324, 7.6306577, 8.962389, 12.971662,
+        ];
+        let lo = 0.8517779;
+        let hi = 12.971662 - lo + 1.0e-6;
+        for y in 0..4 {
+            for x in 0..4 {
+                if x < 2 && y < 2 {
+                    continue;
+                }
+                table[(2 * y) * 8 + 2 * x] = interpolate_custom(FREQS[y * 4 + x] - lo, hi, &bands)?;
+            }
+        }
+        for y in 0..4 {
+            for x in 0..8 {
+                if x == 0 && y == 0 {
+                    continue;
+                }
+                table[(2 * y + 1) * 8 + x] = weights4x8[y * 8 + x];
+            }
+        }
+        for y in 0..4 {
+            for x in 0..4 {
+                if x == 0 && y == 0 {
+                    continue;
+                }
+                table[(2 * y) * 8 + 2 * x + 1] = weights4x4[y * 4 + x];
+            }
+        }
+        weights[channel] = table;
+    }
+    Ok(weights)
+}
+
+fn read_vardct_dct_quant_params(reader: &mut BitReader<'_>) -> Result<[Vec<f32>; 3]> {
+    let bands = reader.read_bits(4)? as usize + 1;
+    let mut params = [Vec::new(), Vec::new(), Vec::new()];
+    for channel_params in &mut params {
+        channel_params.reserve(bands);
+        for band in 0..bands {
+            let mut value = reader.read_f16()?;
+            if band == 0 {
+                if value < QUANT_ALMOST_ZERO {
+                    return Err(Error::InvalidCodestream(
+                        "invalid VarDCT AC quant distance band",
+                    ));
+                }
+                value *= 64.0;
+            }
+            channel_params.push(value);
+        }
+    }
+    Ok(params)
+}
+
+fn quant_multiplier(encoded: f32) -> f32 {
+    if encoded > 0.0 {
+        1.0 + encoded
+    } else {
+        1.0 / (1.0 - encoded)
+    }
+}
+
+fn read_scaled_nonzero_f16_array<const N: usize>(
+    reader: &mut BitReader<'_>,
+    message: &'static str,
+) -> Result<[f32; N]> {
+    let mut values = [0.0f32; N];
+    for value in &mut values {
+        *value = reader.read_f16()?;
+        if value.abs() < QUANT_ALMOST_ZERO {
+            return Err(Error::InvalidCodestream(message));
+        }
+        *value *= 64.0;
+    }
+    Ok(values)
+}
+
+fn read_channel_scaled_nonzero_f16_array<const N: usize>(
+    reader: &mut BitReader<'_>,
+    message: &'static str,
+    scale: f32,
+) -> Result<[[f32; N]; 3]> {
+    let mut values = [[0.0f32; N]; 3];
+    for channel in &mut values {
+        for value in channel {
+            *value = reader.read_f16()?;
+            if value.abs() < QUANT_ALMOST_ZERO {
+                return Err(Error::InvalidCodestream(message));
+            }
+            *value *= scale;
+        }
+    }
+    Ok(values)
+}
+
+fn raw_quant_table_from_decoded(
+    denominator: f32,
+    required_size: usize,
+    decoded: ModularDecodedGroup,
+) -> Result<VarDctAcQuantTable> {
+    let mut per_channel = [Vec::new(), Vec::new(), Vec::new()];
+    for channel in decoded.channels {
+        let target = per_channel
+            .get_mut(channel.channel_index)
+            .ok_or(Error::InvalidCodestream(
+                "invalid raw VarDCT AC quant matrix",
+            ))?;
+        if channel.samples.len() != required_size * DCT_BLOCK_SIZE {
+            return Err(Error::InvalidCodestream(
+                "invalid raw VarDCT AC quant matrix",
+            ));
+        }
+        target.reserve(channel.samples.len());
+        for sample in channel.samples {
+            if sample <= 0 {
+                return Err(Error::InvalidCodestream(
+                    "invalid raw VarDCT AC quant matrix",
+                ));
+            }
+            target.push(denominator * sample as f32);
+        }
+    }
+    if per_channel.iter().any(Vec::is_empty) {
+        return Err(Error::InvalidCodestream(
+            "invalid raw VarDCT AC quant matrix",
+        ));
+    }
+    Ok(VarDctAcQuantTable {
+        mode: VarDctAcQuantMode::Raw,
+        per_channel,
+    })
+}
+
+fn quant_table_modular_stream_id(dc_group_count: usize, table: usize) -> Result<usize> {
+    1usize
+        .checked_add(
+            3usize
+                .checked_mul(dc_group_count)
+                .ok_or(Error::InvalidCodestream("VarDCT stream id overflow"))?,
+        )
+        .and_then(|id| id.checked_add(table))
+        .ok_or(Error::InvalidCodestream("VarDCT stream id overflow"))
+}
+
+fn vardct_raw_quant_table_channel_plan(
+    required_size_x: usize,
+    required_size_y: usize,
+) -> Result<Vec<ModularGroupChannelPlan>> {
+    let width = required_size_x
+        .checked_mul(DCT_BLOCK_DIM)
+        .and_then(|width| u32::try_from(width).ok())
+        .ok_or(Error::InvalidCodestream(
+            "invalid raw VarDCT AC quant matrix",
+        ))?;
+    let height = required_size_y
+        .checked_mul(DCT_BLOCK_DIM)
+        .and_then(|height| u32::try_from(height).ok())
+        .ok_or(Error::InvalidCodestream(
+            "invalid raw VarDCT AC quant matrix",
+        ))?;
+    Ok((0..3)
+        .map(|channel_index| ModularGroupChannelPlan {
+            channel_index,
+            width,
+            height,
+            x0: 0,
+            y0: 0,
+            hshift: 0,
+            vshift: 0,
+        })
+        .collect())
 }
 
 fn trace_vardct_ac_group_channel(
@@ -4749,6 +5295,7 @@ fn base_dequantize_vardct_ac_grid(
 fn dequantize_vardct_ac_grid(
     grid: &VarDctAcCoefficientGrid,
     global: Option<&VarDctGlobalMetadata>,
+    ac_global: Option<&VarDctAcGlobalMetadata>,
     metadata: &VarDctAcGroupMetadata,
     frame_header: &FrameHeader,
     dc_groups: &[VarDctDcGroupMetadata],
@@ -4801,9 +5348,9 @@ fn dequantize_vardct_ac_grid(
         let strategy_width = STRATEGY_BLOCKS_X[block.raw_strategy];
         let strategy_height = STRATEGY_BLOCKS_Y[block.raw_strategy];
         let size = strategy_width * strategy_height * DCT_BLOCK_SIZE;
-        let x_matrix = default_dequant_matrix(block.raw_strategy, 0)?;
-        let y_matrix = default_dequant_matrix(block.raw_strategy, 1)?;
-        let b_matrix = default_dequant_matrix(block.raw_strategy, 2)?;
+        let x_matrix = dequant_matrix_for_strategy(ac_global, block.raw_strategy, 0)?;
+        let y_matrix = dequant_matrix_for_strategy(ac_global, block.raw_strategy, 1)?;
+        let b_matrix = dequant_matrix_for_strategy(ac_global, block.raw_strategy, 2)?;
         if x_matrix.len() != size || y_matrix.len() != size || b_matrix.len() != size {
             return Err(Error::InvalidCodestream("invalid dequant matrix size"));
         }
@@ -5814,6 +6361,28 @@ fn default_dequant_matrix(raw_strategy: usize, channel: usize) -> Result<Vec<f32
         }
     };
     Ok(weights.into_iter().map(|weight| 1.0 / weight).collect())
+}
+
+fn dequant_matrix_for_strategy(
+    ac_global: Option<&VarDctAcGlobalMetadata>,
+    raw_strategy: usize,
+    channel: usize,
+) -> Result<Vec<f32>> {
+    let table_index = *STRATEGY_QUANT_TABLE
+        .get(raw_strategy)
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+    if let Some(table) = ac_global
+        .and_then(|metadata| metadata.quant_matrices.as_ref())
+        .and_then(|matrices| matrices.tables.get(table_index))
+        .and_then(Option::as_ref)
+    {
+        return table
+            .per_channel
+            .get(channel)
+            .cloned()
+            .ok_or(Error::InvalidCodestream("invalid dequant matrix channel"));
+    }
+    default_dequant_matrix(raw_strategy, channel)
 }
 
 fn default_dct_quant_weights(
@@ -6875,13 +7444,23 @@ fn read_vardct_ac_global_metadata(
     frame_header: &FrameHeader,
     payload: &VarDctSectionPayloadMetadata,
     global: &VarDctGlobalMetadata,
+    global_tree: Option<&ModularTreeCoding>,
+    dc_group_count: usize,
     used_acs: Option<u32>,
 ) -> Result<VarDctAcGlobalMetadata> {
     let bytes = codestream
         .get(payload.payload_range.clone())
         .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
     let mut reader = BitReader::new(bytes);
-    read_vardct_ac_global_metadata_from_reader(&mut reader, frame_header, payload, global, used_acs)
+    read_vardct_ac_global_metadata_from_reader(
+        &mut reader,
+        frame_header,
+        payload,
+        global,
+        global_tree,
+        dc_group_count,
+        used_acs,
+    )
 }
 
 fn read_vardct_ac_global_metadata_from_reader(
@@ -6889,14 +7468,22 @@ fn read_vardct_ac_global_metadata_from_reader(
     frame_header: &FrameHeader,
     payload: &VarDctSectionPayloadMetadata,
     global: &VarDctGlobalMetadata,
+    global_tree: Option<&ModularTreeCoding>,
+    dc_group_count: usize,
     used_acs: Option<u32>,
 ) -> Result<VarDctAcGlobalMetadata> {
-    let all_default_quant_matrices = match reader.read_bool() {
+    let (all_default_quant_matrices, quant_matrices) = match read_vardct_ac_quant_matrices(
+        &mut reader,
+        global_tree,
+        dc_group_count,
+        payload.section.section_physical_index,
+    ) {
         Ok(value) => value,
         Err(error) => {
             return Ok(VarDctAcGlobalMetadata {
                 section: payload.clone(),
                 all_default_quant_matrices: None,
+                quant_matrices: None,
                 quant_matrices_end_bits: None,
                 num_histograms: None,
                 num_histograms_end_bits: None,
@@ -6908,19 +7495,6 @@ fn read_vardct_ac_global_metadata_from_reader(
         }
     };
     let quant_matrices_end_bits = Some(reader.bits_consumed());
-    if !all_default_quant_matrices {
-        return Ok(VarDctAcGlobalMetadata {
-            section: payload.clone(),
-            all_default_quant_matrices: Some(false),
-            quant_matrices_end_bits,
-            num_histograms: None,
-            num_histograms_end_bits: None,
-            used_acs,
-            passes: Vec::new(),
-            bits_consumed: None,
-            parse_error: Some(Error::Unsupported("custom VarDCT AC quant matrices")),
-        });
-    }
 
     let num_histo_bits = ceil_log2_nonzero(frame_header.group_layout.num_groups as usize);
     let num_histograms = match reader.read_bits(num_histo_bits) {
@@ -6928,7 +7502,8 @@ fn read_vardct_ac_global_metadata_from_reader(
         Err(error) => {
             return Ok(VarDctAcGlobalMetadata {
                 section: payload.clone(),
-                all_default_quant_matrices: Some(true),
+                all_default_quant_matrices: Some(all_default_quant_matrices),
+                quant_matrices,
                 quant_matrices_end_bits,
                 num_histograms: None,
                 num_histograms_end_bits: None,
@@ -6963,7 +7538,8 @@ fn read_vardct_ac_global_metadata_from_reader(
                     });
                     return Ok(VarDctAcGlobalMetadata {
                         section: payload.clone(),
-                        all_default_quant_matrices: Some(true),
+                        all_default_quant_matrices: Some(all_default_quant_matrices),
+                        quant_matrices: quant_matrices.clone(),
                         quant_matrices_end_bits,
                         num_histograms: Some(num_histograms),
                         num_histograms_end_bits,
@@ -6996,7 +7572,8 @@ fn read_vardct_ac_global_metadata_from_reader(
                 });
                 return Ok(VarDctAcGlobalMetadata {
                     section: payload.clone(),
-                    all_default_quant_matrices: Some(true),
+                    all_default_quant_matrices: Some(all_default_quant_matrices),
+                    quant_matrices: quant_matrices.clone(),
                     quant_matrices_end_bits,
                     num_histograms: Some(num_histograms),
                     num_histograms_end_bits,
@@ -7033,7 +7610,8 @@ fn read_vardct_ac_global_metadata_from_reader(
         if let Some(error) = pass_error {
             return Ok(VarDctAcGlobalMetadata {
                 section: payload.clone(),
-                all_default_quant_matrices: Some(true),
+                all_default_quant_matrices: Some(all_default_quant_matrices),
+                quant_matrices: quant_matrices.clone(),
                 quant_matrices_end_bits,
                 num_histograms: Some(num_histograms),
                 num_histograms_end_bits,
@@ -7047,7 +7625,8 @@ fn read_vardct_ac_global_metadata_from_reader(
 
     Ok(VarDctAcGlobalMetadata {
         section: payload.clone(),
-        all_default_quant_matrices: Some(true),
+        all_default_quant_matrices: Some(all_default_quant_matrices),
+        quant_matrices,
         quant_matrices_end_bits,
         num_histograms: Some(num_histograms),
         num_histograms_end_bits,
@@ -7066,7 +7645,8 @@ struct VarDctCoeffOrderError {
     error: Error,
 }
 
-const DCT_BLOCK_SIZE: usize = 64;
+const DCT_BLOCK_DIM: usize = 8;
+const DCT_BLOCK_SIZE: usize = DCT_BLOCK_DIM * DCT_BLOCK_DIM;
 const PERMUTATION_CONTEXTS: usize = 8;
 const STRATEGY_ORDER_BUCKETS: usize = 13;
 const NONZERO_BUCKETS: usize = 37;
@@ -7085,6 +7665,9 @@ const COEFF_NUM_NONZERO_CONTEXT: [usize; 64] = [
 ];
 const STRATEGY_ORDER: [usize; 27] = [
     0, 1, 1, 1, 2, 3, 4, 4, 5, 5, 6, 6, 1, 1, 1, 1, 1, 1, 7, 8, 8, 9, 10, 10, 11, 12, 12,
+];
+const STRATEGY_QUANT_TABLE: [usize; 27] = [
+    0, 1, 2, 3, 4, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 10, 10, 11, 12, 12, 13, 14, 14, 15, 16, 16,
 ];
 const STRATEGY_BLOCKS_X: [usize; 27] = [
     1, 1, 1, 1, 2, 4, 1, 2, 1, 4, 2, 4, 1, 1, 1, 1, 1, 1, 8, 4, 8, 16, 8, 16, 32, 16, 32,
