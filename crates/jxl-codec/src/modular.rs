@@ -1978,7 +1978,7 @@ pub(crate) fn decode_modular_stream_from_reader(
     channels: &[ModularGroupChannelPlan],
     global_tree: Option<&ModularTreeCoding>,
 ) -> Result<(ModularGroupHeader, ModularDecodedGroup)> {
-    let header = read_modular_group_header_metadata(reader)?;
+    let mut header = read_modular_group_header_metadata(reader)?;
     let tree = if header.use_global_tree {
         global_tree.cloned().ok_or(Error::InvalidCodestream(
             "modular stream references a missing global tree",
@@ -1986,13 +1986,15 @@ pub(crate) fn decode_modular_stream_from_reader(
     } else {
         read_tree_coding(reader, MAX_TREE_SIZE)?
     };
+    let (residual_channels, transform_plan) =
+        transformed_group_channel_plan(channels, &mut header)?;
     let mut symbol_reader = AnsSymbolReader::new(
         tree.code.clone(),
         reader,
-        channel_distance_multiplier(channels),
+        channel_distance_multiplier(&residual_channels),
     )?;
     let mut decoded_channels = Vec::new();
-    for (local_channel, channel) in channels.iter().enumerate() {
+    for (local_channel, channel) in residual_channels.iter().enumerate() {
         decoded_channels.push(decode_channel_residuals(
             reader,
             &mut symbol_reader,
@@ -2008,6 +2010,10 @@ pub(crate) fn decode_modular_stream_from_reader(
             "invalid modular residual ANS state",
         ));
     }
+    if let Some(transform_plan) = transform_plan {
+        decoded_channels =
+            inverse_group_transforms(&transform_plan, &header, decoded_channels, channels)?;
+    }
     Ok((
         header,
         ModularDecodedGroup {
@@ -2017,6 +2023,94 @@ pub(crate) fn decode_modular_stream_from_reader(
             bits_consumed: reader.bits_consumed(),
         },
     ))
+}
+
+fn transformed_group_channel_plan(
+    channels: &[ModularGroupChannelPlan],
+    header: &mut ModularGroupHeader,
+) -> Result<(Vec<ModularGroupChannelPlan>, Option<ModularChannelPlan>)> {
+    if header.transforms.is_empty() {
+        return Ok((channels.to_vec(), None));
+    }
+
+    let mut transform_channels = channels
+        .iter()
+        .map(|channel| ModularChannel {
+            width: channel.width,
+            height: channel.height,
+            hshift: channel.hshift,
+            vshift: channel.vshift,
+            component: Some(channel.channel_index),
+        })
+        .collect::<Vec<_>>();
+    let mut nb_meta_channels = 0usize;
+    for transform in &mut header.transforms {
+        apply_transform_metadata(transform, &mut transform_channels, &mut nb_meta_channels)?;
+    }
+
+    let residual_channels = transform_channels
+        .iter()
+        .enumerate()
+        .map(|(index, channel)| ModularGroupChannelPlan {
+            channel_index: index,
+            width: channel.width,
+            height: channel.height,
+            x0: 0,
+            y0: 0,
+            hshift: channel.hshift,
+            vshift: channel.vshift,
+        })
+        .collect::<Vec<_>>();
+    let transform_plan = ModularChannelPlan {
+        width: channels.first().map(|channel| channel.width).unwrap_or(0),
+        height: channels.first().map(|channel| channel.height).unwrap_or(0),
+        bit_depth: 0,
+        nb_meta_channels,
+        channels: transform_channels,
+    };
+    Ok((residual_channels, Some(transform_plan)))
+}
+
+fn inverse_group_transforms(
+    transform_plan: &ModularChannelPlan,
+    header: &ModularGroupHeader,
+    decoded_channels: Vec<ModularDecodedChannel>,
+    output_channels: &[ModularGroupChannelPlan],
+) -> Result<Vec<ModularDecodedChannel>> {
+    let image_channels = decoded_channels
+        .into_iter()
+        .map(|channel| ModularImageChannel {
+            width: channel.width,
+            height: channel.height,
+            samples: channel.samples,
+        })
+        .collect::<Vec<_>>();
+    let image = inverse_transforms(transform_plan, header, image_channels)?;
+    if image.channels.len() != output_channels.len() {
+        return Err(Error::InvalidCodestream(
+            "modular transform output channel count mismatch",
+        ));
+    }
+    image
+        .channels
+        .into_iter()
+        .zip(output_channels)
+        .map(|(channel, plan)| {
+            if channel.width != plan.width || channel.height != plan.height {
+                return Err(Error::InvalidCodestream(
+                    "modular transform output channel size mismatch",
+                ));
+            }
+            Ok(ModularDecodedChannel {
+                channel_index: plan.channel_index,
+                x0: plan.x0,
+                y0: plan.y0,
+                width: channel.width,
+                height: channel.height,
+                samples: channel.samples,
+            })
+        })
+        .collect()
 }
 
 fn group_payload_range(group: &ModularSectionMetadata) -> Result<std::ops::Range<usize>> {
@@ -3320,6 +3414,78 @@ mod tests {
         assert_eq!(
             selected_streams(&groups, image_rect(10, 70, 20, 20)),
             vec![31]
+        );
+    }
+
+    #[test]
+    fn modular_stream_transforms_are_applied_around_group_residuals() {
+        let output_channels = [group_channel(3, 2, 1, 2, 1, 0, 0)];
+        let mut header = ModularGroupHeader {
+            use_global_tree: true,
+            weighted_predictor: WeightedPredictorHeader::default(),
+            transforms: vec![ModularTransform {
+                id: TransformId::Squeeze,
+                begin_c: 0,
+                rct_type: None,
+                num_c: None,
+                nb_colors: None,
+                nb_deltas: None,
+                predictor: None,
+                squeezes: vec![SqueezeParams {
+                    horizontal: true,
+                    in_place: true,
+                    begin_c: 0,
+                    num_c: 1,
+                }],
+            }],
+        };
+
+        let (residual_channels, transform_plan) =
+            transformed_group_channel_plan(&output_channels, &mut header).unwrap();
+        assert_eq!(
+            residual_channels
+                .iter()
+                .map(|channel| (
+                    channel.width,
+                    channel.height,
+                    channel.hshift,
+                    channel.vshift
+                ))
+                .collect::<Vec<_>>(),
+            vec![(1, 1, 1, 0), (1, 1, 1, 0)]
+        );
+
+        let decoded = vec![
+            ModularDecodedChannel {
+                channel_index: 0,
+                x0: 0,
+                y0: 0,
+                width: 1,
+                height: 1,
+                samples: vec![10],
+            },
+            ModularDecodedChannel {
+                channel_index: 1,
+                x0: 0,
+                y0: 0,
+                width: 1,
+                height: 1,
+                samples: vec![0],
+            },
+        ];
+        let output =
+            inverse_group_transforms(&transform_plan.unwrap(), &header, decoded, &output_channels)
+                .unwrap();
+        assert_eq!(
+            output,
+            vec![ModularDecodedChannel {
+                channel_index: 3,
+                x0: 2,
+                y0: 1,
+                width: 2,
+                height: 1,
+                samples: vec![10, 10],
+            }]
         );
     }
 
