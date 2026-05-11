@@ -66,6 +66,7 @@ pub struct DecodedChannel {
     pub height: u32,
     pub hshift: i32,
     pub vshift: i32,
+    pub bit_depth: u32,
     pub samples: ChannelData,
 }
 
@@ -408,11 +409,28 @@ fn decode_channels_codestream(
     if bit_depth > 16 {
         return Err(Error::Unsupported("integer sample depths above 16 bits"));
     }
-    let max_sample = max_sample_value(bit_depth)?;
+    let channel_bit_depths = decoded_channel_bit_depths(&codestream.metadata, color_channels)?;
     let channels = image
         .channels
         .iter()
-        .map(|channel| decode_channel(image.width, image.height, channel, bit_depth, max_sample))
+        .enumerate()
+        .map(|(index, channel)| {
+            let channel_bit_depth =
+                channel_bit_depths
+                    .get(index)
+                    .copied()
+                    .ok_or(Error::InvalidCodestream(
+                        "decoded channel missing bit-depth metadata",
+                    ))?;
+            let max_sample = max_sample_value(channel_bit_depth)?;
+            decode_channel(
+                image.width,
+                image.height,
+                channel,
+                channel_bit_depth,
+                max_sample,
+            )
+        })
         .collect::<Result<Vec<_>>>()?;
     Ok(DecodedChannels {
         width: image.width,
@@ -466,6 +484,12 @@ fn decode_buffered_channels(
     }) {
         return Err(Error::Unsupported("subsampled raw channel output"));
     }
+    if output_channel_indices
+        .iter()
+        .any(|&index| channels.channels[index].bit_depth != channels.bit_depth)
+    {
+        return Err(Error::Unsupported("mixed bit-depth interleaved output"));
+    }
 
     if channels.bit_depth <= 8 {
         Ok(DecodedImage {
@@ -509,18 +533,24 @@ fn decode_rgba8_buffered(
 }
 
 fn rgba8_from_modular_codestream(codestream: jxl_codec::Codestream) -> Result<RgbaImage> {
-    let decoded = decode_buffered_codestream(codestream)?;
-    rgba8_from_decoded_image(&decoded)
+    let orientation = codestream.metadata.orientation;
+    let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
+    let channels = decode_channels_codestream(codestream, None, None)?;
+    orient_rgba8(
+        rgba8_from_decoded_channels(&channels, alpha_channel_index)?,
+        orientation,
+    )
 }
 
-fn rgba8_from_decoded_image(decoded: &DecodedImage) -> Result<RgbaImage> {
-    let pixels = match &decoded.pixels {
-        PixelData::U8(samples) => rgba8_from_u8(&decoded, samples)?,
-        PixelData::U16(samples) => rgba8_from_u16(&decoded, samples)?,
-    };
+fn rgba8_from_decoded_channels(
+    channels: &DecodedChannels,
+    alpha_channel_index: Option<usize>,
+) -> Result<RgbaImage> {
+    let output_channel_indices = rgba_channel_indices(channels, alpha_channel_index)?;
+    let pixels = rgba8_from_channel_indices(channels, &output_channel_indices)?;
     Ok(RgbaImage {
-        width: decoded.width,
-        height: decoded.height,
+        width: channels.width,
+        height: channels.height,
         pixels,
     })
 }
@@ -590,6 +620,7 @@ fn decoded_channels_from_vardct_srgb8(
                 height,
                 hshift: 0,
                 vshift: 0,
+                bit_depth: 8,
                 samples: ChannelData::U8(samples),
             })
             .collect(),
@@ -634,18 +665,24 @@ fn decode_rgba16_buffered(
 }
 
 fn rgba16_from_modular_codestream(codestream: jxl_codec::Codestream) -> Result<Rgba16Image> {
-    let decoded = decode_buffered_codestream(codestream)?;
-    rgba16_from_decoded_image(&decoded)
+    let orientation = codestream.metadata.orientation;
+    let alpha_channel_index = raw_alpha_channel_index(&codestream.metadata)?;
+    let channels = decode_channels_codestream(codestream, None, None)?;
+    orient_rgba16(
+        rgba16_from_decoded_channels(&channels, alpha_channel_index)?,
+        orientation,
+    )
 }
 
-fn rgba16_from_decoded_image(decoded: &DecodedImage) -> Result<Rgba16Image> {
-    let pixels = match &decoded.pixels {
-        PixelData::U8(samples) => rgba16_from_u8(&decoded, samples)?,
-        PixelData::U16(samples) => rgba16_from_u16(&decoded, samples)?,
-    };
+fn rgba16_from_decoded_channels(
+    channels: &DecodedChannels,
+    alpha_channel_index: Option<usize>,
+) -> Result<Rgba16Image> {
+    let output_channel_indices = rgba_channel_indices(channels, alpha_channel_index)?;
+    let pixels = rgba16_from_channel_indices(channels, &output_channel_indices)?;
     Ok(Rgba16Image {
-        width: decoded.width,
-        height: decoded.height,
+        width: channels.width,
+        height: channels.height,
         pixels,
     })
 }
@@ -965,6 +1002,23 @@ fn raw_alpha_channel_index_and_info(
     )))
 }
 
+fn decoded_channel_bit_depths(metadata: &ImageMetadata, color_channels: usize) -> Result<Vec<u32>> {
+    let mut bit_depths = Vec::with_capacity(color_channels + metadata.extra_channels.len());
+    bit_depths.resize(color_channels, metadata.bit_depth.bits_per_sample);
+    for extra in &metadata.extra_channels {
+        if extra.bit_depth.floating_point_sample {
+            return Err(Error::Unsupported("floating-point extra-channel output"));
+        }
+        if extra.bit_depth.bits_per_sample > 16 {
+            return Err(Error::Unsupported(
+                "integer extra-channel sample depths above 16 bits",
+            ));
+        }
+        bit_depths.push(extra.bit_depth.bits_per_sample);
+    }
+    Ok(bit_depths)
+}
+
 fn decode_interleaved_alpha(
     channels: &DecodedChannels,
     alpha_channel_index: Option<usize>,
@@ -974,13 +1028,15 @@ fn decode_interleaved_alpha(
         let alpha_channel_index = alpha_channel_index.ok_or(Error::InvalidCodestream(
             "decoded alpha metadata missing channel index",
         ))?;
-        if alpha.bit_depth != channels.bit_depth {
-            return Err(Error::Unsupported("mixed bit-depth alpha output"));
-        }
         if channels.channels.len() <= alpha_channel_index {
             return Err(Error::Unsupported("missing alpha channel output"));
         }
         let alpha_channel = &channels.channels[alpha_channel_index];
+        if alpha_channel.bit_depth != alpha.bit_depth {
+            return Err(Error::InvalidCodestream(
+                "decoded alpha channel bit-depth mismatch",
+            ));
+        }
         if alpha_channel.hshift != 0 || alpha_channel.vshift != 0 {
             return Err(Error::Unsupported("subsampled alpha image decode"));
         }
@@ -1047,6 +1103,7 @@ fn decode_channel(
         height: channel.height,
         hshift,
         vshift,
+        bit_depth,
         samples,
     })
 }
@@ -1130,113 +1187,109 @@ fn checked_sample(sample: i32, max_sample: u32) -> Result<u32> {
     Ok(sample as u32)
 }
 
-fn rgba8_from_u8(image: &DecodedImage, samples: &[u8]) -> Result<Vec<u8>> {
-    let input_channels = decoded_image_output_channels(image);
-    let sample_count = decoded_image_sample_count(image)?;
-    if samples.len() != sample_count * input_channels {
-        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
+fn rgba_channel_indices(
+    channels: &DecodedChannels,
+    alpha_channel_index: Option<usize>,
+) -> Result<Vec<usize>> {
+    let alpha = decode_interleaved_alpha(channels, alpha_channel_index)?;
+    let output_channel_indices = interleaved_channel_indices(channels, alpha_channel_index)?;
+    if output_channel_indices.iter().any(|&index| {
+        channels.channels[index].width != channels.width
+            || channels.channels[index].height != channels.height
+    }) {
+        return Err(Error::Unsupported("subsampled raw channel output"));
     }
+    if alpha != channels.alpha {
+        return Err(Error::InvalidCodestream("decoded alpha metadata mismatch"));
+    }
+    Ok(output_channel_indices)
+}
+
+fn rgba8_from_channel_indices(
+    channels: &DecodedChannels,
+    channel_indices: &[usize],
+) -> Result<Vec<u8>> {
+    let sample_count = decoded_channel_sample_count(channels)?;
     let mut rgba = Vec::with_capacity(sample_count * 4);
-    for pixel in samples.chunks_exact(input_channels) {
+    for index in 0..sample_count {
         append_rgba8_pixel(
             &mut rgba,
-            image.color_channels,
-            image.alpha,
-            image.bit_depth,
-            |index| u32::from(pixel[index]),
+            channels.color_channels,
+            channels.alpha,
+            |channel| channel_sample(&channels.channels[channel_indices[channel]], index),
         )?;
     }
     Ok(rgba)
 }
 
-fn rgba8_from_u16(image: &DecodedImage, samples: &[u16]) -> Result<Vec<u8>> {
-    let input_channels = decoded_image_output_channels(image);
-    let sample_count = decoded_image_sample_count(image)?;
-    if samples.len() != sample_count * input_channels {
-        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
-    }
+fn rgba16_from_channel_indices(
+    channels: &DecodedChannels,
+    channel_indices: &[usize],
+) -> Result<Vec<u16>> {
+    let sample_count = decoded_channel_sample_count(channels)?;
     let mut rgba = Vec::with_capacity(sample_count * 4);
-    for pixel in samples.chunks_exact(input_channels) {
-        append_rgba8_pixel(
-            &mut rgba,
-            image.color_channels,
-            image.alpha,
-            image.bit_depth,
-            |index| u32::from(pixel[index]),
-        )?;
-    }
-    Ok(rgba)
-}
-
-fn rgba16_from_u8(image: &DecodedImage, samples: &[u8]) -> Result<Vec<u16>> {
-    let input_channels = decoded_image_output_channels(image);
-    let sample_count = decoded_image_sample_count(image)?;
-    if samples.len() != sample_count * input_channels {
-        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
-    }
-    let mut rgba = Vec::with_capacity(sample_count * 4);
-    for pixel in samples.chunks_exact(input_channels) {
+    for index in 0..sample_count {
         append_rgba16_pixel(
             &mut rgba,
-            image.color_channels,
-            image.alpha,
-            image.bit_depth,
-            |index| u32::from(pixel[index]),
+            channels.color_channels,
+            channels.alpha,
+            |channel| channel_sample(&channels.channels[channel_indices[channel]], index),
         )?;
     }
     Ok(rgba)
 }
 
-fn rgba16_from_u16(image: &DecodedImage, samples: &[u16]) -> Result<Vec<u16>> {
-    let input_channels = decoded_image_output_channels(image);
-    let sample_count = decoded_image_sample_count(image)?;
-    if samples.len() != sample_count * input_channels {
-        return Err(Error::InvalidCodestream("decoded pixel count mismatch"));
-    }
-    let mut rgba = Vec::with_capacity(sample_count * 4);
-    for pixel in samples.chunks_exact(input_channels) {
-        append_rgba16_pixel(
-            &mut rgba,
-            image.color_channels,
-            image.alpha,
-            image.bit_depth,
-            |index| u32::from(pixel[index]),
-        )?;
-    }
-    Ok(rgba)
+fn channel_sample(channel: &DecodedChannel, index: usize) -> Result<(u32, u32)> {
+    let sample = match &channel.samples {
+        ChannelData::U8(samples) => u32::from(
+            *samples
+                .get(index)
+                .ok_or(Error::InvalidCodestream("decoded pixel count mismatch"))?,
+        ),
+        ChannelData::U16(samples) => u32::from(
+            *samples
+                .get(index)
+                .ok_or(Error::InvalidCodestream("decoded pixel count mismatch"))?,
+        ),
+    };
+    Ok((sample, channel.bit_depth))
 }
 
 fn append_rgba8_pixel(
     rgba: &mut Vec<u8>,
     color_channels: usize,
     alpha: Option<AlphaInfo>,
-    bit_depth: u32,
-    sample: impl Fn(usize) -> u32,
+    sample: impl Fn(usize) -> Result<(u32, u32)>,
 ) -> Result<()> {
-    let alpha_sample = alpha.map(|_| sample(color_channels));
-    let color_sample = |index| {
-        let value = sample(index);
-        if alpha.is_some_and(|alpha| alpha.premultiplied) {
-            unpremultiply_sample_to(value, alpha_sample.unwrap_or(0), u8::MAX as u32) as u8
-        } else {
-            scale_sample_to_u8(value, bit_depth)
-        }
+    let alpha_sample = if alpha.is_some() {
+        Some(sample(color_channels)?)
+    } else {
+        None
+    };
+    let color_sample = |index| -> Result<u8> {
+        let (value, bit_depth) = sample(index)?;
+        Ok(
+            scale_or_unpremultiply_sample_to(value, bit_depth, alpha, alpha_sample, u8::MAX as u32)
+                as u8,
+        )
     };
     match color_channels {
         1 => {
-            let gray = color_sample(0);
+            let gray = color_sample(0)?;
             rgba.extend_from_slice(&[gray, gray, gray]);
         }
         3 => {
-            rgba.extend_from_slice(&[color_sample(0), color_sample(1), color_sample(2)]);
+            rgba.extend_from_slice(&[color_sample(0)?, color_sample(1)?, color_sample(2)?]);
         }
         _ => return Err(Error::Unsupported("unsupported color channel count")),
     }
-    rgba.push(if let Some(alpha_sample) = alpha_sample {
-        scale_sample_to_u8(alpha_sample, bit_depth)
-    } else {
-        255
-    });
+    rgba.push(
+        if let Some((alpha_sample, alpha_bit_depth)) = alpha_sample {
+            scale_sample_to_u8(alpha_sample, alpha_bit_depth)
+        } else {
+            255
+        },
+    );
     Ok(())
 }
 
@@ -1244,33 +1297,37 @@ fn append_rgba16_pixel(
     rgba: &mut Vec<u16>,
     color_channels: usize,
     alpha: Option<AlphaInfo>,
-    bit_depth: u32,
-    sample: impl Fn(usize) -> u32,
+    sample: impl Fn(usize) -> Result<(u32, u32)>,
 ) -> Result<()> {
-    let alpha_sample = alpha.map(|_| sample(color_channels));
-    let color_sample = |index| {
-        let value = sample(index);
-        if alpha.is_some_and(|alpha| alpha.premultiplied) {
-            unpremultiply_sample_to(value, alpha_sample.unwrap_or(0), u16::MAX as u32) as u16
-        } else {
-            scale_sample_to_u16(value, bit_depth)
-        }
+    let alpha_sample = if alpha.is_some() {
+        Some(sample(color_channels)?)
+    } else {
+        None
+    };
+    let color_sample = |index| -> Result<u16> {
+        let (value, bit_depth) = sample(index)?;
+        Ok(
+            scale_or_unpremultiply_sample_to(value, bit_depth, alpha, alpha_sample, u16::MAX as u32)
+                as u16,
+        )
     };
     match color_channels {
         1 => {
-            let gray = color_sample(0);
+            let gray = color_sample(0)?;
             rgba.extend_from_slice(&[gray, gray, gray]);
         }
         3 => {
-            rgba.extend_from_slice(&[color_sample(0), color_sample(1), color_sample(2)]);
+            rgba.extend_from_slice(&[color_sample(0)?, color_sample(1)?, color_sample(2)?]);
         }
         _ => return Err(Error::Unsupported("unsupported color channel count")),
     }
-    rgba.push(if let Some(alpha_sample) = alpha_sample {
-        scale_sample_to_u16(alpha_sample, bit_depth)
-    } else {
-        u16::MAX
-    });
+    rgba.push(
+        if let Some((alpha_sample, alpha_bit_depth)) = alpha_sample {
+            scale_sample_to_u16(alpha_sample, alpha_bit_depth)
+        } else {
+            u16::MAX
+        },
+    );
     Ok(())
 }
 
@@ -1284,6 +1341,7 @@ fn decoded_image_output_channels(image: &DecodedImage) -> usize {
     image.color_channels + usize::from(image.alpha.is_some())
 }
 
+#[cfg(test)]
 fn decoded_image_sample_count(image: &DecodedImage) -> Result<usize> {
     (image.width as usize)
         .checked_mul(image.height as usize)
@@ -1303,12 +1361,36 @@ fn scale_sample_to(sample: u32, bit_depth: u32, output_max: u32) -> u32 {
     ((sample * output_max + max / 2) / max).min(output_max)
 }
 
-fn unpremultiply_sample_to(sample: u32, alpha: u32, output_max: u32) -> u32 {
+fn scale_or_unpremultiply_sample_to(
+    sample: u32,
+    bit_depth: u32,
+    alpha: Option<AlphaInfo>,
+    alpha_sample: Option<(u32, u32)>,
+    output_max: u32,
+) -> u32 {
+    if alpha.is_some_and(|alpha| alpha.premultiplied) {
+        let (alpha_sample, alpha_bit_depth) = alpha_sample.unwrap_or((0, bit_depth));
+        unpremultiply_sample_to(sample, bit_depth, alpha_sample, alpha_bit_depth, output_max)
+    } else {
+        scale_sample_to(sample, bit_depth, output_max)
+    }
+}
+
+fn unpremultiply_sample_to(
+    sample: u32,
+    bit_depth: u32,
+    alpha: u32,
+    alpha_bit_depth: u32,
+    output_max: u32,
+) -> u32 {
     if alpha == 0 {
         return if sample == 0 { 0 } else { output_max };
     }
-    (((u64::from(sample) * u64::from(output_max)) + u64::from(alpha / 2)) / u64::from(alpha))
-        .min(u64::from(output_max)) as u32
+    let sample_max = (1u64 << bit_depth) - 1;
+    let alpha_max = (1u64 << alpha_bit_depth) - 1;
+    let numerator = u64::from(sample) * alpha_max * u64::from(output_max);
+    let denominator = sample_max * u64::from(alpha);
+    ((numerator + denominator / 2) / denominator).min(u64::from(output_max)) as u32
 }
 
 #[cfg(test)]
@@ -2537,11 +2619,53 @@ mod tests {
 
     #[test]
     fn unpremultiplies_associated_alpha_with_rounding_and_clamping() {
-        assert_eq!(unpremultiply_sample_to(0, 0, 255), 0);
-        assert_eq!(unpremultiply_sample_to(7, 0, 255), 255);
-        assert_eq!(unpremultiply_sample_to(64, 128, 255), 128);
-        assert_eq!(unpremultiply_sample_to(200, 128, 255), 255);
-        assert_eq!(unpremultiply_sample_to(128, 255, 65_535), 32_896);
+        assert_eq!(unpremultiply_sample_to(0, 8, 0, 8, 255), 0);
+        assert_eq!(unpremultiply_sample_to(7, 8, 0, 8, 255), 255);
+        assert_eq!(unpremultiply_sample_to(64, 8, 128, 8, 255), 128);
+        assert_eq!(unpremultiply_sample_to(200, 8, 128, 8, 255), 255);
+        assert_eq!(unpremultiply_sample_to(128, 8, 255, 8, 65_535), 32_896);
+        assert_eq!(unpremultiply_sample_to(32_896, 16, 128, 8, 255), 255);
+    }
+
+    #[test]
+    fn rgba_output_scales_mixed_bit_depth_alpha_channels() {
+        let channels = DecodedChannels {
+            width: 2,
+            height: 1,
+            color_channels: 3,
+            alpha: Some(AlphaInfo {
+                bit_depth: 8,
+                premultiplied: true,
+            }),
+            bit_depth: 16,
+            channels: vec![
+                decoded_u16_channel(2, 1, &[16_448, 0]),
+                decoded_u16_channel(2, 1, &[32_896, 0]),
+                decoded_u16_channel(2, 1, &[65_535, 257]),
+                DecodedChannel {
+                    width: 2,
+                    height: 1,
+                    hshift: 0,
+                    vshift: 0,
+                    bit_depth: 8,
+                    samples: ChannelData::U8(vec![128, 0]),
+                },
+            ],
+        };
+
+        let rgba8 = rgba8_from_decoded_channels(&channels, Some(3)).unwrap();
+        assert_eq!(rgba8.pixels, vec![128, 255, 255, 128, 0, 0, 255, 0]);
+
+        let rgba16 = rgba16_from_decoded_channels(&channels, Some(3)).unwrap();
+        assert_eq!(
+            rgba16.pixels,
+            vec![32_768, 65_535, 65_535, 32_896, 0, 0, 65_535, 0]
+        );
+
+        assert_eq!(
+            decode_buffered_channels(channels, Some(3)),
+            Err(Error::Unsupported("mixed bit-depth interleaved output"))
+        );
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2679,6 +2803,17 @@ mod tests {
         }
     }
 
+    fn decoded_u16_channel(width: u32, height: u32, samples: &[u16]) -> DecodedChannel {
+        DecodedChannel {
+            width,
+            height,
+            hshift: 0,
+            vshift: 0,
+            bit_depth: 16,
+            samples: ChannelData::U16(samples.to_vec()),
+        }
+    }
+
     fn srgb8_oracle_metrics(
         decoded: &DecodedImage,
         reference: &PpmRgb,
@@ -2777,6 +2912,7 @@ mod tests {
             assert_eq!(channel.height, image.height);
             assert_eq!(channel.hshift, 0);
             assert_eq!(channel.vshift, 0);
+            assert_eq!(channel.bit_depth, image.bit_depth);
         }
 
         match &image.pixels {
@@ -2823,6 +2959,7 @@ mod tests {
             assert_eq!(roi_channel.height, roi.height);
             assert_eq!(roi_channel.hshift, 0);
             assert_eq!(roi_channel.vshift, 0);
+            assert_eq!(roi_channel.bit_depth, full_channel.bit_depth);
             match (&roi_channel.samples, &full_channel.samples) {
                 (ChannelData::U8(roi_samples), ChannelData::U8(full_samples)) => {
                     assert_eq!(
@@ -3037,7 +3174,9 @@ mod tests {
                     bytes.push(premultiplied);
                     expected_rgba.push(unpremultiply_sample_to(
                         u32::from(premultiplied),
+                        8,
                         alpha,
+                        8,
                         u8::MAX as u32,
                     ) as u8);
                 }
@@ -3080,7 +3219,9 @@ mod tests {
                     bytes.extend_from_slice(&premultiplied.to_be_bytes());
                     expected_rgba.push(unpremultiply_sample_to(
                         u32::from(premultiplied),
+                        16,
                         alpha,
+                        16,
                         u16::MAX as u32,
                     ) as u16);
                 }
