@@ -2544,6 +2544,93 @@ mod tests {
     }
 
     #[test]
+    fn decode_channels_exposes_generated_var_dct_depth_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping VarDCT depth raw-channel decode; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-vardct-depth-source", "pam");
+        let encoded = unique_temp_path("jxl-vardct-depth", "jxl");
+        let expected_depth = write_vardct_rgb_depth_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert!(info.first_frame_vardct.is_some());
+        assert_eq!(info.metadata.extra_channels.len(), 1);
+        assert_eq!(
+            info.metadata.extra_channels[0].channel_type,
+            ExtraChannelType::Depth
+        );
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, 320);
+        assert_eq!(channels.height, 192);
+        assert_eq!(channels.color_channels, 3);
+        assert_eq!(channels.alpha, None);
+        assert_eq!(channels.bit_depth, 8);
+        assert_eq!(channels.channels.len(), 4);
+        let depth_channel = &channels.channels[3];
+        assert_eq!(depth_channel.width, 320);
+        assert_eq!(depth_channel.height, 192);
+        assert_eq!(depth_channel.hshift, 0);
+        assert_eq!(depth_channel.vshift, 0);
+        assert_eq!(depth_channel.bit_depth, 8);
+        let ChannelData::U8(depth) = &depth_channel.samples else {
+            panic!("expected 8-bit VarDCT depth channel");
+        };
+        assert_eq!(depth, &expected_depth);
+
+        let roi = Rect {
+            x: 31,
+            y: 13,
+            width: 43,
+            height: 27,
+        };
+        let roi_channels = Decoder::new()
+            .roi(roi)
+            .decode_channels(&encoded_bytes)
+            .unwrap();
+        assert_eq!(roi_channels.width, roi.width);
+        assert_eq!(roi_channels.height, roi.height);
+        assert_eq!(roi_channels.alpha, None);
+        assert_eq!(roi_channels.channels.len(), channels.channels.len());
+        let ChannelData::U8(roi_depth) = &roi_channels.channels[3].samples else {
+            panic!("expected 8-bit VarDCT ROI depth channel");
+        };
+        assert_eq!(roi_depth, &window_u8(&expected_depth, 320, roi));
+
+        let rgba8 = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba8.width, 320);
+        assert_eq!(rgba8.height, 192);
+        assert!(rgba8.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        assert_eq!(rgba16.width, 320);
+        assert_eq!(rgba16.height, 192);
+        assert!(
+            rgba16
+                .pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel[3] == u16::MAX)
+        );
+    }
+
+    #[test]
     fn decode_channels_rejects_unreconstructed_generated_var_dct_extra_channels() {
         let Some(cjxl) = reference_cjxl() else {
             eprintln!("skipping VarDCT extra-channel rejection; reference cjxl is not built");
@@ -3811,6 +3898,29 @@ mod tests {
         }
         std::fs::write(path, bytes).unwrap();
         alpha
+    }
+
+    fn write_vardct_rgb_depth_source_pam(path: &Path) -> Vec<u8> {
+        let width = 320u32;
+        let height = 192u32;
+        let mut depth = Vec::with_capacity(width as usize * height as usize);
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB\nTUPLTYPE Depth\nENDHDR\n"
+        )
+        .into_bytes();
+        for y in 0..height {
+            for x in 0..width {
+                let checker = (((x / 16) ^ (y / 16)) & 1) * 48;
+                bytes.push(((x * 255 / (width - 1)) ^ checker) as u8);
+                bytes.push(((y * 255 / (height - 1)) ^ checker) as u8);
+                bytes.push((((x + y) * 255 / (width + height - 2)) ^ checker) as u8);
+                let depth_sample = ((x * 37 + y * 41 + 73) & 0xff) as u8;
+                bytes.push(depth_sample);
+                depth.push(depth_sample);
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+        depth
     }
 
     fn write_rgb_depth_source_pam(path: &Path) {
