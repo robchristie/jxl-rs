@@ -2909,7 +2909,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unreconstructed_var_dct_fixture() {
+    fn decodes_small_combined_var_dct_fixture() {
         let bytes = std::fs::read(workspace_path(
             "reference/libjxl/testdata/jxl/boxes/square-extended-size-container.jxl",
         ))
@@ -2927,37 +2927,70 @@ mod tests {
             width: 4,
             height: 4,
         });
+
+        let decoded = decode(&bytes).unwrap();
+        assert_eq!(decoded.width, 8);
+        assert_eq!(decoded.height, 8);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.alpha, None);
+        assert_eq!(decoded.bit_depth, 8);
+        assert_eq!(decoded.pixels, PixelData::U8(vec![0; 8 * 8 * 3]));
+
+        let channels = decode_channels(&bytes).unwrap();
+        assert_eq!(channels.width, 8);
+        assert_eq!(channels.height, 8);
+        assert_eq!(channels.color_channels, 3);
+        assert_eq!(channels.alpha, None);
+        assert_eq!(channels.bit_depth, 8);
+        assert_eq!(channels.channels.len(), 3);
+        for channel in &channels.channels {
+            assert_eq!(channel.width, 8);
+            assert_eq!(channel.height, 8);
+            assert_eq!(channel.hshift, 0);
+            assert_eq!(channel.vshift, 0);
+            assert_eq!(channel.bit_depth, 8);
+            assert_eq!(channel.samples, ChannelData::U8(vec![0; 8 * 8]));
+        }
+
+        let rgba8 = decode_rgba8(&bytes).unwrap();
+        assert_eq!(rgba8.width, 8);
+        assert_eq!(rgba8.height, 8);
+        assert_eq!(rgba8.pixels.len(), 8 * 8 * 4);
+        assert!(
+            rgba8
+                .pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0, 0, 0, 255])
+        );
+
+        let rgba16 = decode_rgba16(&bytes).unwrap();
+        assert_eq!(rgba16.width, 8);
+        assert_eq!(rgba16.height, 8);
+        assert_eq!(rgba16.pixels.len(), 8 * 8 * 4);
+        assert!(
+            rgba16
+                .pixels
+                .chunks_exact(4)
+                .all(|pixel| pixel == [0, 0, 0, u16::MAX])
+        );
+
+        let roi_channels = roi_decoder.decode_channels(&bytes).unwrap();
+        assert_eq!(roi_channels.width, 4);
+        assert_eq!(roi_channels.height, 4);
+        for channel in &roi_channels.channels {
+            assert_eq!(channel.samples, ChannelData::U8(vec![0; 4 * 4]));
+        }
         assert_eq!(
-            decode(&bytes),
-            Err(Error::Unsupported("VarDCT image reconstruction"))
+            roi_decoder.decode(&bytes).unwrap().pixels,
+            PixelData::U8(vec![0; 4 * 4 * 3])
         );
         assert_eq!(
-            decode_channels(&bytes),
-            Err(Error::Unsupported("VarDCT image reconstruction"))
+            roi_decoder.decode_rgba8(&bytes).unwrap().pixels.len(),
+            4 * 4 * 4
         );
         assert_eq!(
-            decode_rgba8(&bytes),
-            Err(Error::Unsupported("VarDCT image reconstruction"))
-        );
-        assert_eq!(
-            roi_decoder.decode_channels(&bytes),
-            Err(Error::Unsupported("VarDCT image reconstruction"))
-        );
-        assert_eq!(
-            roi_decoder.decode(&bytes),
-            Err(Error::Unsupported("VarDCT image reconstruction"))
-        );
-        assert_eq!(
-            roi_decoder.decode_rgba8(&bytes),
-            Err(Error::Unsupported("VarDCT image reconstruction"))
-        );
-        assert_eq!(
-            roi_decoder.decode_rgba16(&bytes),
-            Err(Error::Unsupported("VarDCT image reconstruction"))
-        );
-        assert_eq!(
-            decode_rgba16(&bytes),
-            Err(Error::Unsupported("VarDCT image reconstruction"))
+            roi_decoder.decode_rgba16(&bytes).unwrap().pixels.len(),
+            4 * 4 * 4
         );
     }
 
@@ -3088,8 +3121,8 @@ mod tests {
                 metrics,
                 Srgb8OracleMetrics {
                     max_abs_error: 255,
-                    sum_abs_error: 13_423_128,
-                    checksum: 16_085_799_772_372_920_399,
+                    sum_abs_error: 13_657_167,
+                    checksum: 11_814_460_042_320_799_823,
                     anchors: vec![3, 40, 0],
                     reference_anchors: vec![0, 21, 255],
                 }

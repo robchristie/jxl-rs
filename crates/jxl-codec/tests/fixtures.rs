@@ -556,9 +556,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
                 Some(32),
                 Some(35936),
                 Some(false),
-                Some(jxl_codec::Error::Unsupported(
-                    "VarDCT AC coefficient stream decoding"
-                )),
+                None,
             ),
             (
                 0,
@@ -572,9 +570,7 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
                 Some(32),
                 Some(8185),
                 Some(false),
-                Some(jxl_codec::Error::Unsupported(
-                    "VarDCT AC coefficient stream decoding"
-                )),
+                None,
             ),
         ]
     );
@@ -691,9 +687,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .map(|channel| (channel.nonzero_samples, channel.sample_checksum))
             .collect::<Vec<_>>(),
         vec![
-            (46514, 18366614924522222709),
-            (46533, 11877236637318220801),
-            (46533, 2782761112900397224),
+            (49152, 11615773293947228817),
+            (49152, 2339597035734485333),
+            (49152, 8283638345610162620),
         ]
     );
     assert_eq!(
@@ -771,9 +767,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .map(|channel| (channel.nonzero_samples, channel.sample_checksum))
             .collect::<Vec<_>>(),
         vec![
-            (37292, 16813038874002982590),
-            (46462, 10635409352978935825),
-            (46532, 3338232229917420086),
+            (39513, 4239850168503413225),
+            (49054, 9059697401613785067),
+            (49152, 7466818102430492487),
         ]
     );
     assert_eq!(
@@ -862,9 +858,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(
         xyb_summary,
         vec![
-            (59535, 5633791055992201906),
-            (59565, 1046998991249178228),
-            (59580, 1757872859121295915),
+            (61440, 1087392107436690475),
+            (61440, 13364037282561279555),
+            (61440, 2967564629462357305),
         ]
     );
     assert_eq!(
@@ -883,9 +879,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(
         dc_xyb_summary,
         vec![
-            (59456, 13425016683111460396),
-            (59492, 14761796399151523770),
-            (59346, 3605997559581183167),
+            (61404, 8581769881796744838),
+            (61440, 4801661309883638526),
+            (61290, 8609177589386824378),
         ]
     );
     assert_eq!(
@@ -926,9 +922,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(
         rgb_summary,
         vec![
-            (61440, 4198298985299210855),
-            (61440, 15618029478993648071),
-            (61440, 9092500794843455953),
+            (61440, 8243313939319752407),
+            (61440, 10452165786705087968),
+            (61440, 2434908460216884218),
         ]
     );
     assert_eq!(
@@ -955,33 +951,33 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .collect::<Vec<_>>(),
         vec![
             (
-                59535,
-                29488,
+                61440,
+                30142,
                 0,
-                3191298882,
-                1051715701,
-                1124434644,
-                2481655786355048020,
+                3192991711,
+                1053159479,
+                1140036579,
+                415692032689093162,
                 vec![3108050852, 3155229194, 979251270],
             ),
             (
-                59565,
-                42,
-                13316,
-                3161978485,
-                1090797967,
-                1193341502,
-                5571404383896368925,
+                61440,
+                0,
+                17608,
+                1012937238,
+                1094582204,
+                1198926418,
+                6224930228878221040,
                 vec![1012981083, 1053652295, 1062172091],
             ),
             (
-                59580,
-                29745,
-                18,
-                3220582914,
-                1074141196,
-                3293977631,
-                3336743281332664405,
+                61440,
+                30579,
+                948,
+                3223947283,
+                1079700797,
+                1134171063,
+                13095458132992011547,
                 vec![3138522217, 3188253519, 1009180797],
             ),
         ]
@@ -1004,32 +1000,32 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         vec![
             (
                 61440,
-                3722,
-                17576,
-                3268126967,
-                1157887982,
-                1204162497,
-                18330833717204638394,
+                2197,
+                21552,
+                3272353579,
+                1158950335,
+                1242354761,
+                17331023746054990450,
                 vec![980364750, 1018227348, 1066160777],
             ),
             (
                 61440,
-                1926,
-                17447,
-                3215862026,
-                1148642515,
-                1202226358,
-                7917420031084974592,
+                469,
+                20994,
+                3251638796,
+                1159719904,
+                1234895780,
+                3606075977608553850,
                 vec![984819547, 1048815217, 1065591689],
             ),
             (
                 61440,
-                61373,
+                61407,
                 0,
-                3296137317,
-                993802602,
-                3348316780,
-                10001866036731436175,
+                3299474209,
+                978318848,
+                3384137000,
+                10061309283741045480,
                 vec![3122666916, 3179991936, 3210597049],
             ),
         ]
@@ -1048,9 +1044,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     ];
     let metrics = srgb8_oracle_metrics(&srgb8_image, &reference, &anchor_indices);
     assert_eq!(metrics.max_abs_error, 255);
-    assert_eq!(metrics.sum_abs_error, 13423128);
-    assert_eq!(metrics.checksum, 4746000757651861193);
-    assert_eq!(metrics.anchors, vec![3, 5, 0, 104, 97, 0, 255, 255, 0]);
+    assert_eq!(metrics.sum_abs_error, 13657167);
+    assert_eq!(metrics.checksum, 2185788697405418356);
+    assert_eq!(metrics.anchors, vec![3, 5, 0, 255, 255, 0, 255, 255, 0]);
     assert_eq!(
         metrics.reference_anchors,
         vec![0, 1, 1, 125, 128, 124, 253, 255, 255]
@@ -1078,12 +1074,12 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         vec![
             (
                 VarDctXybInverseVariant::BMinusBias,
-                61343,
+                61431,
                 0,
                 255,
-                13432860,
-                9988240761527461363,
-                vec![3, 5, 0, 104, 97, 0, 255, 255, 0],
+                13661699,
+                591840129773380938,
+                vec![3, 5, 0, 255, 255, 0, 255, 255, 0],
                 vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
             ),
             (
@@ -1091,19 +1087,19 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
                 61440,
                 0,
                 255,
-                13498277,
-                9070158043801923301,
-                vec![7, 9, 0, 104, 98, 0, 255, 255, 0],
+                13745965,
+                12762464900862592737,
+                vec![7, 9, 0, 255, 255, 0, 255, 255, 0],
                 vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
             ),
             (
                 VarDctXybInverseVariant::NegBMinusBias,
-                61373,
+                61407,
                 0,
                 255,
-                13423128,
-                4746000757651861193,
-                vec![3, 5, 0, 104, 97, 0, 255, 255, 0],
+                13657167,
+                2185788697405418356,
+                vec![3, 5, 0, 255, 255, 0, 255, 255, 0],
                 vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
             ),
             (
@@ -1111,9 +1107,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
                 61440,
                 0,
                 255,
-                13481193,
-                5178142039000203500,
-                vec![7, 9, 0, 105, 98, 0, 255, 255, 0],
+                13733308,
+                9305107120244340063,
+                vec![7, 9, 0, 255, 255, 0, 255, 255, 0],
                 vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
             ),
         ]
@@ -1122,9 +1118,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     let dc_metrics = srgb8_oracle_metrics(&dc_srgb8_image, &reference, &anchor_indices);
     let dc_summary = srgb8_image_summary(&dc_srgb8_image);
     assert_eq!(dc_metrics.max_abs_error, 255);
-    assert_eq!(dc_metrics.sum_abs_error, 13423451);
-    assert_eq!(dc_metrics.checksum, 1144408170008613732);
-    assert_eq!(dc_metrics.anchors, vec![3, 5, 0, 101, 97, 0, 255, 255, 0]);
+    assert_eq!(dc_metrics.sum_abs_error, 13658448);
+    assert_eq!(dc_metrics.checksum, 7105579610361201217);
+    assert_eq!(dc_metrics.anchors, vec![3, 5, 0, 255, 255, 0, 255, 255, 0]);
     assert_eq!(
         dc_metrics.reference_anchors,
         vec![0, 1, 1, 125, 128, 124, 253, 255, 255]
@@ -1132,8 +1128,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(
         dc_summary,
         (
-            117229,
-            1144408170008613732,
+            120313,
+            7105579610361201217,
             vec![3, 5, 0, 40, 138, 0, 255, 255, 0],
         )
     );
@@ -1160,25 +1156,25 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             (
                 1040187392,
                 255,
-                23037492,
-                13302848153063412604,
-                vec![0, 0, 0, 1, 1, 0, 4, 4, 0],
+                22820908,
+                7533537360001234725,
+                vec![0, 0, 0, 10, 10, 0, 4, 4, 0],
                 vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
             ),
             (
                 1065353216,
                 255,
-                20238994,
-                14523755376691066364,
-                vec![0, 1, 0, 15, 14, 0, 34, 33, 0],
+                19916007,
+                7334545795243011028,
+                vec![0, 1, 0, 75, 71, 0, 34, 33, 0],
                 vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
             ),
             (
                 1090519040,
                 255,
-                13423451,
-                1144408170008613732,
-                vec![3, 5, 0, 101, 97, 0, 255, 255, 0],
+                13658448,
+                7105579610361201217,
+                vec![3, 5, 0, 255, 255, 0, 255, 255, 0],
                 vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
             ),
         ]
@@ -2187,6 +2183,94 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
 }
 
 #[test]
+fn generated_flat_vardct_prefix_ac_decodes_when_available() {
+    let Some(cjxl) = reference_cjxl() else {
+        eprintln!("skipping generated flat VarDCT prefix AC fixture; reference cjxl is not built");
+        return;
+    };
+
+    let input = unique_temp_path("jxl-rs-vardct-prefix-source", "ppm");
+    let encoded = unique_temp_path("jxl-rs-vardct-prefix", "jxl");
+    write_flat_vardct_source_ppm(&input);
+
+    let cjxl_output = Command::new(&cjxl)
+        .arg(&input)
+        .arg(&encoded)
+        .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+        .output()
+        .unwrap();
+    let _ = std::fs::remove_file(&input);
+    assert!(
+        cjxl_output.status.success(),
+        "reference cjxl failed: {}",
+        String::from_utf8_lossy(&cjxl_output.stderr)
+    );
+
+    let encoded_bytes = std::fs::read(&encoded).unwrap();
+    let _ = std::fs::remove_file(&encoded);
+    let (_, codestream) = parse_file(&encoded_bytes).unwrap();
+    let plan = codestream.first_frame_vardct_plan.as_ref().unwrap();
+    assert!(
+        plan.frame.is_combined,
+        "flat VarDCT fixture unexpectedly used split sections"
+    );
+
+    let ac_global = plan.ac_global_metadata.as_ref().unwrap();
+    assert_eq!(ac_global.passes.len(), 1);
+    assert_eq!(ac_global.passes[0].use_prefix_code, Some(true));
+    assert_eq!(ac_global.parse_error, None);
+    assert_eq!(plan.ac_group_metadata.len(), 1);
+
+    let group = &plan.ac_group_metadata[0];
+    assert_eq!(group.entropy_uses_prefix_code, Some(true));
+    assert_eq!(group.cursor.ans_state_start_bits, None);
+    assert_eq!(group.cursor.ans_state_end_bits, None);
+    assert_eq!(group.cursor.coefficient_stream_start_bits, Some(463));
+    assert_eq!(group.cursor.modular_ac_start_bits, Some(463));
+    assert_eq!(group.parse_error, None);
+
+    let probe = group.coefficient_probe.as_ref().unwrap();
+    assert_eq!(probe.nzeros, 0);
+    assert_eq!(probe.coefficient_events.len(), 0);
+    assert_eq!(probe.coefficient_event_checksum, 14695981039346656037);
+    assert_eq!(
+        group
+            .coefficient_summary
+            .as_ref()
+            .map(|summary| (summary.blocks_decoded, summary.final_bits)),
+        Some((3, 463))
+    );
+    assert_eq!(
+        group
+            .coefficient_summary
+            .as_ref()
+            .unwrap()
+            .per_channel
+            .iter()
+            .map(|summary| (
+                summary.blocks_decoded,
+                summary.coefficients_written,
+                summary.nonzero_coefficients,
+            ))
+            .collect::<Vec<_>>(),
+        vec![(1, 0, 0), (1, 0, 0), (1, 0, 0)]
+    );
+    assert!(group.spatial_with_dc_grid.is_some());
+
+    let image = assemble_vardct_srgb8_image(plan).unwrap().unwrap();
+    assert_eq!(image.width, 64);
+    assert_eq!(image.height, 64);
+    assert_eq!(
+        srgb8_image_summary(&image),
+        (
+            8192,
+            13564060705977658877,
+            vec![36, 36, 0, 36, 36, 0, 36, 36, 0]
+        )
+    );
+}
+
+#[test]
 fn generated_vardct_alpha_exposes_modular_ac_channel_plans_when_available() {
     let Some(cjxl) = reference_cjxl() else {
         eprintln!("skipping generated VarDCT alpha channel plan; reference cjxl is not built");
@@ -2553,35 +2637,35 @@ fn generated_vardct_xyb_inverse_variants_compare_against_oracle_when_available()
                 vec![
                     (
                         VarDctXybInverseVariant::BMinusBias,
-                        61343,
+                        61431,
                         0,
                         255,
-                        13432860,
-                        9988240761527461363,
+                        13661699,
+                        591840129773380938,
                     ),
                     (
                         VarDctXybInverseVariant::BPlusBias,
                         61440,
                         0,
                         255,
-                        13498277,
-                        9070158043801923301,
+                        13745965,
+                        12762464900862592737,
                     ),
                     (
                         VarDctXybInverseVariant::NegBMinusBias,
-                        61373,
+                        61407,
                         0,
                         255,
-                        13423128,
-                        4746000757651861193,
+                        13657167,
+                        2185788697405418356,
                     ),
                     (
                         VarDctXybInverseVariant::NegBPlusBias,
                         61440,
                         0,
                         255,
-                        13481193,
-                        5178142039000203500,
+                        13733308,
+                        9305107120244340063,
                     ),
                 ],
             ),
@@ -2590,35 +2674,35 @@ fn generated_vardct_xyb_inverse_variants_compare_against_oracle_when_available()
                 vec![
                     (
                         VarDctXybInverseVariant::BMinusBias,
-                        61382,
+                        61440,
                         0,
                         255,
-                        13881008,
-                        1094007842549171476,
+                        14130804,
+                        10679897933458786206,
                     ),
                     (
                         VarDctXybInverseVariant::BPlusBias,
                         61440,
                         0,
                         255,
-                        13925044,
-                        3724368414988589215,
+                        14185880,
+                        17946096765598688405,
                     ),
                     (
                         VarDctXybInverseVariant::NegBMinusBias,
-                        61372,
+                        61440,
                         0,
                         255,
-                        13869401,
-                        14140231274459362205,
+                        14119773,
+                        8510705025514964701,
                     ),
                     (
                         VarDctXybInverseVariant::NegBPlusBias,
                         61440,
                         0,
                         255,
-                        13911947,
-                        3581476491212795037,
+                        14173300,
+                        8911007976618335493,
                     ),
                 ],
             ),
@@ -2627,35 +2711,35 @@ fn generated_vardct_xyb_inverse_variants_compare_against_oracle_when_available()
                 vec![
                     (
                         VarDctXybInverseVariant::BMinusBias,
-                        61349,
+                        61440,
                         0,
                         255,
-                        13888611,
-                        446297913098814807,
+                        13444721,
+                        6399888040068922079,
                     ),
                     (
                         VarDctXybInverseVariant::BPlusBias,
                         61440,
                         0,
                         255,
-                        13909336,
-                        14850471057789735652,
+                        13516691,
+                        4477304466731307180,
                     ),
                     (
                         VarDctXybInverseVariant::NegBMinusBias,
-                        61229,
+                        61440,
                         0,
                         255,
-                        13878897,
-                        11137263225196271961,
+                        13437399,
+                        9613422297457635048,
                     ),
                     (
                         VarDctXybInverseVariant::NegBPlusBias,
                         61440,
                         0,
                         255,
-                        13901152,
-                        13563273521136552678,
+                        13508930,
+                        10390922143415534671,
                     ),
                 ],
             ),
@@ -2664,35 +2748,35 @@ fn generated_vardct_xyb_inverse_variants_compare_against_oracle_when_available()
                 vec![
                     (
                         VarDctXybInverseVariant::BMinusBias,
-                        61286,
+                        61434,
                         0,
                         255,
-                        13428869,
-                        9793841826740747837,
+                        13657798,
+                        10737580755719085700,
                     ),
                     (
                         VarDctXybInverseVariant::BPlusBias,
                         61440,
                         0,
                         255,
-                        13494471,
-                        130591088155553849,
+                        13742265,
+                        14202576948139589397,
                     ),
                     (
                         VarDctXybInverseVariant::NegBMinusBias,
-                        61349,
+                        61409,
                         0,
                         255,
-                        13418276,
-                        13265056511056858749,
+                        13652445,
+                        12612638000624194024,
                     ),
                     (
                         VarDctXybInverseVariant::NegBPlusBias,
                         61440,
                         0,
                         255,
-                        13476872,
-                        7666783133562864193,
+                        13729077,
+                        8519582594972417000,
                     ),
                 ],
             ),
@@ -2701,35 +2785,35 @@ fn generated_vardct_xyb_inverse_variants_compare_against_oracle_when_available()
                 vec![
                     (
                         VarDctXybInverseVariant::BMinusBias,
-                        61361,
+                        61431,
                         0,
                         255,
-                        13434505,
-                        10241564854792478620,
+                        13663424,
+                        1182162245066418579,
                     ),
                     (
                         VarDctXybInverseVariant::BPlusBias,
                         61440,
                         0,
                         255,
-                        13499993,
-                        1792445672216104858,
+                        13747736,
+                        3763320466551089232,
                     ),
                     (
                         VarDctXybInverseVariant::NegBMinusBias,
-                        61383,
+                        61408,
                         0,
                         255,
-                        13425348,
-                        1106075304257494144,
+                        13659444,
+                        12962502420066708359,
                     ),
                     (
                         VarDctXybInverseVariant::NegBPlusBias,
                         61440,
                         0,
                         255,
-                        13482755,
-                        1841296627892107581,
+                        13734988,
+                        9709589603758962668,
                     ),
                 ],
             ),
@@ -2890,66 +2974,12 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
             ))
             .collect::<Vec<_>>(),
         vec![
-            (
-                0,
-                0,
-                11952,
-                Some(32),
-                Some(11951),
-                Some(jxl_codec::Error::Unsupported(
-                    "VarDCT AC coefficient stream decoding"
-                )),
-            ),
-            (
-                0,
-                1,
-                2912,
-                Some(32),
-                Some(2909),
-                Some(jxl_codec::Error::Unsupported(
-                    "VarDCT AC coefficient stream decoding"
-                )),
-            ),
-            (
-                1,
-                0,
-                8384,
-                Some(32),
-                Some(8377),
-                Some(jxl_codec::Error::Unsupported(
-                    "VarDCT AC coefficient stream decoding"
-                )),
-            ),
-            (
-                1,
-                1,
-                1888,
-                Some(32),
-                Some(1888),
-                Some(jxl_codec::Error::Unsupported(
-                    "VarDCT AC coefficient stream decoding"
-                )),
-            ),
-            (
-                2,
-                0,
-                17968,
-                Some(32),
-                Some(17964),
-                Some(jxl_codec::Error::Unsupported(
-                    "VarDCT AC coefficient stream decoding"
-                )),
-            ),
-            (
-                2,
-                1,
-                4000,
-                Some(32),
-                Some(3996),
-                Some(jxl_codec::Error::Unsupported(
-                    "VarDCT AC coefficient stream decoding"
-                )),
-            ),
+            (0, 0, 11952, Some(32), Some(11951), None),
+            (0, 1, 2912, Some(32), Some(2909), None),
+            (1, 0, 8384, Some(32), Some(8377), None),
+            (1, 1, 1888, Some(32), Some(1888), None),
+            (2, 0, 17968, Some(32), Some(17964), None),
+            (2, 1, 4000, Some(32), Some(3996), None),
         ]
     );
 
@@ -2996,9 +3026,9 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
     assert_eq!(
         xyb_summary,
         vec![
-            (59535, 5633791055992201906),
-            (59565, 1046998991249178228),
-            (59580, 1757872859121295915),
+            (61440, 1087392107436690475),
+            (61440, 13364037282561279555),
+            (61440, 2967564629462357305),
         ]
     );
     assert_eq!(
@@ -3010,9 +3040,9 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
     assert_eq!(
         rgb_summary,
         vec![
-            (61440, 4198298985299210855),
-            (61440, 15618029478993648071),
-            (61440, 9092500794843455953),
+            (61440, 8243313939319752407),
+            (61440, 10452165786705087968),
+            (61440, 2434908460216884218),
         ]
     );
     assert_eq!(
@@ -3023,9 +3053,9 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
     );
     if let Some(metrics) = final_metrics {
         assert_eq!(metrics.max_abs_error, 255);
-        assert_eq!(metrics.sum_abs_error, 13423128);
-        assert_eq!(metrics.checksum, 4746000757651861193);
-        assert_eq!(metrics.anchors, vec![3, 5, 0, 104, 97, 0, 255, 255, 0]);
+        assert_eq!(metrics.sum_abs_error, 13657167);
+        assert_eq!(metrics.checksum, 2185788697405418356);
+        assert_eq!(metrics.anchors, vec![3, 5, 0, 255, 255, 0, 255, 255, 0]);
         assert_eq!(
             metrics.reference_anchors,
             vec![0, 1, 1, 125, 128, 124, 253, 255, 255]
@@ -3036,8 +3066,8 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
     assert_eq!(
         pass0_summary,
         (
-            117133,
-            15874374182557922851,
+            120209,
+            465614837489061808,
             vec![3, 5, 0, 40, 138, 0, 255, 255, 0],
         )
     );
@@ -3117,9 +3147,9 @@ fn generated_vardct_intensity_target_scales_opsin_plan_when_available() {
     ];
     let metrics = srgb8_oracle_metrics(&srgb8_image, &reference, &anchor_indices);
     assert_eq!(metrics.max_abs_error, 255);
-    assert_eq!(metrics.sum_abs_error, 13869401);
-    assert_eq!(metrics.checksum, 14140231274459362205);
-    assert_eq!(metrics.anchors, [3, 4, 0, 103, 95, 0, 255, 255, 0]);
+    assert_eq!(metrics.sum_abs_error, 14119773);
+    assert_eq!(metrics.checksum, 8510705025514964701);
+    assert_eq!(metrics.anchors, [3, 4, 0, 255, 255, 0, 255, 255, 0]);
     assert_eq!(
         metrics.reference_anchors,
         [0, 0, 0, 127, 126, 124, 253, 255, 255]
@@ -3257,9 +3287,9 @@ fn generated_vardct_no_gaborish_skips_filter_when_available() {
     assert_eq!(
         xyb_summary,
         vec![
-            (54781, 17936914773993737739),
-            (54805, 1561031377395975770),
-            (54961, 2569158716608068402),
+            (61440, 14218265779207446646),
+            (61440, 12772731774790146366),
+            (61440, 12814336073453143113),
         ]
     );
     assert_eq!(
@@ -3271,9 +3301,9 @@ fn generated_vardct_no_gaborish_skips_filter_when_available() {
     assert_eq!(
         rgb_summary,
         vec![
-            (61440, 6311711157832847861),
-            (61440, 16693297967710082774),
-            (61440, 14833355471652169707),
+            (61440, 16323798370413618402),
+            (61440, 3677231293904746968),
+            (61440, 2234537766696310921),
         ]
     );
     assert_eq!(
@@ -3283,8 +3313,8 @@ fn generated_vardct_no_gaborish_skips_filter_when_available() {
         ]
     );
     assert_eq!(metrics.max_abs_error, 255);
-    assert_eq!(metrics.sum_abs_error, 13878897);
-    assert_eq!(metrics.checksum, 11137263225196271961);
+    assert_eq!(metrics.sum_abs_error, 13437399);
+    assert_eq!(metrics.checksum, 9613422297457635048);
     assert_eq!(metrics.anchors, vec![3, 4, 0, 125, 120, 0, 255, 255, 0]);
     assert_eq!(
         metrics.reference_anchors,
@@ -3422,9 +3452,9 @@ fn generated_vardct_epf_three_runs_all_filter_passes_when_available() {
     assert_eq!(
         xyb_summary,
         vec![
-            (59576, 5315813983241178610),
-            (59616, 1410777251832745353),
-            (59655, 10594309875977521286),
+            (61440, 1948062066678962936),
+            (61440, 12415102507405919150),
+            (61440, 14040297431583673137),
         ]
     );
     assert_eq!(
@@ -3436,9 +3466,9 @@ fn generated_vardct_epf_three_runs_all_filter_passes_when_available() {
     assert_eq!(
         rgb_summary,
         vec![
-            (61440, 4805567156224260273),
-            (61440, 8634967090293857872),
-            (61440, 7266248949391190767),
+            (61440, 3892107557370977412),
+            (61440, 10252127913957066013),
+            (61440, 4698316488212319988),
         ]
     );
     assert_eq!(
@@ -3448,9 +3478,9 @@ fn generated_vardct_epf_three_runs_all_filter_passes_when_available() {
         ]
     );
     assert_eq!(metrics.max_abs_error, 255);
-    assert_eq!(metrics.sum_abs_error, 13418276);
-    assert_eq!(metrics.checksum, 13265056511056858749);
-    assert_eq!(metrics.anchors, vec![3, 5, 0, 104, 97, 0, 255, 255, 0]);
+    assert_eq!(metrics.sum_abs_error, 13652445);
+    assert_eq!(metrics.checksum, 12612638000624194024);
+    assert_eq!(metrics.anchors, vec![3, 5, 0, 255, 255, 0, 255, 255, 0]);
     assert_eq!(
         metrics.reference_anchors,
         vec![0, 1, 1, 124, 127, 124, 253, 255, 255]
@@ -3589,9 +3619,9 @@ fn generated_vardct_epf_disabled_keeps_gaborish_when_available() {
     assert_eq!(
         xyb_summary,
         vec![
-            (59525, 3319306565399660724),
-            (59547, 842350059982492583),
-            (59554, 2140188363468536391),
+            (61440, 9880866713074452894),
+            (61440, 18170339836056130671),
+            (61440, 12984197309061420139),
         ]
     );
     assert_eq!(
@@ -3603,9 +3633,9 @@ fn generated_vardct_epf_disabled_keeps_gaborish_when_available() {
     assert_eq!(
         rgb_summary,
         vec![
-            (61440, 13563770808717573783),
-            (61440, 11709950521213242306),
-            (61440, 7187957378770045833),
+            (61440, 16201895442649334871),
+            (61440, 13468519965549074310),
+            (61440, 15931714598460448334),
         ]
     );
     assert_eq!(
@@ -3615,9 +3645,9 @@ fn generated_vardct_epf_disabled_keeps_gaborish_when_available() {
         ]
     );
     assert_eq!(metrics.max_abs_error, 255);
-    assert_eq!(metrics.sum_abs_error, 13425348);
-    assert_eq!(metrics.checksum, 1106075304257494144);
-    assert_eq!(metrics.anchors, vec![3, 5, 0, 104, 97, 0, 255, 255, 0]);
+    assert_eq!(metrics.sum_abs_error, 13659444);
+    assert_eq!(metrics.checksum, 12962502420066708359);
+    assert_eq!(metrics.anchors, vec![3, 5, 0, 255, 255, 0, 255, 255, 0]);
     assert_eq!(
         metrics.reference_anchors,
         vec![0, 1, 1, 125, 128, 124, 253, 255, 255]
@@ -3838,6 +3868,16 @@ fn write_split_vardct_source_ppm(path: &Path) {
             bytes.push(((y * 255 / (height - 1)) ^ checker) as u8);
             bytes.push((((x + y) * 255 / (width + height - 2)) ^ checker) as u8);
         }
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+fn write_flat_vardct_source_ppm(path: &Path) {
+    let width = 64u32;
+    let height = 64u32;
+    let mut bytes = format!("P6\n{width} {height}\n255\n").into_bytes();
+    for _ in 0..width * height {
+        bytes.extend_from_slice(&[128, 128, 128]);
     }
     std::fs::write(path, bytes).unwrap();
 }

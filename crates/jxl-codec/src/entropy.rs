@@ -2295,7 +2295,7 @@ impl HuffmanDecodingData {
     }
 
     fn read_symbol(&self, reader: &mut BitReader<'_>) -> Result<u16> {
-        let mut index = reader.peek_bits(HUFFMAN_TABLE_BITS)? as usize;
+        let mut index = reader.peek_bits_padded(HUFFMAN_TABLE_BITS)? as usize;
         let mut code = *self
             .table
             .get(index)
@@ -2305,7 +2305,7 @@ impl HuffmanDecodingData {
             let nbits = code.bits as usize - HUFFMAN_TABLE_BITS;
             index = index
                 .checked_add(code.value as usize)
-                .and_then(|base| base.checked_add(reader.peek_bits(nbits).ok()? as usize))
+                .and_then(|base| base.checked_add(reader.peek_bits_padded(nbits).ok()? as usize))
                 .ok_or(Error::InvalidCodestream("invalid Huffman table lookup"))?;
             code = *self
                 .table

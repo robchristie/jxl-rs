@@ -3869,15 +3869,19 @@ fn read_vardct_ac_group_metadata_from_reader(
     }
 
     match entropy_uses_prefix_code {
-        Some(false) => {
-            metadata.cursor.ans_state_start_bits = Some(reader.bits_consumed());
+        Some(use_prefix_code) => {
+            if !use_prefix_code {
+                metadata.cursor.ans_state_start_bits = Some(reader.bits_consumed());
+            }
             match ac_global_entropy
                 .and_then(|passes| passes.get(metadata.payload.pass))
                 .and_then(Option::as_ref)
             {
                 Some(entropy) => match AnsSymbolReader::new(entropy.code.clone(), &mut reader, 0) {
                     Ok(mut symbol_reader) => {
-                        metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
+                        if !use_prefix_code {
+                            metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
+                        }
                         metadata.cursor.coefficient_stream_start_bits =
                             Some(reader.bits_consumed());
                         let probe_result = match trace_vardct_ac_group_channel(
@@ -3960,9 +3964,7 @@ fn read_vardct_ac_group_metadata_from_reader(
                                     }
                                 }
                                 metadata.coefficient_probe = Some(probe);
-                                metadata.parse_error = Some(Error::Unsupported(
-                                    "VarDCT AC coefficient stream decoding",
-                                ));
+                                metadata.parse_error = None;
                             }
                             Err(error) => {
                                 metadata.parse_error = Some(error);
@@ -3970,29 +3972,36 @@ fn read_vardct_ac_group_metadata_from_reader(
                         }
                     }
                     Err(error) => {
-                        metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
+                        if !use_prefix_code {
+                            metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
+                        }
                         metadata.parse_error = Some(error);
                     }
                 },
-                None => match reader.read_bits(32) {
-                    Ok(_) => {
-                        metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
+                None => {
+                    if !use_prefix_code {
+                        metadata.cursor.ans_state_start_bits = Some(reader.bits_consumed());
+                        match reader.read_bits(32) {
+                            Ok(_) => {
+                                metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
+                                metadata.cursor.coefficient_stream_start_bits =
+                                    Some(reader.bits_consumed());
+                                metadata.parse_error =
+                                    Some(Error::Unsupported("VarDCT AC entropy metadata"));
+                            }
+                            Err(error) => {
+                                metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
+                                metadata.parse_error = Some(error);
+                            }
+                        }
+                    } else {
                         metadata.cursor.coefficient_stream_start_bits =
                             Some(reader.bits_consumed());
                         metadata.parse_error =
                             Some(Error::Unsupported("VarDCT AC entropy metadata"));
                     }
-                    Err(error) => {
-                        metadata.cursor.ans_state_end_bits = Some(reader.bits_consumed());
-                        metadata.parse_error = Some(error);
-                    }
-                },
+                }
             };
-        }
-        Some(true) => {
-            metadata.cursor.coefficient_stream_start_bits = Some(reader.bits_consumed());
-            metadata.parse_error =
-                Some(Error::Unsupported("VarDCT AC coefficient stream decoding"));
         }
         None => {
             metadata.parse_error = Some(Error::Unsupported("VarDCT AC entropy metadata"));
@@ -4902,7 +4911,11 @@ fn spatialize_vardct_ac_grid_with_dc_multiplier(
                     dc_grid.coefficient(channel, block.block_x, block.block_y)? * dc_multiplier;
             }
             let samples = match transform.kind {
-                SpatialTransformKind::Identity => coefficients,
+                SpatialTransformKind::Identity => inverse_identity_8x8(&coefficients)?,
+                SpatialTransformKind::Dct2x2 => inverse_dct2x2_8x8(&coefficients)?,
+                SpatialTransformKind::Dct4x4 => inverse_dct4x4_8x8(&coefficients)?,
+                SpatialTransformKind::Dct4x8 => inverse_dct4x8_8x8(&coefficients)?,
+                SpatialTransformKind::Dct8x4 => inverse_dct8x4_8x8(&coefficients)?,
                 SpatialTransformKind::Afv(kind) => inverse_afv_8x8(kind, &coefficients)?,
                 SpatialTransformKind::Dct => {
                     if transform.width == 8 && transform.height == 8 {
@@ -4943,6 +4956,10 @@ struct SpatialTransform {
 enum SpatialTransformKind {
     Dct,
     Identity,
+    Dct2x2,
+    Dct4x4,
+    Dct4x8,
+    Dct8x4,
     Afv(usize),
 }
 
@@ -4950,7 +4967,8 @@ fn spatial_transform_for_strategy(raw_strategy: usize) -> Option<SpatialTransfor
     let (width, height, kind) = match raw_strategy {
         0 => (8, 8, SpatialTransformKind::Dct),
         1 => (8, 8, SpatialTransformKind::Identity),
-        2 => (2, 2, SpatialTransformKind::Dct),
+        2 => (8, 8, SpatialTransformKind::Dct2x2),
+        3 => (8, 8, SpatialTransformKind::Dct4x4),
         4 => (16, 16, SpatialTransformKind::Dct),
         5 => (32, 32, SpatialTransformKind::Dct),
         6 => (8, 16, SpatialTransformKind::Dct),
@@ -4959,8 +4977,8 @@ fn spatial_transform_for_strategy(raw_strategy: usize) -> Option<SpatialTransfor
         9 => (32, 8, SpatialTransformKind::Dct),
         10 => (16, 32, SpatialTransformKind::Dct),
         11 => (32, 16, SpatialTransformKind::Dct),
-        12 => (4, 8, SpatialTransformKind::Dct),
-        13 => (8, 4, SpatialTransformKind::Dct),
+        12 => (8, 8, SpatialTransformKind::Dct4x8),
+        13 => (8, 8, SpatialTransformKind::Dct8x4),
         14..=17 => (8, 8, SpatialTransformKind::Afv(raw_strategy - 14)),
         18 => (64, 64, SpatialTransformKind::Dct),
         19 => (32, 64, SpatialTransformKind::Dct),
@@ -5258,6 +5276,182 @@ fn inverse_dct_8x8(coefficients: &[f32; DCT_BLOCK_SIZE]) -> [f32; DCT_BLOCK_SIZE
     let mut block = [0.0f32; DCT_BLOCK_SIZE];
     block.copy_from_slice(&samples);
     block
+}
+
+fn inverse_identity_8x8(coefficients: &[f32]) -> Result<Vec<f32>> {
+    if coefficients.len() != DCT_BLOCK_SIZE {
+        return Err(Error::InvalidCodestream("invalid identity transform"));
+    }
+    let mut pixels = vec![0.0f32; DCT_BLOCK_SIZE];
+    let block00 = coefficients[0];
+    let block01 = coefficients[1];
+    let block10 = coefficients[8];
+    let block11 = coefficients[9];
+    let dcs = [
+        block00 + block01 + block10 + block11,
+        block00 + block01 - block10 - block11,
+        block00 - block01 + block10 - block11,
+        block00 - block01 - block10 + block11,
+    ];
+    for y in 0..2 {
+        for x in 0..2 {
+            let mut residual_sum = 0.0f32;
+            for iy in 0..4 {
+                for ix in 0..4 {
+                    if ix == 0 && iy == 0 {
+                        continue;
+                    }
+                    residual_sum += coefficients[(y + iy * 2) * 8 + x + ix * 2];
+                }
+            }
+            let anchor = dcs[y * 2 + x] - residual_sum / 16.0;
+            pixels[(4 * y + 1) * 8 + 4 * x + 1] = anchor;
+            for iy in 0..4 {
+                for ix in 0..4 {
+                    if ix == 1 && iy == 1 {
+                        continue;
+                    }
+                    pixels[(y * 4 + iy) * 8 + x * 4 + ix] =
+                        coefficients[(y + iy * 2) * 8 + x + ix * 2] + anchor;
+                }
+            }
+            pixels[y * 4 * 8 + x * 4] = coefficients[(y + 2) * 8 + x + 2] + anchor;
+        }
+    }
+    Ok(pixels)
+}
+
+fn inverse_dct2x2_8x8(coefficients: &[f32]) -> Result<Vec<f32>> {
+    if coefficients.len() != DCT_BLOCK_SIZE {
+        return Err(Error::InvalidCodestream("invalid DCT2x2 transform"));
+    }
+    let mut block = [0.0f32; DCT_BLOCK_SIZE];
+    block.copy_from_slice(coefficients);
+    idct2_top_block::<2>(&mut block);
+    idct2_top_block::<4>(&mut block);
+    idct2_top_block::<8>(&mut block);
+    Ok(block.to_vec())
+}
+
+fn idct2_top_block<const S: usize>(block: &mut [f32; DCT_BLOCK_SIZE]) {
+    debug_assert!(S == 2 || S == 4 || S == 8);
+    let mut temp = [0.0f32; DCT_BLOCK_SIZE];
+    let num_2x2 = S / 2;
+    for y in 0..num_2x2 {
+        for x in 0..num_2x2 {
+            let c00 = block[y * 8 + x];
+            let c01 = block[y * 8 + num_2x2 + x];
+            let c10 = block[(y + num_2x2) * 8 + x];
+            let c11 = block[(y + num_2x2) * 8 + num_2x2 + x];
+            temp[y * 2 * 8 + x * 2] = c00 + c01 + c10 + c11;
+            temp[y * 2 * 8 + x * 2 + 1] = c00 + c01 - c10 - c11;
+            temp[(y * 2 + 1) * 8 + x * 2] = c00 - c01 + c10 - c11;
+            temp[(y * 2 + 1) * 8 + x * 2 + 1] = c00 - c01 - c10 + c11;
+        }
+    }
+    for y in 0..S {
+        for x in 0..S {
+            block[y * 8 + x] = temp[y * 8 + x];
+        }
+    }
+}
+
+fn inverse_dct4x4_8x8(coefficients: &[f32]) -> Result<Vec<f32>> {
+    if coefficients.len() != DCT_BLOCK_SIZE {
+        return Err(Error::InvalidCodestream("invalid DCT4x4 transform"));
+    }
+    let block00 = coefficients[0];
+    let block01 = coefficients[1];
+    let block10 = coefficients[8];
+    let block11 = coefficients[9];
+    let dcs = [
+        block00 + block01 + block10 + block11,
+        block00 + block01 - block10 - block11,
+        block00 - block01 + block10 - block11,
+        block00 - block01 - block10 + block11,
+    ];
+    let mut pixels = vec![0.0f32; DCT_BLOCK_SIZE];
+    for y in 0..2 {
+        for x in 0..2 {
+            let mut block = [0.0f32; 16];
+            block[0] = dcs[y * 2 + x];
+            for iy in 0..4 {
+                for ix in 0..4 {
+                    if ix == 0 && iy == 0 {
+                        continue;
+                    }
+                    block[iy * 4 + ix] = coefficients[(y + iy * 2) * 8 + x + ix * 2];
+                }
+            }
+            let samples = inverse_dct_rect(4, 4, &block)?;
+            for iy in 0..4 {
+                for ix in 0..4 {
+                    pixels[(y * 4 + iy) * 8 + x * 4 + ix] = samples[iy * 4 + ix];
+                }
+            }
+        }
+    }
+    Ok(pixels)
+}
+
+fn inverse_dct4x8_8x8(coefficients: &[f32]) -> Result<Vec<f32>> {
+    if coefficients.len() != DCT_BLOCK_SIZE {
+        return Err(Error::InvalidCodestream("invalid DCT4x8 transform"));
+    }
+    let dcs = [
+        coefficients[0] + coefficients[8],
+        coefficients[0] - coefficients[8],
+    ];
+    let mut pixels = vec![0.0f32; DCT_BLOCK_SIZE];
+    for y in 0..2 {
+        let mut block = [0.0f32; 32];
+        block[0] = dcs[y];
+        for iy in 0..4 {
+            for ix in 0..8 {
+                if ix == 0 && iy == 0 {
+                    continue;
+                }
+                block[iy * 8 + ix] = coefficients[(y + iy * 2) * 8 + ix];
+            }
+        }
+        let samples = inverse_dct_rect(8, 4, &block)?;
+        for iy in 0..4 {
+            for ix in 0..8 {
+                pixels[(y * 4 + iy) * 8 + ix] = samples[iy * 8 + ix];
+            }
+        }
+    }
+    Ok(pixels)
+}
+
+fn inverse_dct8x4_8x8(coefficients: &[f32]) -> Result<Vec<f32>> {
+    if coefficients.len() != DCT_BLOCK_SIZE {
+        return Err(Error::InvalidCodestream("invalid DCT8x4 transform"));
+    }
+    let dcs = [
+        coefficients[0] + coefficients[8],
+        coefficients[0] - coefficients[8],
+    ];
+    let mut pixels = vec![0.0f32; DCT_BLOCK_SIZE];
+    for x in 0..2 {
+        let mut block = [0.0f32; 32];
+        block[0] = dcs[x];
+        for iy in 0..4 {
+            for ix in 0..8 {
+                if ix == 0 && iy == 0 {
+                    continue;
+                }
+                block[ix * 4 + iy] = coefficients[(x + iy * 2) * 8 + ix];
+            }
+        }
+        let samples = inverse_dct_rect(4, 8, &block)?;
+        for iy in 0..8 {
+            for ix in 0..4 {
+                pixels[iy * 8 + x * 4 + ix] = samples[iy * 4 + ix];
+            }
+        }
+    }
+    Ok(pixels)
 }
 
 fn inverse_dct_rect(width: usize, height: usize, coefficients: &[f32]) -> Result<Vec<f32>> {
@@ -5599,6 +5793,7 @@ fn default_dequant_matrix(raw_strategy: usize, channel: usize) -> Result<Vec<f32
         0 => default_dct_quant_weights(width, height, DCT8_QUANT_BANDS, 6, channel)?,
         1 => default_identity_quant_weights(channel),
         2 => default_dct2_quant_weights(channel),
+        3 => default_dct4_quant_weights(channel)?,
         4 => default_dct_quant_weights(width, height, DCT16_QUANT_BANDS, 7, channel)?,
         5 => default_dct_quant_weights(width, height, DCT32_QUANT_BANDS, 8, channel)?,
         6 | 7 => default_dct_quant_weights(width, height, DCT8X16_QUANT_BANDS, 7, channel)?,
@@ -5732,6 +5927,17 @@ fn default_dct2_quant_weights(channel: usize) -> Vec<f32> {
     }
     weights[0] = d[0];
     weights
+}
+
+fn default_dct4_quant_weights(channel: usize) -> Result<Vec<f32>> {
+    let base = quant_weights_from_bands(4, 4, &DCT4_QUANT_BANDS[0][channel][..4])?;
+    let mut weights = vec![0.0; DCT_BLOCK_SIZE];
+    for y in 0..8 {
+        for x in 0..8 {
+            weights[y * 8 + x] = base[(y / 2) * 4 + (x / 2)];
+        }
+    }
+    Ok(weights)
 }
 
 fn default_dct4x8_quant_weights(width: usize, height: usize, channel: usize) -> Result<Vec<f32>> {
@@ -8549,6 +8755,73 @@ mod tests {
                 assert!((sample - 1.0).abs() < 1.0e-5);
             }
         }
+    }
+
+    #[test]
+    fn small_vardct_strategies_use_jxl_specific_8x8_transforms() {
+        let expected = [
+            (1, "identity"),
+            (2, "dct2x2"),
+            (3, "dct4x4"),
+            (12, "dct4x8"),
+            (13, "dct8x4"),
+        ];
+
+        for (raw_strategy, kind) in expected {
+            let transform = spatial_transform_for_strategy(raw_strategy).unwrap();
+            assert_eq!(transform.width, 8, "raw strategy {raw_strategy}");
+            assert_eq!(transform.height, 8, "raw strategy {raw_strategy}");
+            assert!(
+                matches!(
+                    (kind, transform.kind),
+                    ("identity", SpatialTransformKind::Identity)
+                        | ("dct2x2", SpatialTransformKind::Dct2x2)
+                        | ("dct4x4", SpatialTransformKind::Dct4x4)
+                        | ("dct4x8", SpatialTransformKind::Dct4x8)
+                        | ("dct8x4", SpatialTransformKind::Dct8x4)
+                ),
+                "raw strategy {raw_strategy}"
+            );
+
+            for channel in 0..3 {
+                let matrix = default_dequant_matrix(raw_strategy, channel).unwrap();
+                assert_eq!(matrix.len(), DCT_BLOCK_SIZE, "raw strategy {raw_strategy}");
+                assert!(
+                    matrix
+                        .iter()
+                        .all(|weight| weight.is_finite() && *weight > 0.0),
+                    "raw strategy {raw_strategy} channel {channel}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn small_vardct_special_transforms_match_reference_layouts() {
+        let mut identity = [0.0f32; DCT_BLOCK_SIZE];
+        identity[0] = 1.0;
+        let samples = inverse_identity_8x8(&identity).unwrap();
+        assert!(samples.iter().all(|sample| (*sample - 1.0).abs() < 1.0e-6));
+
+        let mut dct2 = [0.0f32; DCT_BLOCK_SIZE];
+        dct2[0] = 1.0;
+        let samples = inverse_dct2x2_8x8(&dct2).unwrap();
+        assert!(samples.iter().all(|sample| (*sample - 1.0).abs() < 1.0e-6));
+
+        let mut dct4 = [0.0f32; DCT_BLOCK_SIZE];
+        dct4[0] = 4.0;
+        let samples = inverse_dct4x4_8x8(&dct4).unwrap();
+        assert!(samples.iter().all(|sample| (*sample - 1.0).abs() < 1.0e-6));
+
+        let mut dct4x8 = [0.0f32; DCT_BLOCK_SIZE];
+        dct4x8[0] = 32.0f32.sqrt();
+        let samples = inverse_dct4x8_8x8(&dct4x8).unwrap();
+        assert!(samples.iter().all(|sample| (*sample - 1.0).abs() < 1.0e-6));
+
+        let mut dct8x4 = [0.0f32; DCT_BLOCK_SIZE];
+        dct8x4[0] = 32.0f32.sqrt();
+        let samples = inverse_dct8x4_8x8(&dct8x4).unwrap();
+        assert!(samples.iter().all(|sample| (*sample - 1.0).abs() < 1.0e-6));
     }
 
     #[test]
