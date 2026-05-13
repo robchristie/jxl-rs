@@ -328,6 +328,8 @@ pub struct VarDctFrameMetadata {
     pub upsampling: u32,
     pub color_transform: ColorTransform,
     pub chroma_subsampling: YCbCrChromaSubsampling,
+    pub x_qm_scale: u32,
+    pub b_qm_scale: u32,
     pub group_dim: u32,
     pub groups_x: u32,
     pub groups_y: u32,
@@ -1897,20 +1899,30 @@ fn final_vardct_spatial_grid_for_group(
 
     let Some(mut merged) = passes
         .first()
-        .and_then(|metadata| metadata.dequantized_grid.clone())
+        .and_then(|metadata| metadata.coefficient_grid.clone())
     else {
         return Ok(None);
     };
     for metadata in passes.iter().skip(1) {
-        let Some(grid) = metadata.dequantized_grid.as_ref() else {
+        let Some(grid) = metadata.coefficient_grid.as_ref() else {
             return Ok(None);
         };
-        merge_vardct_dequantized_grid(&mut merged, grid)?;
+        merge_vardct_coefficient_grid(&mut merged, grid)?;
     }
     merged.pass = final_metadata.payload.pass;
 
-    spatialize_vardct_ac_grid(
+    let dequantized = dequantize_vardct_ac_grid(
         &merged,
+        plan.global.as_ref(),
+        plan.ac_global_metadata.as_ref(),
+        final_metadata,
+        &plan.frame.chroma_subsampling,
+        plan.frame.x_qm_scale,
+        plan.frame.b_qm_scale,
+        &plan.dc_group_metadata,
+    )?;
+    spatialize_vardct_ac_grid(
+        &dequantized,
         plan.global.as_ref(),
         final_metadata,
         &plan.frame.chroma_subsampling,
@@ -1919,9 +1931,9 @@ fn final_vardct_spatial_grid_for_group(
     .map(Some)
 }
 
-fn merge_vardct_dequantized_grid(
-    merged: &mut VarDctAcDequantizedGrid,
-    grid: &VarDctAcDequantizedGrid,
+fn merge_vardct_coefficient_grid(
+    merged: &mut VarDctAcCoefficientGrid,
+    grid: &VarDctAcCoefficientGrid,
 ) -> Result<()> {
     if merged.group != grid.group
         || merged.width_blocks != grid.width_blocks
@@ -1948,14 +1960,15 @@ fn merge_vardct_dequantized_grid(
             .zip(&grid_channel.coefficients)
             .enumerate()
         {
-            let value = f32::from_bits(*merged_coeff) + f32::from_bits(*coeff);
-            *merged_coeff = value.to_bits();
-            if value != 0.0 {
+            *merged_coeff = merged_coeff
+                .checked_add(*coeff)
+                .ok_or(Error::InvalidCodestream("invalid AC coefficient"))?;
+            if *merged_coeff != 0 {
                 merged_channel.nonzero_coefficients += 1;
-                merged_channel.coefficient_checksum = checksum_dequantized_coefficient(
+                merged_channel.coefficient_checksum = checksum_placed_coefficient(
                     merged_channel.coefficient_checksum,
                     index,
-                    value,
+                    *merged_coeff,
                 );
             }
         }
@@ -3324,6 +3337,8 @@ pub fn read_vardct_frame_metadata(
         upsampling: frame_header.upsampling,
         color_transform: frame_header.color_transform,
         chroma_subsampling: frame_header.chroma_subsampling.clone(),
+        x_qm_scale: frame_header.x_qm_scale,
+        b_qm_scale: frame_header.b_qm_scale,
         group_dim: frame_header.group_layout.group_dim,
         groups_x: frame_header.group_layout.groups_x,
         groups_y: frame_header.group_layout.groups_y,
@@ -4413,7 +4428,9 @@ fn read_vardct_ac_group_metadata_from_reader(
                                     global,
                                     ac_global,
                                     &metadata,
-                                    frame_header,
+                                    &frame_header.chroma_subsampling,
+                                    frame_header.x_qm_scale,
+                                    frame_header.b_qm_scale,
                                     dc_groups,
                                 )
                                 .ok();
@@ -5899,7 +5916,9 @@ fn dequantize_vardct_ac_grid(
     global: Option<&VarDctGlobalMetadata>,
     ac_global: Option<&VarDctAcGlobalMetadata>,
     metadata: &VarDctAcGroupMetadata,
-    frame_header: &FrameHeader,
+    chroma_subsampling: &YCbCrChromaSubsampling,
+    x_qm_scale: u32,
+    b_qm_scale: u32,
     dc_groups: &[VarDctDcGroupMetadata],
 ) -> Result<VarDctAcDequantizedGrid> {
     let global = global.ok_or(Error::Unsupported("VarDCT global metadata"))?;
@@ -5907,7 +5926,7 @@ fn dequantize_vardct_ac_grid(
     let color_correlation = vardct_color_correlation_for_group(metadata, global, dc_groups)?;
     let blocks = vardct_ac_blocks_for_group(metadata, dc_groups)?;
     let channel_block_shapes = vardct_group_channel_block_shapes(
-        &frame_header.chroma_subsampling,
+        chroma_subsampling,
         grid.width_blocks,
         grid.height_blocks,
     )?;
@@ -5929,8 +5948,8 @@ fn dequantize_vardct_ac_grid(
             VarDctAcDequantizedChannelGrid::new(coefficient_len),
         ],
     };
-    let x_dm_multiplier = (1.0f32 / 1.25f32).powf(frame_header.x_qm_scale as f32 - 2.0);
-    let b_dm_multiplier = (1.0f32 / 1.25f32).powf(frame_header.b_qm_scale as f32 - 2.0);
+    let x_dm_multiplier = (1.0f32 / 1.25f32).powf(x_qm_scale as f32 - 2.0);
+    let b_dm_multiplier = (1.0f32 / 1.25f32).powf(b_qm_scale as f32 - 2.0);
 
     for block in blocks {
         let quant = *quant_field
@@ -9956,6 +9975,8 @@ mod tests {
             upsampling: 1,
             color_transform: ColorTransform::Xyb,
             chroma_subsampling: YCbCrChromaSubsampling::default(),
+            x_qm_scale: 3,
+            b_qm_scale: 2,
             group_dim: 128,
             groups_x: 2,
             groups_y: 1,
@@ -11172,6 +11193,8 @@ mod tests {
             upsampling: 1,
             color_transform: ColorTransform::Xyb,
             chroma_subsampling: YCbCrChromaSubsampling::default(),
+            x_qm_scale: 3,
+            b_qm_scale: 2,
             group_dim: 256,
             groups_x: width.div_ceil(256),
             groups_y: height.div_ceil(256),
