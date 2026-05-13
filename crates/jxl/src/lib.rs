@@ -8943,6 +8943,112 @@ mod tests {
     }
 
     #[test]
+    fn decode_channels_exposes_eight_generated_var_dct_channels_when_available() {
+        let Some(cjxl) = reference_cjxl() else {
+            eprintln!("skipping 8-channel VarDCT raw-channel decode; reference cjxl is not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-vardct-eight-channel-source", "pam");
+        let encoded = unique_temp_path("jxl-vardct-eight-channel", "jxl");
+        let source = write_vardct_eight_channel_source_pam(&input);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert!(info.first_frame_vardct.is_some());
+        assert_eq!(info.metadata.num_color_channels(), 3);
+        assert_eq!(
+            info.metadata
+                .extra_channels
+                .iter()
+                .map(|channel| channel.channel_type)
+                .collect::<Vec<_>>(),
+            vec![
+                ExtraChannelType::Depth,
+                ExtraChannelType::SelectionMask,
+                ExtraChannelType::Cfa,
+                ExtraChannelType::Thermal,
+                ExtraChannelType::Optional,
+            ]
+        );
+
+        let channels = decode_channels(&encoded_bytes).unwrap();
+        assert_eq!(channels.width, source.width);
+        assert_eq!(channels.height, source.height);
+        assert_eq!(channels.color_channels, 3);
+        assert_eq!(channels.alpha, None);
+        assert_eq!(channels.bit_depth, 8);
+        assert_eq!(channels.channels.len(), 8);
+        assert!(
+            channels
+                .channels
+                .iter()
+                .all(|channel| channel.width == source.width
+                    && channel.height == source.height
+                    && channel.hshift == 0
+                    && channel.vshift == 0
+                    && channel.bit_depth == 8)
+        );
+        for (extra_index, expected) in source.extra_channels.iter().enumerate() {
+            let channel = &channels.channels[3 + extra_index];
+            let ChannelData::U8(samples) = &channel.samples else {
+                panic!("expected 8-bit VarDCT extra channel");
+            };
+            assert_eq!(samples, expected, "extra channel {extra_index}");
+            assert_eq!(
+                rgba8_checksum(samples),
+                source.extra_checksums[extra_index],
+                "extra channel {extra_index} checksum"
+            );
+        }
+
+        let decoded = decode(&encoded_bytes).unwrap();
+        assert_eq!(decoded.width, source.width);
+        assert_eq!(decoded.height, source.height);
+        assert_eq!(decoded.color_channels, 3);
+        assert_eq!(decoded.alpha, None);
+        assert_eq!(decoded.bit_depth, 8);
+        let PixelData::U8(decoded_pixels) = &decoded.pixels else {
+            panic!("expected 8-bit VarDCT RGB output");
+        };
+        let color_samples = channels.channels[..3]
+            .iter()
+            .map(|channel| {
+                let ChannelData::U8(samples) = &channel.samples else {
+                    panic!("expected 8-bit VarDCT color channel");
+                };
+                samples
+            })
+            .collect::<Vec<_>>();
+        let mut interleaved_color = Vec::with_capacity(decoded_pixels.len());
+        for index in 0..(source.width as usize * source.height as usize) {
+            for samples in &color_samples {
+                interleaved_color.push(samples[index]);
+            }
+        }
+        assert_eq!(&interleaved_color, decoded_pixels);
+
+        let rgba = decode_rgba8(&encoded_bytes).unwrap();
+        assert_eq!(rgba.width, source.width);
+        assert_eq!(rgba.height, source.height);
+        assert!(rgba.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+    }
+
+    #[test]
     fn decode_rgba8_unpremultiplies_associated_alpha_when_available() {
         let Some(cjxl) = reference_cjxl() else {
             eprintln!("skipping premultiplied alpha comparison; reference cjxl is not built");
@@ -9252,6 +9358,14 @@ mod tests {
         height: u32,
         rgba: Vec<u16>,
         depth: Vec<u16>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct EightChannelPam {
+        width: u32,
+        height: u32,
+        extra_channels: Vec<Vec<u8>>,
+        extra_checksums: Vec<u64>,
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10358,6 +10472,55 @@ mod tests {
             rgba,
             alpha,
             depth,
+        }
+    }
+
+    fn write_vardct_eight_channel_source_pam(path: &Path) -> EightChannelPam {
+        let width = 96u32;
+        let height = 64u32;
+        let mut bytes = format!(
+            "P7\nWIDTH {width}\nHEIGHT {height}\nDEPTH 8\nMAXVAL 255\nTUPLTYPE RGB\nTUPLTYPE Depth\nTUPLTYPE SelectionMask\nTUPLTYPE CFA\nTUPLTYPE Thermal\nTUPLTYPE Optional\nENDHDR\n"
+        )
+        .into_bytes();
+        let mut extra_channels = vec![
+            Vec::with_capacity(width as usize * height as usize),
+            Vec::with_capacity(width as usize * height as usize),
+            Vec::with_capacity(width as usize * height as usize),
+            Vec::with_capacity(width as usize * height as usize),
+            Vec::with_capacity(width as usize * height as usize),
+        ];
+        for y in 0..height {
+            for x in 0..width {
+                let checker = (((x / 8) ^ (y / 8)) & 1) * 37;
+                let rgb = [
+                    ((x * 255 / (width - 1)) ^ checker) as u8,
+                    ((y * 255 / (height - 1)) ^ checker) as u8,
+                    ((((x + y) * 255) / (width + height - 2)) ^ checker) as u8,
+                ];
+                let extras = [
+                    ((x * 37 + y * 41 + 73) & 0xff) as u8,
+                    ((x * 19 + y * 53 + 11) & 0xff) as u8,
+                    ((x * 67 + y * 7 + 149) & 0xff) as u8,
+                    ((x * 5 + y * 97 + 203) & 0xff) as u8,
+                    ((x * 109 + y * 31 + 17) & 0xff) as u8,
+                ];
+                bytes.extend_from_slice(&rgb);
+                bytes.extend_from_slice(&extras);
+                for (channel, sample) in extra_channels.iter_mut().zip(extras) {
+                    channel.push(sample);
+                }
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
+        let extra_checksums = extra_channels
+            .iter()
+            .map(|channel| rgba8_checksum(channel))
+            .collect();
+        EightChannelPam {
+            width,
+            height,
+            extra_channels,
+            extra_checksums,
         }
     }
 

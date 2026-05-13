@@ -62,9 +62,9 @@ Audit date: 2026-05-13.
   be reached from malformed input.
 - 16-bit VarDCT presentation output exists, but high-bit-depth lossy
   conformance still needs oracle-backed tolerances and targeted grayscale tests.
-- Up to 8 total decoded channels are not yet documented by a focused generated
-  VarDCT fixture. Existing tests cover alpha, depth, and combined alpha/depth
-  side streams, but not an explicit 8-channel workflow.
+- Up to 8 total decoded channels are documented by a focused generated VarDCT
+  fixture that keeps RGB presentation output separate from non-alpha
+  `decode_channels` side-stream output.
 - Unsupported transform/filter/extra-channel layouts are not comprehensively
   covered by tests that assert exact `Error::Unsupported` messages.
 
@@ -202,13 +202,20 @@ Focus:
 
 ### Milestone 9: Extra Channels and Up to 8-Channel Workflows
 
-Status: pending.
+Status: in progress.
 
 Focus:
 
 - Add explicit generated fixtures for RGB plus alpha, grayscale plus alpha,
   RGB plus multiple non-alpha extra channels where fixture generation supports
   it, and up to 8 total decoded channels through `decode_channels`.
+
+Progress:
+
+- Added public generated VarDCT coverage for RGB plus five non-alpha modular
+  side-stream extra channels. `decode_channels` now has explicit regression
+  coverage for 8 total decoded channels, while `decode`/`decode_rgba8` continue
+  to expose only RGB/RGBA presentation output for that fixture.
 
 ### Milestone 10: Filters, Upsampling, and Common Lossy Conformance
 
@@ -288,3 +295,10 @@ Focus:
   modular/pixel fixtures instead. Kept the existing fixtures as explicit loose
   YCbCr/None color-transform coverage and documented that they are not JPEG
   reconstruction support or milestone-3 acceptance evidence.
+- 2026-05-13: Added
+  `decode_channels_exposes_eight_generated_var_dct_channels_when_available`.
+  The test generates a VarDCT RGB image with Depth, SelectionMask, CFA,
+  Thermal, and Optional side-stream extra channels. It verifies
+  `decode_channels` exposes all 8 channels with exact extra-channel samples,
+  while public RGB/RGBA presentation output ignores the non-alpha extras by
+  design. Focused test passes with the checked-in reference `cjxl`.
