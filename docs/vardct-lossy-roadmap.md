@@ -250,3 +250,16 @@ Focus:
   tests pass, and the required gates pass: `cargo fmt --all -- --check`,
   `cargo check --workspace`, `cargo test -p jxl-codec --lib`, and
   `cargo test --workspace`.
+- 2026-05-13: Advanced the DC/LF path by threading frame color transform into
+  VarDCT global metadata parsing, matching libjxl's non-XYB default color
+  correlation, and applying 4:4:4 DC color correlation during VarDCT DC
+  coefficient reconstruction. Updated codec/public oracle snapshots for the
+  corrected low-frequency output. The required gates pass after this change:
+  `cargo fmt --all -- --check`, `cargo check --workspace`,
+  `cargo test -p jxl-codec --lib`, and `cargo test --workspace`.
+- 2026-05-13: Advanced the XYB inverse path by switching the default VarDCT
+  XYB-to-linear-RGB conversion to the libjxl formula (`gamma_b = b - cbrt_bias`)
+  instead of the older diagnostic negative-B variant. Codec and public oracle
+  snapshots now use the lower-error B-minus-bias path; common generated RGB
+  VarDCT still remains above milestone-3 tight tolerance and needs further AC,
+  filtering, and color-output work.

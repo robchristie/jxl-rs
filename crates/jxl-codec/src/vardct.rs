@@ -2876,7 +2876,7 @@ fn vardct_opsin_params_from_matrix(
 }
 
 fn vardct_xyb_to_linear_rgb(xyb: &VarDctXybImage, opsin: &VarDctOpsinParams) -> VarDctRgbImage {
-    vardct_xyb_to_linear_rgb_with_variant(xyb, opsin, VarDctXybInverseVariant::NegBMinusBias)
+    vardct_xyb_to_linear_rgb_with_variant(xyb, opsin, VarDctXybInverseVariant::BMinusBias)
 }
 
 fn vardct_xyb_to_linear_rgb_with_variant(
@@ -3051,7 +3051,7 @@ fn linear_sample_to_srgb(sample: f32, max: f32) -> u32 {
 
 #[cfg(test)]
 fn xyb_sample_to_linear_rgb(x: f32, y: f32, b: f32, opsin: &VarDctOpsinParams) -> [f32; 3] {
-    xyb_sample_to_linear_rgb_with_variant(x, y, b, opsin, VarDctXybInverseVariant::NegBMinusBias)
+    xyb_sample_to_linear_rgb_with_variant(x, y, b, opsin, VarDctXybInverseVariant::BMinusBias)
 }
 
 fn xyb_sample_to_linear_rgb_with_variant(
@@ -10556,9 +10556,9 @@ mod tests {
 
         assert_eq!(rgb.width, 1);
         assert_eq!(rgb.height, 1);
-        assert!((rgb.channels[0][0] - 0.87693274).abs() < 1.0e-6);
-        assert!((rgb.channels[1][0] + 0.23766755).abs() < 1.0e-6);
-        assert!((rgb.channels[2][0] + 0.31094164).abs() < 1.0e-6);
+        assert!((rgb.channels[0][0] - 0.8608362).abs() < 1.0e-6);
+        assert!((rgb.channels[1][0] + 0.25376427).abs() < 1.0e-6);
+        assert!((rgb.channels[2][0] + 0.12067062).abs() < 1.0e-6);
     }
 
     #[test]
