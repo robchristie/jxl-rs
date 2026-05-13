@@ -61,7 +61,8 @@ Audit date: 2026-05-13.
   be revisited during milestone 2 and converted to explicit errors if they can
   be reached from malformed input.
 - 16-bit VarDCT presentation output exists, but high-bit-depth lossy
-  conformance still needs oracle-backed tolerances and targeted grayscale tests.
+  conformance remains above the milestone-8 RGBA16 target tolerance for the
+  generated grayscale16 fixture.
 - Up to 8 total decoded channels are documented by a focused generated VarDCT
   fixture that keeps RGB presentation output separate from non-alpha
   `decode_channels` side-stream output.
@@ -145,7 +146,7 @@ Progress:
 
 ### Milestone 3: Baseline VarDCT RGB8 Still Decode
 
-Status: pending.
+Status: in progress.
 
 Focus:
 
@@ -193,12 +194,19 @@ Focus:
 
 ### Milestone 8: 16-Bit Output Paths
 
-Status: pending.
+Status: in progress.
 
 Focus:
 
 - Add oracle-backed 16-bit grayscale and RGB/RGBA presentation tests and ensure
   `decode_channels` does not downconvert supported high-bit-depth channels.
+
+Progress:
+
+- Added public generated grayscale16 VarDCT coverage for `decode_rgba16`
+  against `djxl`. The current output is still a loose regression snapshot,
+  not milestone-8 conformance: max absolute channel error is `45_211` and sum
+  absolute error is `86_222_322`, far above the target tolerance.
 
 ### Milestone 9: Extra Channels and Up to 8-Channel Workflows
 
@@ -302,3 +310,9 @@ Focus:
   `decode_channels` exposes all 8 channels with exact extra-channel samples,
   while public RGB/RGBA presentation output ignores the non-alpha extras by
   design. Focused test passes with the checked-in reference `cjxl`.
+- 2026-05-13: Added
+  `decode_rgba16_supports_generated_gray16_var_dct_when_available` as an
+  oracle-backed milestone-8 regression fixture. It confirms the public RGBA16
+  path runs for generated grayscale16 VarDCT output, but the captured metrics
+  remain far outside the intended RGBA16 conformance tolerance, so the
+  grayscale high-bit-depth reconstruction path still needs algorithmic work.

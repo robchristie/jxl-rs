@@ -4743,6 +4743,82 @@ mod tests {
     }
 
     #[test]
+    fn decode_rgba16_supports_generated_gray16_var_dct_when_available() {
+        let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+            eprintln!("skipping public grayscale16 VarDCT decode; reference tools are not built");
+            return;
+        };
+
+        let input = unique_temp_path("jxl-gray16-vardct-source", "pgm");
+        let encoded = unique_temp_path("jxl-gray16-vardct", "jxl");
+        let reference_output = unique_temp_path("jxl-gray16-vardct-reference", "pgm");
+        write_gray16_vardct_source_pgm(&input, 64, 48);
+
+        let cjxl_output = Command::new(&cjxl)
+            .arg(&input)
+            .arg(&encoded)
+            .args(["-d", "1.0", "-m", "0", "--container=0", "--quiet"])
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(&input);
+        assert!(
+            cjxl_output.status.success(),
+            "reference cjxl failed for public grayscale16 VarDCT: {}",
+            String::from_utf8_lossy(&cjxl_output.stderr)
+        );
+        let djxl_output = Command::new(&djxl)
+            .arg(&encoded)
+            .arg(&reference_output)
+            .arg("--quiet")
+            .output()
+            .unwrap();
+        assert!(
+            djxl_output.status.success(),
+            "reference djxl failed for public grayscale16 VarDCT: {}",
+            String::from_utf8_lossy(&djxl_output.stderr)
+        );
+
+        let reference = std::fs::read(&reference_output).unwrap();
+        let _ = std::fs::remove_file(&reference_output);
+        let reference = parse_pgm_gray(&reference);
+        let encoded_bytes = std::fs::read(&encoded).unwrap();
+        let _ = std::fs::remove_file(&encoded);
+        let info = inspect(&encoded_bytes).unwrap();
+        assert!(info.first_frame_vardct.is_some());
+        assert_eq!(info.metadata.color_encoding.color_space, ColorSpace::Gray);
+        assert_eq!(info.metadata.num_color_channels(), 1);
+
+        let rgba16 = decode_rgba16(&encoded_bytes).unwrap();
+        assert_eq!(rgba16.width, reference.width);
+        assert_eq!(rgba16.height, reference.height);
+        let metrics = rgba16_gray_oracle_metrics(
+            &rgba16,
+            &reference,
+            &[
+                0,
+                (rgba16.height as usize / 2) * rgba16.width as usize + rgba16.width as usize / 2,
+                rgba16.width as usize * rgba16.height as usize - 1,
+            ],
+        );
+        assert_eq!(
+            metrics,
+            Srgb8OracleMetrics {
+                max_abs_error: 45_211,
+                sum_abs_error: 86_222_322,
+                checksum: 11_099_248_894_719_798_121,
+                anchors: vec![
+                    0, 0, 0, 65_535, 63_095, 63_095, 63_095, 65_535, 51_670, 51_670, 51_670,
+                    65_535,
+                ],
+                reference_anchors: vec![
+                    220, 220, 220, 65_535, 34_091, 34_091, 34_091, 65_535, 53_642, 53_642, 53_642,
+                    65_535,
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn decode_tiny_generated_var_dct_matrix_against_oracle_when_available() {
         let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
             eprintln!("skipping tiny public VarDCT oracle matrix; reference tools are not built");
@@ -9880,6 +9956,57 @@ mod tests {
         }
     }
 
+    fn rgba16_gray_oracle_metrics(
+        decoded: &Rgba16Image,
+        reference: &PgmGray,
+        anchor_pixel_indices: &[usize],
+    ) -> Srgb8OracleMetrics {
+        assert_eq!(decoded.width, reference.width);
+        assert_eq!(decoded.height, reference.height);
+        assert_eq!(
+            decoded.pixels.len(),
+            reference.samples.len().checked_mul(4).unwrap()
+        );
+
+        let mut max_abs_error = 0u16;
+        let mut sum_abs_error = 0u64;
+        let mut checksum = 0xcbf2_9ce4_8422_2325u64;
+        for (pixel_index, (rgba, &reference)) in decoded
+            .pixels
+            .chunks_exact(4)
+            .zip(&reference.samples)
+            .enumerate()
+        {
+            for (channel, &actual) in rgba.iter().enumerate() {
+                let expected = if channel == 3 { u16::MAX } else { reference };
+                let error = actual.abs_diff(expected);
+                max_abs_error = max_abs_error.max(error);
+                sum_abs_error += u64::from(error);
+                let sample_index = pixel_index * 4 + channel;
+                checksum ^=
+                    ((sample_index as u64) << 32) ^ ((actual as u64) << 16) ^ u64::from(expected);
+                checksum = checksum.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+
+        Srgb8OracleMetrics {
+            max_abs_error,
+            sum_abs_error,
+            checksum,
+            anchors: anchor_pixel_indices
+                .iter()
+                .flat_map(|&index| decoded.pixels[index * 4..index * 4 + 4].iter().copied())
+                .collect(),
+            reference_anchors: anchor_pixel_indices
+                .iter()
+                .flat_map(|&index| {
+                    let gray = reference.samples[index];
+                    [gray, gray, gray, u16::MAX]
+                })
+                .collect(),
+        }
+    }
+
     fn rgba8_oracle_metrics(
         decoded: &RgbaImage,
         reference: &PpmRgb,
@@ -10544,6 +10671,18 @@ mod tests {
         }
         std::fs::write(path, bytes).unwrap();
         depth
+    }
+
+    fn write_gray16_vardct_source_pgm(path: &Path, width: u32, height: u32) {
+        let mut bytes = format!("P5\n{width} {height}\n65535\n").into_bytes();
+        for y in 0..height {
+            for x in 0..width {
+                let checker = (((x / 8) ^ (y / 8)) & 1) * 8191;
+                let sample = (((x * 65_535 / (width - 1)) ^ (y * 257) ^ checker) & 0xffff) as u16;
+                bytes.extend_from_slice(&sample.to_be_bytes());
+            }
+        }
+        std::fs::write(path, bytes).unwrap();
     }
 
     fn write_gray_alpha_source_pam(path: &Path) -> GrayAlphaPam {
