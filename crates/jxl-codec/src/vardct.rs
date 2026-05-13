@@ -8,7 +8,9 @@ use crate::entropy::{
     probe_decode_histograms,
 };
 use crate::error::{Error, Result};
-use crate::frame::{FrameEncoding, FrameHeader, LoopFilter, YCbCrChromaSubsampling};
+use crate::frame::{
+    ColorTransform, FrameEncoding, FrameHeader, LoopFilter, YCbCrChromaSubsampling,
+};
 use crate::frame_data::{FrameData, FrameSection, FrameSectionKind, section_payload_range};
 use crate::metadata::ImageMetadata;
 use crate::metadata::unpack_signed;
@@ -324,6 +326,7 @@ pub struct VarDctFrameMetadata {
     pub coded_width: u32,
     pub coded_height: u32,
     pub upsampling: u32,
+    pub color_transform: ColorTransform,
     pub chroma_subsampling: YCbCrChromaSubsampling,
     pub group_dim: u32,
     pub groups_x: u32,
@@ -3319,6 +3322,7 @@ pub fn read_vardct_frame_metadata(
         coded_width,
         coded_height,
         upsampling: frame_header.upsampling,
+        color_transform: frame_header.color_transform,
         chroma_subsampling: frame_header.chroma_subsampling.clone(),
         group_dim: frame_header.group_layout.group_dim,
         groups_x: frame_header.group_layout.groups_x,
@@ -3365,7 +3369,9 @@ pub fn read_vardct_decode_plan(
         .transpose()?;
     let global = global_payload
         .as_ref()
-        .map(|section| read_vardct_global_metadata(codestream, section))
+        .map(|section| {
+            read_vardct_global_metadata(codestream, section, frame_header.color_transform)
+        })
         .transpose()?;
     let (
         global_tree,
@@ -3738,7 +3744,11 @@ fn read_single_section_vardct_decode_plan(
         .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
     let mut reader = BitReader::new(bytes);
 
-    let global = read_vardct_global_metadata_from_reader(&mut reader, &global_payload)?;
+    let global = read_vardct_global_metadata_from_reader(
+        &mut reader,
+        &global_payload,
+        frame_header.color_transform,
+    )?;
     let modular_global_tree_payload_start_bits = global_payload.payload_range.start.checked_mul(8);
     let modular_global_tree_payload_len_bits = global_payload.payload_range.len().checked_mul(8);
     let modular_global_tree_payload_end_bits = modular_global_tree_payload_start_bits
@@ -6033,7 +6043,9 @@ fn spatialize_vardct_ac_grid_with_dc_multiplier(
 ) -> Result<VarDctAcSpatialGrid> {
     let blocks = vardct_ac_blocks_for_group(metadata, dc_groups)?;
     let dc_grid = global
-        .map(|global| vardct_dc_coefficients_for_group(metadata, global, dc_groups))
+        .map(|global| {
+            vardct_dc_coefficients_for_group(metadata, global, chroma_subsampling, dc_groups)
+        })
         .transpose()?;
     let channel_block_shapes = vardct_group_channel_block_shapes(
         chroma_subsampling,
@@ -6260,6 +6272,7 @@ impl VarDctDcCoefficientGrid {
 fn vardct_dc_coefficients_for_group(
     metadata: &VarDctAcGroupMetadata,
     global: &VarDctGlobalMetadata,
+    chroma_subsampling: &YCbCrChromaSubsampling,
     dc_groups: &[VarDctDcGroupMetadata],
 ) -> Result<VarDctDcCoefficientGrid> {
     const DEFAULT_DC_QUANT: [f32; 3] = [1.0 / 4096.0, 1.0 / 512.0, 1.0 / 256.0];
@@ -6279,6 +6292,25 @@ fn vardct_dc_coefficients_for_group(
         vec![0.0; width_blocks * height_blocks],
     ];
 
+    let extra_precision_scale = dc_group
+        .extra_precision_bits
+        .map(|bits| 1.0f32 / (1u32 << bits as u32) as f32)
+        .unwrap_or(1.0);
+    let dc_factors = [
+        global.color_correlation.base_correlation_x
+            + global.color_correlation.ytox_dc as f32
+                / global.color_correlation.color_factor as f32,
+        0.0,
+        global.color_correlation.base_correlation_b
+            + global.color_correlation.ytob_dc as f32
+                / global.color_correlation.color_factor as f32,
+    ];
+    let mut raw_per_channel = [
+        vec![0.0; width_blocks * height_blocks],
+        vec![0.0; width_blocks * height_blocks],
+        vec![0.0; width_blocks * height_blocks],
+    ];
+
     for output_channel in 0..3 {
         let modular_channel_index = vardct_modular_channel_for_color_channel(output_channel)?;
         let channel = var_dct_dc
@@ -6286,15 +6318,26 @@ fn vardct_dc_coefficients_for_group(
             .iter()
             .find(|channel| channel.channel_index == modular_channel_index)
             .ok_or(Error::Unsupported("VarDCT DC coefficients"))?;
-        let scale = global.quantizer.inv_quant_dc * dc_quant[output_channel];
+        let scale =
+            global.quantizer.inv_quant_dc * dc_quant[output_channel] * extra_precision_scale;
         for y in 0..height_blocks {
             for x in 0..width_blocks {
                 let source_x = group_min_x + x;
                 let source_y = group_min_y + y;
                 let sample = modular_channel_sample_shifted(channel, source_x, source_y)?;
-                per_channel[output_channel][y * width_blocks + x] = sample as f32 * scale;
+                raw_per_channel[output_channel][y * width_blocks + x] = sample as f32 * scale;
             }
         }
+    }
+    if chroma_subsampling.is_444() {
+        for index in 0..width_blocks * height_blocks {
+            let y = raw_per_channel[1][index];
+            per_channel[1][index] = y;
+            per_channel[0][index] = raw_per_channel[0][index] + y * dc_factors[0];
+            per_channel[2][index] = raw_per_channel[2][index] + y * dc_factors[2];
+        }
+    } else {
+        per_channel = raw_per_channel;
     }
 
     Ok(VarDctDcCoefficientGrid {
@@ -6318,7 +6361,12 @@ fn vardct_dc_coefficient_diagnostics_for_group(
         .var_dct_dc
         .as_ref()
         .ok_or(Error::Unsupported("VarDCT DC coefficients"))?;
-    let coefficients = vardct_dc_coefficients_for_group(metadata, global, &plan.dc_group_metadata)?;
+    let coefficients = vardct_dc_coefficients_for_group(
+        metadata,
+        global,
+        &plan.frame.chroma_subsampling,
+        &plan.dc_group_metadata,
+    )?;
     let dc_quant = global.dc_dequant.coefficients.unwrap_or(DEFAULT_DC_QUANT);
     let width_blocks = metadata.payload.group.width.div_ceil(8).min(256 / 8) as usize;
     let height_blocks = metadata.payload.group.height.div_ceil(8).min(256 / 8) as usize;
@@ -9266,17 +9314,19 @@ fn ceil_log2_nonzero(value: usize) -> usize {
 fn read_vardct_global_metadata(
     codestream: &[u8],
     section: &VarDctSectionPayloadMetadata,
+    color_transform: ColorTransform,
 ) -> Result<VarDctGlobalMetadata> {
     let payload = codestream
         .get(section.payload_range.clone())
         .ok_or(Error::InvalidCodestream("frame section outside codestream"))?;
     let mut reader = BitReader::new(payload);
-    read_vardct_global_metadata_from_reader(&mut reader, section)
+    read_vardct_global_metadata_from_reader(&mut reader, section, color_transform)
 }
 
 fn read_vardct_global_metadata_from_reader(
     mut reader: &mut BitReader<'_>,
     section: &VarDctSectionPayloadMetadata,
+    color_transform: ColorTransform,
 ) -> Result<VarDctGlobalMetadata> {
     let dc_dequant = read_vardct_dc_dequant(&mut reader)?;
     let dc_dequant_end_bits = reader.bits_consumed();
@@ -9284,7 +9334,8 @@ fn read_vardct_global_metadata_from_reader(
     let quantizer_end_bits = reader.bits_consumed();
     let block_context_map = read_vardct_block_context_map(&mut reader)?;
     let block_context_end_bits = reader.bits_consumed();
-    let color_correlation = read_vardct_color_correlation(&mut reader)?;
+    let color_correlation =
+        read_vardct_color_correlation(&mut reader, color_transform == ColorTransform::Xyb)?;
     let color_correlation_end_bits = reader.bits_consumed();
     let cursor = VarDctGlobalCursorMetadata {
         dc_dequant_default_end_bits: dc_dequant.default_end_bits,
@@ -9478,7 +9529,10 @@ fn read_vardct_block_context_map(reader: &mut BitReader<'_>) -> Result<VarDctBlo
     })
 }
 
-fn read_vardct_color_correlation(reader: &mut BitReader<'_>) -> Result<VarDctColorCorrelationRead> {
+fn read_vardct_color_correlation(
+    reader: &mut BitReader<'_>,
+    xyb_encoded: bool,
+) -> Result<VarDctColorCorrelationRead> {
     const DEFAULT_COLOR_FACTOR: u32 = 84;
     const DEFAULT_BASE_CORRELATION_X: f32 = 0.0;
     const DEFAULT_BASE_CORRELATION_B: f32 = 1.0;
@@ -9486,12 +9540,17 @@ fn read_vardct_color_correlation(reader: &mut BitReader<'_>) -> Result<VarDctCol
     let all_default = reader.read_bool()?;
     let default_end_bits = reader.bits_consumed();
     if all_default {
+        let base_correlation_b = if xyb_encoded {
+            DEFAULT_BASE_CORRELATION_B
+        } else {
+            0.0
+        };
         return Ok(VarDctColorCorrelationRead {
             metadata: VarDctColorCorrelationMetadata {
                 all_default,
                 color_factor: DEFAULT_COLOR_FACTOR,
                 base_correlation_x: DEFAULT_BASE_CORRELATION_X,
-                base_correlation_b: DEFAULT_BASE_CORRELATION_B,
+                base_correlation_b,
                 ytox_dc: 0,
                 ytob_dc: 0,
             },
@@ -9757,6 +9816,7 @@ mod tests {
             coded_width: 256,
             coded_height: 128,
             upsampling: 1,
+            color_transform: ColorTransform::Xyb,
             chroma_subsampling: YCbCrChromaSubsampling::default(),
             group_dim: 128,
             groups_x: 2,
@@ -10957,6 +11017,7 @@ mod tests {
             coded_width: width,
             coded_height: height,
             upsampling: 1,
+            color_transform: ColorTransform::Xyb,
             chroma_subsampling: YCbCrChromaSubsampling::default(),
             group_dim: 256,
             groups_x: width.div_ceil(256),
