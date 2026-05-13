@@ -1199,7 +1199,7 @@ fn decoded_image_from_vardct_srgb8(
         1 => image
             .pixels
             .chunks_exact(3)
-            .map(|pixel| pixel[0])
+            .map(vardct_srgb8_gray_sample)
             .collect::<Vec<_>>(),
         3 => image.pixels,
         _ => return Err(Error::Unsupported("unsupported color channel count")),
@@ -1230,7 +1230,11 @@ fn decoded_channels_from_vardct_srgb8(
         .map(|_| Vec::with_capacity(sample_count))
         .collect::<Vec<_>>();
     for pixel in image.pixels.chunks_exact(3) {
-        channels[0].push(pixel[0]);
+        channels[0].push(if color_channels == 1 {
+            vardct_srgb8_gray_sample(pixel)
+        } else {
+            pixel[0]
+        });
         if color_channels == 3 {
             channels[1].push(pixel[1]);
             channels[2].push(pixel[2]);
@@ -1272,7 +1276,11 @@ fn decoded_channels_from_vardct_srgb16(
         .map(|_| Vec::with_capacity(sample_count))
         .collect::<Vec<_>>();
     for pixel in image.pixels.chunks_exact(3) {
-        channels[0].push(pixel[0]);
+        channels[0].push(if color_channels == 1 {
+            vardct_srgb16_gray_sample(pixel)
+        } else {
+            pixel[0]
+        });
         if color_channels == 3 {
             channels[1].push(pixel[1]);
             channels[2].push(pixel[2]);
@@ -1297,6 +1305,22 @@ fn decoded_channels_from_vardct_srgb16(
             })
             .collect(),
     })
+}
+
+fn vardct_srgb8_gray_sample(rgb: &[u8]) -> u8 {
+    ((2_126u32 * u32::from(rgb[0])
+        + 7_152u32 * u32::from(rgb[1])
+        + 722u32 * u32::from(rgb[2])
+        + 5_000)
+        / 10_000) as u8
+}
+
+fn vardct_srgb16_gray_sample(rgb: &[u16]) -> u16 {
+    ((2_126u32 * u32::from(rgb[0])
+        + 7_152u32 * u32::from(rgb[1])
+        + 722u32 * u32::from(rgb[2])
+        + 5_000)
+        / 10_000) as u16
 }
 
 fn modular_xyb_decoded_channels_srgb8_from_codestream(
@@ -4804,8 +4828,8 @@ mod tests {
             metrics,
             Srgb8OracleMetrics {
                 max_abs_error: 45_211,
-                sum_abs_error: 86_222_322,
-                checksum: 11_099_248_894_719_798_121,
+                sum_abs_error: 86_222_319,
+                checksum: 1_812_636_933_834_582_889,
                 anchors: vec![
                     0, 0, 0, 65_535, 63_095, 63_095, 63_095, 65_535, 51_670, 51_670, 51_670,
                     65_535,

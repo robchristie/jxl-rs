@@ -206,7 +206,7 @@ Progress:
 - Added public generated grayscale16 VarDCT coverage for `decode_rgba16`
   against `djxl`. The current output is still a loose regression snapshot,
   not milestone-8 conformance: max absolute channel error is `45_211` and sum
-  absolute error is `86_222_322`, far above the target tolerance.
+  absolute error is `86_222_319`, far above the target tolerance.
 
 ### Milestone 9: Extra Channels and Up to 8-Channel Workflows
 
