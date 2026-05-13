@@ -4743,6 +4743,145 @@ mod tests {
     }
 
     #[test]
+    fn decode_tiny_generated_var_dct_matrix_against_oracle_when_available() {
+        let (Some(cjxl), Some(djxl)) = (reference_cjxl(), reference_djxl()) else {
+            eprintln!("skipping tiny public VarDCT oracle matrix; reference tools are not built");
+            return;
+        };
+
+        let cases = [
+            TinyVarDctCase::rgb("rgb-1x1", 1, 1),
+            TinyVarDctCase::rgb("rgb-2x2", 2, 2),
+            TinyVarDctCase::rgb("rgb-8x8", 8, 8),
+            TinyVarDctCase::rgb("rgb-16x16", 16, 16),
+            TinyVarDctCase::rgb("rgb-32x32", 32, 32),
+            TinyVarDctCase::gray("gray-16x16", 16, 16),
+            TinyVarDctCase::rgba("rgba-16x16", 16, 16),
+        ];
+
+        for case in cases {
+            let source =
+                unique_temp_path(&format!("jxl-tiny-vardct-{}", case.name), case.source_ext());
+            let encoded = unique_temp_path(&format!("jxl-tiny-vardct-{}", case.name), "jxl");
+            let reference_output = unique_temp_path(
+                &format!("jxl-tiny-vardct-{}-reference", case.name),
+                case.reference_ext(),
+            );
+
+            write_tiny_vardct_source(&source, case);
+            let cjxl_output = Command::new(&cjxl)
+                .arg(&source)
+                .arg(&encoded)
+                .args(["-d", "1", "--container=0", "--quiet"])
+                .output()
+                .unwrap();
+            let _ = std::fs::remove_file(&source);
+            assert!(
+                cjxl_output.status.success(),
+                "reference cjxl failed for tiny VarDCT case {}: {}",
+                case.name,
+                String::from_utf8_lossy(&cjxl_output.stderr)
+            );
+            let djxl_output = Command::new(&djxl)
+                .arg(&encoded)
+                .arg(&reference_output)
+                .arg("--quiet")
+                .output()
+                .unwrap();
+            assert!(
+                djxl_output.status.success(),
+                "reference djxl failed for tiny VarDCT case {}: {}",
+                case.name,
+                String::from_utf8_lossy(&djxl_output.stderr)
+            );
+
+            let reference = std::fs::read(&reference_output).unwrap();
+            let _ = std::fs::remove_file(&reference_output);
+            let encoded_bytes = std::fs::read(&encoded).unwrap();
+            let _ = std::fs::remove_file(&encoded);
+            let info = inspect(&encoded_bytes).unwrap();
+            assert!(
+                info.first_frame_vardct.is_some(),
+                "tiny case {} did not encode as VarDCT",
+                case.name
+            );
+
+            match case.kind {
+                TinyVarDctKind::Rgb => {
+                    let reference = parse_ppm_rgb(&reference);
+                    let decoded = decode(&encoded_bytes).unwrap();
+                    assert_eq!(decoded.width, case.width);
+                    assert_eq!(decoded.height, case.height);
+                    assert_eq!(decoded.color_channels, 3);
+                    assert_eq!(decoded.bit_depth, 8);
+                    let metrics = srgb8_oracle_metrics(
+                        &decoded,
+                        &reference,
+                        &tiny_anchor_indices(decoded.width, decoded.height, 3),
+                    );
+                    assert_public_tiny_oracle_metrics(
+                        case.name,
+                        &metrics,
+                        decoded.width,
+                        decoded.height,
+                        3,
+                    );
+                    let rgba = decode_rgba8(&encoded_bytes).unwrap();
+                    assert_eq!(rgba.width, case.width);
+                    assert_eq!(rgba.height, case.height);
+                    assert!(rgba.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+                }
+                TinyVarDctKind::Gray => {
+                    let reference = parse_pgm_gray(&reference);
+                    let decoded = decode(&encoded_bytes).unwrap();
+                    assert_eq!(decoded.width, case.width);
+                    assert_eq!(decoded.height, case.height);
+                    assert_eq!(decoded.color_channels, 1);
+                    assert_eq!(decoded.bit_depth, 8);
+                    let metrics = gray8_oracle_metrics(
+                        &decoded,
+                        &reference,
+                        &tiny_anchor_indices(decoded.width, decoded.height, 1),
+                    );
+                    assert_public_tiny_oracle_metrics(
+                        case.name,
+                        &metrics,
+                        decoded.width,
+                        decoded.height,
+                        1,
+                    );
+                    let rgba = decode_rgba8(&encoded_bytes).unwrap();
+                    assert_eq!(rgba.width, case.width);
+                    assert_eq!(rgba.height, case.height);
+                    assert!(rgba.pixels.chunks_exact(4).all(|pixel| pixel[3] == 255));
+                }
+                TinyVarDctKind::Rgba => {
+                    let reference = parse_pam_rgba(&reference);
+                    let rgba = decode_rgba8(&encoded_bytes).unwrap();
+                    assert_eq!(rgba.width, case.width);
+                    assert_eq!(rgba.height, case.height);
+                    let metrics = rgba8_oracle_metrics(
+                        &rgba,
+                        &reference,
+                        &tiny_anchor_indices(rgba.width, rgba.height, 4),
+                    );
+                    assert_public_tiny_oracle_metrics(
+                        case.name,
+                        &metrics,
+                        rgba.width,
+                        rgba.height,
+                        4,
+                    );
+                    let channels = decode_channels(&encoded_bytes).unwrap();
+                    assert_eq!(channels.color_channels, 3);
+                    assert_eq!(channels.channels.len(), 4);
+                    assert!(channels.alpha.is_some());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn decodes_public_spline_rendering() {
         let bytes =
             std::fs::read(workspace_path("reference/libjxl/testdata/jxl/splines.jxl")).unwrap();
@@ -9148,6 +9287,62 @@ mod tests {
         reference_anchors: Vec<u16>,
     }
 
+    #[derive(Debug, Clone, Copy)]
+    enum TinyVarDctKind {
+        Rgb,
+        Gray,
+        Rgba,
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct TinyVarDctCase {
+        name: &'static str,
+        width: u32,
+        height: u32,
+        kind: TinyVarDctKind,
+    }
+
+    impl TinyVarDctCase {
+        fn rgb(name: &'static str, width: u32, height: u32) -> Self {
+            Self {
+                name,
+                width,
+                height,
+                kind: TinyVarDctKind::Rgb,
+            }
+        }
+
+        fn gray(name: &'static str, width: u32, height: u32) -> Self {
+            Self {
+                name,
+                width,
+                height,
+                kind: TinyVarDctKind::Gray,
+            }
+        }
+
+        fn rgba(name: &'static str, width: u32, height: u32) -> Self {
+            Self {
+                name,
+                width,
+                height,
+                kind: TinyVarDctKind::Rgba,
+            }
+        }
+
+        fn source_ext(self) -> &'static str {
+            match self.kind {
+                TinyVarDctKind::Rgb => "ppm",
+                TinyVarDctKind::Gray => "pgm",
+                TinyVarDctKind::Rgba => "pam",
+            }
+        }
+
+        fn reference_ext(self) -> &'static str {
+            self.source_ext()
+        }
+    }
+
     fn parse_ppm_rgb(bytes: &[u8]) -> PpmRgb {
         let (magic, offset) = netpbm_token(bytes, 0);
         assert_eq!(magic, b"P6");
@@ -9554,6 +9749,77 @@ mod tests {
         }
     }
 
+    fn rgba8_oracle_metrics(
+        decoded: &RgbaImage,
+        reference: &PpmRgb,
+        anchor_indices: &[usize],
+    ) -> Srgb8OracleMetrics {
+        assert_eq!(decoded.width, reference.width);
+        assert_eq!(decoded.height, reference.height);
+        assert_eq!(decoded.pixels.len(), reference.samples.len());
+
+        let mut max_abs_error = 0u16;
+        let mut sum_abs_error = 0u64;
+        let mut checksum = 0xcbf2_9ce4_8422_2325u64;
+        for (index, (&actual, &reference)) in
+            decoded.pixels.iter().zip(&reference.samples).enumerate()
+        {
+            let actual = u16::from(actual);
+            let error = actual.abs_diff(reference);
+            max_abs_error = max_abs_error.max(error);
+            sum_abs_error += u64::from(error);
+            checksum ^= ((index as u64) << 32) ^ ((actual as u64) << 16) ^ u64::from(reference);
+            checksum = checksum.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+
+        Srgb8OracleMetrics {
+            max_abs_error,
+            sum_abs_error,
+            checksum,
+            anchors: anchor_indices
+                .iter()
+                .map(|&index| u16::from(decoded.pixels[index]))
+                .collect(),
+            reference_anchors: anchor_indices
+                .iter()
+                .map(|&index| reference.samples[index])
+                .collect(),
+        }
+    }
+
+    fn tiny_anchor_indices(width: u32, height: u32, channels: usize) -> Vec<usize> {
+        let sample_count = width as usize * height as usize * channels;
+        if sample_count == 0 {
+            return Vec::new();
+        }
+        let mut indices = vec![0, sample_count / 2, sample_count - 1];
+        indices.sort_unstable();
+        indices.dedup();
+        indices
+    }
+
+    fn assert_public_tiny_oracle_metrics(
+        case_name: &str,
+        metrics: &Srgb8OracleMetrics,
+        width: u32,
+        height: u32,
+        channels: usize,
+    ) {
+        let sample_count = width as f64 * height as f64 * channels as f64;
+        let mean_abs_error = metrics.sum_abs_error as f64 / sample_count;
+        // Milestone 1 records a comparison harness. These are intentionally
+        // coarse regression thresholds until the later conformance milestones
+        // tighten RGB/RGBA8 output to max <= 2 and mean <= 0.25.
+        assert!(
+            metrics.max_abs_error <= 255,
+            "tiny VarDCT case {case_name} max error too high: {metrics:?}"
+        );
+        assert!(
+            mean_abs_error <= 160.0,
+            "tiny VarDCT case {case_name} mean error too high ({mean_abs_error}): {metrics:?}"
+        );
+    }
+
     fn assert_roi_matches_full_image(roi_image: &DecodedImage, full: &DecodedImage, roi: Rect) {
         assert_eq!(roi_image.width, roi.width);
         assert_eq!(roi_image.height, roi.height);
@@ -9814,6 +10080,54 @@ mod tests {
             output.extend_from_slice(&samples[start..start + copy_width]);
         }
         output
+    }
+
+    fn write_tiny_vardct_source(path: &Path, case: TinyVarDctCase) {
+        match case.kind {
+            TinyVarDctKind::Rgb => {
+                let mut bytes = format!("P6\n{} {}\n255\n", case.width, case.height).into_bytes();
+                for y in 0..case.height {
+                    for x in 0..case.width {
+                        bytes.push(tiny_gradient_sample(x, case.width));
+                        bytes.push(tiny_gradient_sample(y, case.height));
+                        bytes.push(tiny_gradient_sample(x + y, case.width + case.height - 1));
+                    }
+                }
+                std::fs::write(path, bytes).unwrap();
+            }
+            TinyVarDctKind::Gray => {
+                let mut bytes = format!("P5\n{} {}\n255\n", case.width, case.height).into_bytes();
+                for y in 0..case.height {
+                    for x in 0..case.width {
+                        bytes.push(((x * 17 + y * 29) & 0xff) as u8);
+                    }
+                }
+                std::fs::write(path, bytes).unwrap();
+            }
+            TinyVarDctKind::Rgba => {
+                let mut bytes = format!(
+                    "P7\nWIDTH {}\nHEIGHT {}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n",
+                    case.width, case.height
+                )
+                .into_bytes();
+                for y in 0..case.height {
+                    for x in 0..case.width {
+                        bytes.push(tiny_gradient_sample(x, case.width));
+                        bytes.push(tiny_gradient_sample(y, case.height));
+                        bytes.push(tiny_gradient_sample(x + y, case.width + case.height - 1));
+                        bytes.push(((x * 31 + y * 17 + 64) & 0xff) as u8);
+                    }
+                }
+                std::fs::write(path, bytes).unwrap();
+            }
+        }
+    }
+
+    fn tiny_gradient_sample(numerator: u32, extent: u32) -> u8 {
+        if extent <= 1 {
+            return 0;
+        }
+        (numerator * 255 / (extent - 1)) as u8
     }
 
     fn write_progressive_squeeze_source_ppm(path: &Path) {

@@ -6100,7 +6100,7 @@ fn spatialize_vardct_ac_grid_with_dc_multiplier(
                     if transform.width == 8 && transform.height == 8 {
                         let mut block = [0.0f32; DCT_BLOCK_SIZE];
                         block.copy_from_slice(&coefficients);
-                        inverse_dct_8x8(&block).to_vec()
+                        inverse_dct_8x8(&block)?.to_vec()
                     } else {
                         inverse_dct_rect(transform.width, transform.height, &coefficients)?
                     }
@@ -6323,28 +6323,25 @@ fn vardct_dc_coefficient_diagnostics_for_group(
     let group_min_x = ((metadata.payload.group.x - dc_group.payload.group.x) / 8) as usize;
     let group_min_y = ((metadata.payload.group.y - dc_group.payload.group.y) / 8) as usize;
 
-    let raw_channels = std::array::from_fn(|output_channel| {
-        let modular_channel = vardct_modular_channel_for_color_channel(output_channel)
-            .expect("validated VarDCT color channel");
+    let mut raw_channels = [None, None, None];
+    for (output_channel, raw_channel) in raw_channels.iter_mut().enumerate() {
+        let modular_channel = vardct_modular_channel_for_color_channel(output_channel)?;
         let channel = var_dct_dc
             .channels
             .iter()
             .find(|channel| channel.channel_index == modular_channel)
-            .expect("validated VarDCT DC channel");
+            .ok_or(Error::Unsupported("VarDCT DC coefficients"))?;
         let mut selected = Vec::with_capacity(width_blocks * height_blocks);
         for y in 0..height_blocks {
             for x in 0..width_blocks {
                 let source_x = group_min_x + x;
                 let source_y = group_min_y + y;
-                selected.push(
-                    modular_channel_sample_shifted(channel, source_x, source_y)
-                        .expect("validated VarDCT DC sample"),
-                );
+                selected.push(modular_channel_sample_shifted(channel, source_x, source_y)?);
             }
         }
         let sample_min = selected.iter().copied().min().unwrap_or(0);
         let sample_max = selected.iter().copied().max().unwrap_or(0);
-        VarDctDcRawChannelDiagnostics {
+        *raw_channel = Some(VarDctDcRawChannelDiagnostics {
             output_channel,
             modular_channel,
             width: width_blocks as u32,
@@ -6355,8 +6352,12 @@ fn vardct_dc_coefficient_diagnostics_for_group(
             sample_sum: selected.iter().map(|sample| i64::from(*sample)).sum(),
             sample_checksum: checksum_i32_slice(&selected),
             anchors: sample_anchors_i32(&selected),
-        }
-    });
+        });
+    }
+    let [Some(raw0), Some(raw1), Some(raw2)] = raw_channels else {
+        return Err(Error::InvalidCodestream("missing VarDCT DC diagnostics"));
+    };
+    let raw_channels = [raw0, raw1, raw2];
     let scaled_channels = std::array::from_fn(|output_channel| {
         let channel = &coefficients.per_channel[output_channel];
         let scale = global.quantizer.inv_quant_dc * dc_quant[output_channel];
@@ -6445,11 +6446,11 @@ fn write_spatial_sample(grid: &mut VarDctAcSpatialChannelGrid, index: usize, val
     grid.sample_checksum = checksum_dequantized_coefficient(grid.sample_checksum, index, value);
 }
 
-fn inverse_dct_8x8(coefficients: &[f32; DCT_BLOCK_SIZE]) -> [f32; DCT_BLOCK_SIZE] {
-    let samples = inverse_dct_rect(8, 8, coefficients).expect("valid DCT8 dimensions");
+fn inverse_dct_8x8(coefficients: &[f32; DCT_BLOCK_SIZE]) -> Result<[f32; DCT_BLOCK_SIZE]> {
+    let samples = inverse_dct_rect(8, 8, coefficients)?;
     let mut block = [0.0f32; DCT_BLOCK_SIZE];
     block.copy_from_slice(&samples);
-    block
+    Ok(block)
 }
 
 fn inverse_identity_8x8(coefficients: &[f32]) -> Result<Vec<f32>> {
@@ -7037,7 +7038,9 @@ fn quant_weights_from_bands(
         return Err(Error::InvalidCodestream("invalid dequant matrix"));
     }
     for &encoded in &encoded_bands[1..] {
-        let previous = *bands.last().unwrap();
+        let previous = *bands
+            .last()
+            .ok_or(Error::InvalidCodestream("invalid dequant matrix"))?;
         let multiplier = if encoded > 0.0 {
             1.0 + encoded
         } else {
@@ -7069,6 +7072,9 @@ fn quant_weights_from_bands(
 }
 
 fn interpolate_bands(pos: f32, bands: &[f32]) -> Result<f32> {
+    if bands.is_empty() {
+        return Err(Error::InvalidCodestream("invalid dequant matrix"));
+    }
     if bands.len() == 1 {
         return Ok(bands[0]);
     }
@@ -7076,7 +7082,10 @@ fn interpolate_bands(pos: f32, bands: &[f32]) -> Result<f32> {
     let scaled_pos = pos * (bands.len() - 1) as f32 / max;
     let idx = scaled_pos.floor() as usize;
     if idx + 1 >= bands.len() {
-        return Ok(*bands.last().unwrap());
+        return bands
+            .last()
+            .copied()
+            .ok_or(Error::InvalidCodestream("invalid dequant matrix"));
     }
     let a = bands[idx];
     let b = bands[idx + 1];
@@ -7210,10 +7219,16 @@ fn default_afv_quant_weights(channel: usize) -> Result<Vec<f32>> {
 }
 
 fn interpolate_custom(pos: f32, max: f32, bands: &[f32]) -> Result<f32> {
+    if bands.is_empty() || max <= 0.0 {
+        return Err(Error::InvalidCodestream("invalid dequant matrix"));
+    }
     let scaled_pos = pos * (bands.len() - 1) as f32 / max;
     let idx = scaled_pos.floor().max(0.0) as usize;
     if idx + 1 >= bands.len() {
-        return Ok(*bands.last().unwrap());
+        return bands
+            .last()
+            .copied()
+            .ok_or(Error::InvalidCodestream("invalid dequant matrix"));
     }
     let a = bands[idx];
     let b = bands[idx + 1];
@@ -9878,7 +9893,7 @@ mod tests {
     #[test]
     fn inverse_dct_8x8_zero_block_stays_zero() {
         let coefficients = [0.0f32; DCT_BLOCK_SIZE];
-        let samples = inverse_dct_8x8(&coefficients);
+        let samples = inverse_dct_8x8(&coefficients).unwrap();
 
         assert!(samples.iter().all(|sample| *sample == 0.0));
     }
@@ -9887,7 +9902,7 @@ mod tests {
     fn inverse_dct_8x8_dc_only_is_constant() {
         let mut coefficients = [0.0f32; DCT_BLOCK_SIZE];
         coefficients[0] = 8.0;
-        let samples = inverse_dct_8x8(&coefficients);
+        let samples = inverse_dct_8x8(&coefficients).unwrap();
 
         for sample in samples {
             assert!((sample - 1.0).abs() < 1.0e-6);
@@ -9898,7 +9913,7 @@ mod tests {
     fn inverse_dct_8x8_single_horizontal_ac_has_expected_shape() {
         let mut coefficients = [0.0f32; DCT_BLOCK_SIZE];
         coefficients[1] = 1.0;
-        let samples = inverse_dct_8x8(&coefficients);
+        let samples = inverse_dct_8x8(&coefficients).unwrap();
 
         assert!((samples[0] - 0.17337999).abs() < 1.0e-6);
         assert!((samples[7] + 0.17337997).abs() < 1.0e-6);
@@ -9968,6 +9983,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dequant_interpolation_rejects_empty_bands() {
+        assert_eq!(
+            interpolate_bands(0.0, &[]),
+            Err(Error::InvalidCodestream("invalid dequant matrix"))
+        );
+        assert_eq!(
+            interpolate_custom(0.0, 1.0, &[]),
+            Err(Error::InvalidCodestream("invalid dequant matrix"))
+        );
+        assert_eq!(
+            interpolate_custom(0.0, 0.0, &[1.0]),
+            Err(Error::InvalidCodestream("invalid dequant matrix"))
+        );
     }
 
     #[test]
