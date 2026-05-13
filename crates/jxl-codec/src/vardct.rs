@@ -5131,6 +5131,11 @@ fn trace_vardct_ac_group_channel(
     ];
     let quant_field = vardct_quant_field_for_group(metadata, dc_groups)?;
     let quant_dc_contexts = vardct_quant_dc_contexts_for_group(metadata, global, dc_groups)?;
+    let coefficient_shift = *frame_header
+        .passes
+        .shift
+        .get(metadata.payload.pass as usize)
+        .ok_or(Error::InvalidCodestream("invalid AC pass shift"))?;
     let mut coefficient_grid = VarDctAcCoefficientGrid {
         group: metadata.payload.group.group,
         pass: metadata.payload.pass,
@@ -5160,11 +5165,6 @@ fn trace_vardct_ac_group_channel(
 
     for block in blocks {
         let block_index = block.block_y * width_blocks + block.block_x;
-        let qf = *quant_field
-            .get(block_index)
-            .ok_or(Error::InvalidCodestream("invalid AC quant field"))?;
-        let qf =
-            u32::try_from(qf).map_err(|_| Error::InvalidCodestream("invalid AC quant field"))?;
         let quant_dc_context = *quant_dc_contexts
             .get(block_index)
             .ok_or(Error::InvalidCodestream("invalid AC DC context"))?;
@@ -5173,6 +5173,12 @@ fn trace_vardct_ac_group_channel(
             let Some(channel_block) = vardct_shifted_ac_block(block, channel_shape) else {
                 continue;
             };
+            let qf_index = block.block_y * width_blocks + channel_block.block_x;
+            let qf = *quant_field
+                .get(qf_index)
+                .ok_or(Error::InvalidCodestream("invalid AC quant field"))?;
+            let qf = u32::try_from(qf)
+                .map_err(|_| Error::InvalidCodestream("invalid AC quant field"))?;
             let predicted_nzeros = predict_from_top_and_left(
                 &row_nzeros[channel],
                 channel_shape.width,
@@ -5191,6 +5197,7 @@ fn trace_vardct_ac_group_channel(
                 predicted_nzeros as usize,
                 quant_dc_context,
                 qf,
+                coefficient_shift,
                 &mut row_nzeros[channel],
                 None,
                 channel_shape.width,
@@ -5263,6 +5270,7 @@ fn decode_vardct_ac_block_probe(
     predicted_nzeros: usize,
     quant_dc_context: usize,
     quant_field: u32,
+    coefficient_shift: u32,
     row_nzeros: &mut [i32],
     row_nzeros_top: Option<&[i32]>,
     nzeros_stride: usize,
@@ -5350,7 +5358,7 @@ fn decode_vardct_ac_block_probe(
         let start_bits = reader.bits_consumed();
         let u_coeff = symbol_reader.read_hybrid_uint_clustered(clustered_context, reader)?;
         let end_bits = reader.bits_consumed();
-        let coeff = unpack_signed(u_coeff);
+        let coeff = shifted_vardct_ac_coefficient(u_coeff, coefficient_shift)?;
         let coefficient_position = coefficient_order_position(
             natural_coeff_orders,
             coeff_orders,
@@ -5429,6 +5437,18 @@ fn decode_vardct_ac_block_probe(
         placed_nonzero_coefficients,
         placed_coefficient_checksum,
     })
+}
+
+fn shifted_vardct_ac_coefficient(u_coeff: u32, coefficient_shift: u32) -> Result<i32> {
+    let scale = 1i32
+        .checked_shl(coefficient_shift)
+        .ok_or(Error::InvalidCodestream("invalid AC pass shift"))?;
+    if scale <= 0 {
+        return Err(Error::InvalidCodestream("invalid AC pass shift"));
+    }
+    unpack_signed(u_coeff)
+        .checked_mul(scale)
+        .ok_or(Error::InvalidCodestream("invalid AC coefficient"))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -10178,6 +10198,21 @@ mod tests {
         assert_eq!(
             interpolate_custom(0.0, 0.0, &[1.0]),
             Err(Error::InvalidCodestream("invalid dequant matrix"))
+        );
+    }
+
+    #[test]
+    fn ac_coefficients_apply_pass_shift_with_checked_overflow() {
+        assert_eq!(shifted_vardct_ac_coefficient(0, 3), Ok(0));
+        assert_eq!(shifted_vardct_ac_coefficient(2, 2), Ok(4));
+        assert_eq!(shifted_vardct_ac_coefficient(1, 2), Ok(-4));
+        assert_eq!(
+            shifted_vardct_ac_coefficient(2, 31),
+            Err(Error::InvalidCodestream("invalid AC pass shift"))
+        );
+        assert_eq!(
+            shifted_vardct_ac_coefficient(2, 32),
+            Err(Error::InvalidCodestream("invalid AC pass shift"))
         );
     }
 

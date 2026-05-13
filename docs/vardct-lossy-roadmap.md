@@ -48,8 +48,6 @@ Audit date: 2026-05-13.
   large errors against `djxl`, so the milestone 3 acceptance tolerance
   (RGBA8 max absolute channel error <= 2 and mean <= 0.25) is not yet met for
   common generated images.
-- Tiny fixture coverage is not yet explicit as a matrix of 1x1, 2x2, 8x8,
-  16x16, 32x32, grayscale, RGB, alpha, and simple gradients.
 - Full JPEG XL color management is not implemented. Public output explicitly
   supports only the currently handled sRGB/XYB/direct/YCbCr paths and should
   keep returning precise `Error::Unsupported` messages for unsupported
@@ -274,3 +272,11 @@ Focus:
   JPEG-color-transform and subsampled YCbCr fixtures still have large errors and
   milestone-3 conformance remains open. Focused codec/public fixture tests pass
   with updated regression snapshots.
+- 2026-05-13: Aligned AC coefficient decoding more closely with libjxl by
+  applying each frame pass shift to decoded AC coefficients and by using the
+  shifted block position for subsampled chroma quant-field entropy contexts
+  while preserving the full-resolution DC context. Added unit coverage for
+  pass-shift scaling and checked overflow behavior. Focused RGB JPEG and YCbCr
+  4:2:0/axis/odd-dimension VarDCT fixture tests pass; the common generated
+  JPEG-color-transform and subsampled YCbCr oracle metrics remain above the
+  milestone-3 tight tolerance, so conformance work remains open.
