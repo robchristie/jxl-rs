@@ -991,7 +991,7 @@ pub fn assemble_vardct_xyb_image_for_pass(
 /// group using the parsed DC coefficients and zero AC coefficients, then applies
 /// the same loop filters as `assemble_vardct_xyb_image`.
 pub fn assemble_vardct_dc_xyb_image(plan: &VarDctDecodePlan) -> Result<Option<VarDctXybImage>> {
-    let mut image = assemble_vardct_xyb_image_dc_only(plan, 8.0)?;
+    let mut image = assemble_vardct_xyb_image_dc_only(plan, 1.0)?;
     if let Some(image) = image.as_mut() {
         apply_vardct_gaborish(image, &plan.loop_filter);
         if plan.loop_filter.epf_iters >= 1 {
@@ -1168,7 +1168,7 @@ pub fn assemble_vardct_dc_srgb8_image(plan: &VarDctDecodePlan) -> Result<Option<
 ///
 /// This is a diagnostic helper for checking the normalization boundary between
 /// parsed VarDCT DC coefficients and inverse DCT spatialization. A multiplier
-/// of `8.0` is equivalent to `assemble_vardct_dc_srgb8_image`.
+/// of `1.0` is equivalent to `assemble_vardct_dc_srgb8_image`.
 pub fn assemble_vardct_dc_srgb8_image_with_multiplier(
     plan: &VarDctDecodePlan,
     dc_multiplier: f32,
@@ -6029,7 +6029,7 @@ fn spatialize_vardct_ac_grid(
         metadata,
         chroma_subsampling,
         dc_groups,
-        8.0,
+        1.0,
     )
 }
 
@@ -6100,8 +6100,14 @@ fn spatialize_vardct_ac_grid_with_dc_multiplier(
                 }
             }
             if let Some(dc_grid) = &dc_grid {
-                coefficients[0] =
-                    dc_grid.coefficient(channel, block.block_x, block.block_y)? * dc_multiplier;
+                write_lowest_frequencies_from_dc(
+                    &mut coefficients,
+                    transform,
+                    dc_grid,
+                    channel,
+                    block,
+                    dc_multiplier,
+                )?;
             }
             let samples = match transform.kind {
                 SpatialTransformKind::Identity => inverse_identity_8x8(&coefficients)?,
@@ -6114,9 +6120,9 @@ fn spatialize_vardct_ac_grid_with_dc_multiplier(
                     if transform.width == 8 && transform.height == 8 {
                         let mut block = [0.0f32; DCT_BLOCK_SIZE];
                         block.copy_from_slice(&coefficients);
-                        inverse_dct_8x8(&block)?.to_vec()
+                        inverse_scaled_dct_8x8(&block)?.to_vec()
                     } else {
-                        inverse_dct_rect(transform.width, transform.height, &coefficients)?
+                        inverse_scaled_dct_rect(transform.width, transform.height, &coefficients)?
                     }
                 }
             };
@@ -6188,6 +6194,61 @@ fn spatial_transform_for_strategy(raw_strategy: usize) -> Option<SpatialTransfor
         height,
         kind,
     })
+}
+
+fn write_lowest_frequencies_from_dc(
+    coefficients: &mut [f32],
+    transform: SpatialTransform,
+    dc_grid: &VarDctDcCoefficientGrid,
+    channel: usize,
+    block: VarDctFirstAcBlock,
+    dc_multiplier: f32,
+) -> Result<()> {
+    if coefficients.len() != transform.width * transform.height {
+        return Err(Error::InvalidCodestream("invalid DCT dimensions"));
+    }
+    let strategy_width = *STRATEGY_BLOCKS_X
+        .get(block.raw_strategy)
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+    let strategy_height = *STRATEGY_BLOCKS_Y
+        .get(block.raw_strategy)
+        .ok_or(Error::InvalidCodestream("invalid AC strategy"))?;
+
+    if !matches!(transform.kind, SpatialTransformKind::Dct)
+        || strategy_width == 1 && strategy_height == 1
+    {
+        coefficients[0] =
+            dc_grid.coefficient(channel, block.block_x, block.block_y)? * dc_multiplier;
+        return Ok(());
+    }
+
+    let mut dc = vec![0.0f32; strategy_width * strategy_height];
+    for y in 0..strategy_height {
+        for x in 0..strategy_width {
+            dc[y * strategy_width + x] =
+                dc_grid.coefficient(channel, block.block_x + x, block.block_y + y)? * dc_multiplier;
+        }
+    }
+
+    let lf = scaled_dct_rect(strategy_width, strategy_height, &dc)?;
+    if strategy_height < strategy_width {
+        for y in 0..strategy_height {
+            for x in 0..strategy_width {
+                coefficients[y * transform.width + x] = lf[y * strategy_width + x]
+                    * dct_resample_scale(strategy_height, transform.height, y)?
+                    * dct_resample_scale(strategy_width, transform.width, x)?;
+            }
+        }
+    } else {
+        for y in 0..strategy_width {
+            for x in 0..strategy_height {
+                coefficients[y * transform.width + x] = lf[y * strategy_height + x]
+                    * dct_resample_scale(strategy_width, transform.width, y)?
+                    * dct_resample_scale(strategy_height, transform.height, x)?;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn dequantized_coefficient_for_transform_position(
@@ -6496,8 +6557,16 @@ fn write_spatial_sample(grid: &mut VarDctAcSpatialChannelGrid, index: usize, val
     grid.sample_checksum = checksum_dequantized_coefficient(grid.sample_checksum, index, value);
 }
 
+#[cfg(test)]
 fn inverse_dct_8x8(coefficients: &[f32; DCT_BLOCK_SIZE]) -> Result<[f32; DCT_BLOCK_SIZE]> {
     let samples = inverse_dct_rect(8, 8, coefficients)?;
+    let mut block = [0.0f32; DCT_BLOCK_SIZE];
+    block.copy_from_slice(&samples);
+    Ok(block)
+}
+
+fn inverse_scaled_dct_8x8(coefficients: &[f32; DCT_BLOCK_SIZE]) -> Result<[f32; DCT_BLOCK_SIZE]> {
+    let samples = inverse_scaled_dct_rect(8, 8, coefficients)?;
     let mut block = [0.0f32; DCT_BLOCK_SIZE];
     block.copy_from_slice(&samples);
     Ok(block)
@@ -6608,7 +6677,7 @@ fn inverse_dct4x4_8x8(coefficients: &[f32]) -> Result<Vec<f32>> {
                     block[iy * 4 + ix] = coefficients[(y + iy * 2) * 8 + x + ix * 2];
                 }
             }
-            let samples = inverse_dct_rect(4, 4, &block)?;
+            let samples = inverse_scaled_dct_rect(4, 4, &block)?;
             for iy in 0..4 {
                 for ix in 0..4 {
                     pixels[(y * 4 + iy) * 8 + x * 4 + ix] = samples[iy * 4 + ix];
@@ -6639,7 +6708,7 @@ fn inverse_dct4x8_8x8(coefficients: &[f32]) -> Result<Vec<f32>> {
                 block[iy * 8 + ix] = coefficients[(y + iy * 2) * 8 + ix];
             }
         }
-        let samples = inverse_dct_rect(8, 4, &block)?;
+        let samples = inverse_scaled_dct_rect(8, 4, &block)?;
         for iy in 0..4 {
             for ix in 0..8 {
                 pixels[(y * 4 + iy) * 8 + ix] = samples[iy * 8 + ix];
@@ -6669,7 +6738,7 @@ fn inverse_dct8x4_8x8(coefficients: &[f32]) -> Result<Vec<f32>> {
                 block[ix * 4 + iy] = coefficients[(x + iy * 2) * 8 + ix];
             }
         }
-        let samples = inverse_dct_rect(4, 8, &block)?;
+        let samples = inverse_scaled_dct_rect(4, 8, &block)?;
         for iy in 0..8 {
             for ix in 0..4 {
                 pixels[iy * 8 + x * 4 + ix] = samples[iy * 4 + ix];
@@ -6711,6 +6780,55 @@ fn inverse_dct_rect(width: usize, height: usize, coefficients: &[f32]) -> Result
         }
     }
     Ok(output)
+}
+
+fn inverse_scaled_dct_rect(width: usize, height: usize, coefficients: &[f32]) -> Result<Vec<f32>> {
+    let mut output = inverse_dct_rect(width, height, coefficients)?;
+    let scale = ((width * height) as f32).sqrt();
+    for sample in &mut output {
+        *sample *= scale;
+    }
+    Ok(output)
+}
+
+fn scaled_dct_rect(width: usize, height: usize, samples: &[f32]) -> Result<Vec<f32>> {
+    if width == 0 || height == 0 || samples.len() != width * height {
+        return Err(Error::InvalidCodestream("invalid DCT dimensions"));
+    }
+    let inv_sqrt_2 = std::f32::consts::FRAC_1_SQRT_2;
+    let cos_x = dct_cos_table(width);
+    let cos_y = dct_cos_table(height);
+    let mut output = vec![0.0f32; width * height];
+    let scale = 2.0 / (width * height) as f32;
+    for v in 0..height {
+        let cv = if v == 0 { inv_sqrt_2 } else { 1.0 };
+        for u in 0..width {
+            let cu = if u == 0 { inv_sqrt_2 } else { 1.0 };
+            let mut sum = 0.0f32;
+            for y in 0..height {
+                for x in 0..width {
+                    sum += samples[y * width + x] * cos_x[x * width + u] * cos_y[y * height + v];
+                }
+            }
+            output[v * width + u] = scale * cu * cv * sum;
+        }
+    }
+    Ok(output)
+}
+
+fn dct_resample_scale(from: usize, to: usize, index: usize) -> Result<f32> {
+    if to != from * 8 || index >= from {
+        return Err(Error::InvalidCodestream("invalid DCT resample scale"));
+    }
+    let to = to as f32;
+    let index = index as f32;
+    let downsample = (index * std::f32::consts::PI / (2.0 * to)).cos()
+        * (index * std::f32::consts::PI / to).cos()
+        * (index * std::f32::consts::PI / (to / 2.0)).cos();
+    if downsample == 0.0 {
+        return Err(Error::InvalidCodestream("invalid DCT resample scale"));
+    }
+    Ok(1.0 / downsample)
 }
 
 fn dct_cos_table(size: usize) -> Vec<f32> {
@@ -6769,7 +6887,7 @@ fn inverse_afv_8x8(kind: usize, coefficients: &[f32]) -> Result<Vec<f32>> {
             dct4[y * 4 + x] = coefficients[(y * 2) * 8 + x * 2 + 1];
         }
     }
-    let dct4_samples = inverse_dct_rect(4, 4, &dct4)?;
+    let dct4_samples = inverse_scaled_dct_rect(4, 4, &dct4)?;
     let dct4_origin_x = if afv_x == 1 { 0 } else { 4 };
     let dct4_origin_y = afv_y * 4;
     for y in 0..4 {
@@ -6788,7 +6906,7 @@ fn inverse_afv_8x8(kind: usize, coefficients: &[f32]) -> Result<Vec<f32>> {
             dct4x8[y * 8 + x] = coefficients[(1 + y * 2) * 8 + x];
         }
     }
-    let dct4x8_samples = inverse_dct_rect(8, 4, &dct4x8)?;
+    let dct4x8_samples = inverse_scaled_dct_rect(8, 4, &dct4x8)?;
     let dct4x8_origin_y = if afv_y == 1 { 0 } else { 4 };
     for y in 0..4 {
         for x in 0..8 {
@@ -10158,17 +10276,17 @@ mod tests {
         assert!(samples.iter().all(|sample| (*sample - 1.0).abs() < 1.0e-6));
 
         let mut dct4 = [0.0f32; DCT_BLOCK_SIZE];
-        dct4[0] = 4.0;
+        dct4[0] = 1.0;
         let samples = inverse_dct4x4_8x8(&dct4).unwrap();
         assert!(samples.iter().all(|sample| (*sample - 1.0).abs() < 1.0e-6));
 
         let mut dct4x8 = [0.0f32; DCT_BLOCK_SIZE];
-        dct4x8[0] = 32.0f32.sqrt();
+        dct4x8[0] = 1.0;
         let samples = inverse_dct4x8_8x8(&dct4x8).unwrap();
         assert!(samples.iter().all(|sample| (*sample - 1.0).abs() < 1.0e-6));
 
         let mut dct8x4 = [0.0f32; DCT_BLOCK_SIZE];
-        dct8x4[0] = 32.0f32.sqrt();
+        dct8x4[0] = 1.0;
         let samples = inverse_dct8x4_8x8(&dct8x4).unwrap();
         assert!(samples.iter().all(|sample| (*sample - 1.0).abs() < 1.0e-6));
     }
@@ -10252,10 +10370,10 @@ mod tests {
         coefficients[0] = 1.0;
         let samples = inverse_afv_8x8(3, &coefficients).unwrap();
 
-        assert!((samples[0] - 0.17677669).abs() < 1.0e-6);
-        assert!((samples[3 * 8 + 7] - 0.17677669).abs() < 1.0e-6);
-        assert!((samples[4 * 8] - 0.25).abs() < 1.0e-6);
-        assert!((samples[7 * 8 + 3] - 0.25).abs() < 1.0e-6);
+        assert!((samples[0] - 1.0).abs() < 1.0e-6);
+        assert!((samples[3 * 8 + 7] - 1.0).abs() < 1.0e-6);
+        assert!((samples[4 * 8] - 1.0).abs() < 1.0e-6);
+        assert!((samples[7 * 8 + 3] - 1.0).abs() < 1.0e-6);
         assert!((samples[4 * 8 + 4] - 1.0).abs() < 1.0e-6);
         assert!((samples[7 * 8 + 7] - 1.0).abs() < 1.0e-6);
     }

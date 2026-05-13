@@ -4553,10 +4553,10 @@ mod tests {
         assert_eq!(
             metrics,
             Srgb8OracleMetrics {
-                max_abs_error: 163,
-                sum_abs_error: 83_008_163,
-                checksum: 11583904892958779392,
-                anchors: vec![115, 113, 72, 64],
+                max_abs_error: 227,
+                sum_abs_error: 95_303_808,
+                checksum: 18040347820900001792,
+                anchors: vec![111, 85, 73, 64],
                 reference_anchors: vec![111, 126, 51, 67],
             }
         );
@@ -4632,10 +4632,10 @@ mod tests {
         assert_eq!(
             metrics,
             Srgb8OracleMetrics {
-                max_abs_error: 172,
-                sum_abs_error: 73_181_470,
-                checksum: 10211171078667196464,
-                anchors: vec![115, 132, 63, 63],
+                max_abs_error: 239,
+                sum_abs_error: 81_817_611,
+                checksum: 4979095562930116656,
+                anchors: vec![108, 126, 56, 63],
                 reference_anchors: vec![108, 127, 50, 67],
             }
         );
@@ -4703,10 +4703,10 @@ mod tests {
         assert_eq!(
             metrics,
             Srgb8OracleMetrics {
-                max_abs_error: 148,
-                sum_abs_error: 25_258_774,
-                checksum: 8569466704890236855,
-                anchors: vec![112, 83, 94],
+                max_abs_error: 204,
+                sum_abs_error: 28_036_256,
+                checksum: 5676557540999368631,
+                anchors: vec![106, 76, 94],
                 reference_anchors: vec![106, 71, 99],
             }
         );
@@ -5278,10 +5278,10 @@ mod tests {
             assert_eq!(
                 metrics,
                 Srgb8OracleMetrics {
-                    max_abs_error: 255,
-                    sum_abs_error: 7_696_330,
-                    checksum: 15_553_316_425_935_415_375,
-                    anchors: vec![1, 25, 117],
+                    max_abs_error: 248,
+                    sum_abs_error: 2_741_641,
+                    checksum: 12_257_301_707_036_551_247,
+                    anchors: vec![0, 38, 255],
                     reference_anchors: vec![0, 21, 255],
                 }
             );
@@ -5492,10 +5492,10 @@ mod tests {
             assert_eq!(
                 metrics,
                 Srgb8OracleMetrics {
-                    max_abs_error: 227,
-                    sum_abs_error: 174_532_848,
-                    checksum: 8_729_814_455_326_359_483,
-                    anchors: vec![0, 6, 29],
+                    max_abs_error: 18,
+                    sum_abs_error: 940_536,
+                    checksum: 2_774_858_083_406_069_691,
+                    anchors: vec![0, 0, 254],
                     reference_anchors: vec![0, 4, 254],
                 }
             );
@@ -5629,10 +5629,10 @@ mod tests {
             assert_eq!(
                 metrics,
                 Srgb8OracleMetrics {
-                    max_abs_error: 248,
-                    sum_abs_error: 2_005_384,
-                    checksum: 4_346_558_826_765_492_868,
-                    anchors: vec![6, 6, 43],
+                    max_abs_error: 255,
+                    sum_abs_error: 538_515,
+                    checksum: 18_409_212_659_787_833_988,
+                    anchors: vec![3, 78, 103],
                     reference_anchors: vec![6, 1, 249],
                 }
             );
@@ -5950,10 +5950,10 @@ mod tests {
             assert_eq!(
                 metrics,
                 Srgb8OracleMetrics {
-                    max_abs_error: 255,
-                    sum_abs_error: 34_096,
-                    checksum: 711_771_474_150_067_930,
-                    anchors: vec![42, 255, 80],
+                    max_abs_error: 142,
+                    sum_abs_error: 16_384,
+                    checksum: 7_746_607_339_007_545_050,
+                    anchors: vec![0, 0, 230],
                     reference_anchors: vec![3, 0, 249],
                 }
             );
@@ -6142,10 +6142,10 @@ mod tests {
             assert_eq!(
                 metrics,
                 Srgb8OracleMetrics {
-                    max_abs_error: 251,
-                    sum_abs_error: 38_366,
-                    checksum: 15_114_422_266_425_618_528,
-                    anchors: vec![24, 28, 59],
+                    max_abs_error: 255,
+                    sum_abs_error: 12_975,
+                    checksum: 4_627_091_285_992_976_480,
+                    anchors: vec![0, 206, 61],
                     reference_anchors: vec![0, 197, 137],
                 }
             );

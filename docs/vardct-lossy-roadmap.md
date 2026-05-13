@@ -263,3 +263,14 @@ Focus:
   snapshots now use the lower-error B-minus-bias path; common generated RGB
   VarDCT still remains above milestone-3 tight tolerance and needs further AC,
   filtering, and color-output work.
+- 2026-05-13: Advanced AC/DC spatial reconstruction by matching libjxl's scaled
+  VarDCT inverse-DCT normalization instead of compensating only the DC
+  coefficient with a multiplier of `8.0`. Large DCT strategies now derive their
+  full low-frequency coefficient rectangle from the decoded DC image using the
+  same reinterpreting-DCT resampling factors as libjxl. This substantially
+  improves several generated XYB/RGBA oracle metrics (for example the common
+  public RGB fixture sum-absolute error drops from `7_696_330` to `2_741_641`,
+  and the multigroup fixture drops from `174_532_848` to `940_536`), but
+  JPEG-color-transform and subsampled YCbCr fixtures still have large errors and
+  milestone-3 conformance remains open. Focused codec/public fixture tests pass
+  with updated regression snapshots.
