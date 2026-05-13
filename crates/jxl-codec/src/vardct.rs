@@ -10002,6 +10002,34 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_vardct_paths_report_precise_errors() {
+        assert_eq!(
+            shifted_axis(16, 2),
+            Err(Error::Unsupported("VarDCT chroma upsampling"))
+        );
+        assert_eq!(
+            upsampling_weights(4, &CustomTransformData::default()),
+            Err(Error::Unsupported("VarDCT frame upsampling"))
+        );
+        assert_eq!(
+            upsampling_weights(
+                1,
+                &CustomTransformData {
+                    upsampling2_weights: Some(vec![1.0; 14]),
+                    ..CustomTransformData::default()
+                },
+            ),
+            Err(Error::InvalidCodestream(
+                "invalid custom upsampling weight count"
+            ))
+        );
+        assert_eq!(
+            default_dequant_matrix(27, 0),
+            Err(Error::InvalidCodestream("invalid AC strategy"))
+        );
+    }
+
+    #[test]
     fn inverse_dct_rect_large_rectangular_dc_only_is_constant() {
         for (width, height) in [(32, 64), (64, 32)] {
             let mut coefficients = vec![0.0f32; width * height];

@@ -136,6 +136,9 @@ Progress:
   path.
 - Replaced dequant interpolation `unwrap` calls with explicit invalid
   codestream errors, and added a unit regression for empty/invalid band inputs.
+- Added unit coverage pinning precise errors for unsupported chroma upsampling,
+  unsupported frame upsampling, invalid custom upsampling weight counts, and
+  invalid AC strategies.
 
 ### Milestone 3: Baseline VarDCT RGB8 Still Decode
 
@@ -231,4 +234,9 @@ Focus:
   test passes, production `crates/jxl-codec/src/vardct.rs` no longer has
   non-test `unwrap`/`expect` hits, and the required milestone gates pass:
   `cargo fmt --all -- --check`, `cargo check --workspace`,
+  `cargo test -p jxl-codec --lib`, and `cargo test --workspace`.
+- 2026-05-13: Added `unsupported_vardct_paths_report_precise_errors` to lock
+  down current precise `Unsupported`/`InvalidCodestream` errors for VarDCT
+  upsampling and strategy edge cases. The required gates pass after this added
+  coverage: `cargo fmt --all -- --check`, `cargo check --workspace`,
   `cargo test -p jxl-codec --lib`, and `cargo test --workspace`.
