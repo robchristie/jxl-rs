@@ -845,9 +845,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .map(|channel| (channel.nonzero_samples, channel.sample_checksum))
             .collect::<Vec<_>>(),
         vec![
-            (49152, 15850391318828775193),
-            (49152, 2652041244726450460),
-            (49152, 18365478346467260475),
+            (49152, 12865247878200159687),
+            (49152, 12958589361259547985),
+            (49152, 2870746842737573471),
         ]
     );
     assert_eq!(
@@ -925,9 +925,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .map(|channel| (channel.nonzero_samples, channel.sample_checksum))
             .collect::<Vec<_>>(),
         vec![
-            (39513, 17992774348778262837),
-            (49054, 15964727946261513518),
-            (49152, 990025953821560021),
+            (39513, 16602531916670020215),
+            (49054, 4554467315849313530),
+            (49152, 17679640084133481600),
         ]
     );
     assert_eq!(
@@ -1016,9 +1016,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(
         xyb_summary,
         vec![
-            (61440, 9385032682031128660),
-            (61440, 17430404850075690185),
-            (61440, 17171691956582291503),
+            (61440, 8098615359666622216),
+            (61440, 11569692353460441796),
+            (61440, 12268745198817451740),
         ]
     );
     assert_eq!(
@@ -1080,9 +1080,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     assert_eq!(
         rgb_summary,
         vec![
-            (61440, 17558200003336331986),
-            (61440, 9963166331175387351),
-            (61440, 5897739493444197146),
+            (61440, 16015692318636981017),
+            (61440, 7254549911123281274),
+            (61440, 4751782425829869953),
         ]
     );
     assert_eq!(
@@ -1110,12 +1110,12 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         vec![
             (
                 61440,
-                31137,
+                31142,
                 0,
-                3174347978,
+                3174314021,
                 1027470384,
-                1120854343,
-                7265335202841595457,
+                1120854398,
+                9108193112731214009,
                 vec![3097128266, 3155237527, 3130974630],
             ),
             (
@@ -1124,8 +1124,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
                 0,
                 3178456871,
                 1063587484,
-                1189326399,
-                4390497594293331091,
+                1189326396,
+                3151663788638961778,
                 vec![3153019850, 1054164370, 1063086696],
             ),
             (
@@ -1134,8 +1134,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
                 127,
                 3198789202,
                 1067874434,
-                1188995581,
-                7787541040778544539,
+                1188995595,
+                2517918665572310776,
                 vec![3145145085, 1049557077, 1063049416],
             ),
         ]
@@ -1158,32 +1158,32 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         vec![
             (
                 61440,
-                4142,
-                1394,
-                3211250129,
+                4155,
+                1413,
+                3211226800,
                 1073865490,
-                1184124014,
-                613444112842663629,
+                1184125858,
+                6326516295377102127,
                 vec![3123335189, 1017006043, 1065051946],
             ),
             (
                 61440,
-                2787,
+                2801,
                 894,
                 3198092248,
                 1070364025,
-                1184126494,
-                7876225388212271425,
+                1184125816,
+                4690038533268526606,
                 vec![3120939141, 1049185000, 1066110903],
             ),
             (
                 61440,
-                3652,
+                3653,
                 1938,
                 3205316712,
                 1085273359,
-                1183707753,
-                1704872941483866266,
+                1183707683,
+                4220006467812397990,
                 vec![3073582720, 1024272912, 1065946734],
             ),
         ]
@@ -1202,8 +1202,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
     ];
     let metrics = srgb8_oracle_metrics(&srgb8_image, &reference, &anchor_indices);
     assert_eq!(metrics.max_abs_error, 248);
-    assert_eq!(metrics.sum_abs_error, 2741641);
-    assert_eq!(metrics.checksum, 14373725793394978252);
+    assert_eq!(metrics.sum_abs_error, 2742408);
+    assert_eq!(metrics.checksum, 1068308688117112698);
     assert_eq!(metrics.anchors, vec![0, 0, 0, 147, 113, 243, 253, 255, 255]);
     assert_eq!(
         metrics.reference_anchors,
@@ -1232,31 +1232,31 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
         vec![
             (
                 VarDctXybInverseVariant::BMinusBias,
-                3652,
+                3653,
                 1938,
                 248,
-                2741641,
-                14373725793394978252,
+                2742408,
+                1068308688117112698,
                 vec![0, 0, 0, 147, 113, 243, 253, 255, 255],
                 vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
             ),
             (
                 VarDctXybInverseVariant::BPlusBias,
-                59471,
+                59465,
                 66,
                 255,
-                9732558,
-                389319669512076258,
+                9732013,
+                332664752958368614,
                 vec![2, 2, 0, 163, 134, 36, 255, 255, 0],
                 vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
             ),
             (
                 VarDctXybInverseVariant::NegBMinusBias,
-                61343,
+                61341,
                 0,
                 255,
-                10251241,
-                11954353597570948216,
+                10251448,
+                16695470632250280547,
                 vec![0, 0, 3, 173, 146, 0, 255, 255, 0],
                 vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
             ),
@@ -1265,8 +1265,8 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
                 61436,
                 0,
                 255,
-                11082393,
-                8870768937979863692,
+                11082962,
+                15864602278442225803,
                 vec![2, 2, 0, 186, 162, 0, 255, 255, 0],
                 vec![0, 1, 1, 125, 128, 124, 253, 255, 255],
             ),
@@ -1532,9 +1532,9 @@ fn generated_split_vardct_exposes_global_cursor_when_available() {
             .map(|channel| (channel.nonzero_coefficients, channel.coefficient_checksum))
             .collect::<Vec<_>>(),
         vec![
-            (1754, 7928736388124340981),
-            (5649, 3488116285163030744),
-            (6259, 12462676879008589506),
+            (1754, 14580874636130537152),
+            (5649, 15975008009904309592),
+            (6259, 15252065469429774247),
         ]
     );
     assert_eq!(
@@ -2798,35 +2798,35 @@ fn generated_vardct_xyb_inverse_variants_compare_against_oracle_when_available()
                 vec![
                     (
                         VarDctXybInverseVariant::BMinusBias,
-                        3652,
+                        3653,
                         1938,
                         248,
-                        2741641,
-                        14373725793394978252,
+                        2742408,
+                        1068308688117112698,
                     ),
                     (
                         VarDctXybInverseVariant::BPlusBias,
-                        59471,
+                        59465,
                         66,
                         255,
-                        9732558,
-                        389319669512076258,
+                        9732013,
+                        332664752958368614,
                     ),
                     (
                         VarDctXybInverseVariant::NegBMinusBias,
-                        61343,
+                        61341,
                         0,
                         255,
-                        10251241,
-                        11954353597570948216,
+                        10251448,
+                        16695470632250280547,
                     ),
                     (
                         VarDctXybInverseVariant::NegBPlusBias,
                         61436,
                         0,
                         255,
-                        11082393,
-                        8870768937979863692,
+                        11082962,
+                        15864602278442225803,
                     ),
                 ],
             ),
@@ -2835,35 +2835,35 @@ fn generated_vardct_xyb_inverse_variants_compare_against_oracle_when_available()
                 vec![
                     (
                         VarDctXybInverseVariant::BMinusBias,
-                        4732,
+                        4722,
                         1937,
                         247,
-                        3029972,
-                        11792708887090831593,
+                        3029699,
+                        18200788080454481854,
                     ),
                     (
                         VarDctXybInverseVariant::BPlusBias,
-                        56326,
+                        56333,
                         57,
                         255,
-                        9434322,
-                        5743956474279855798,
+                        9434094,
+                        8626750466192183360,
                     ),
                     (
                         VarDctXybInverseVariant::NegBMinusBias,
-                        61292,
+                        61297,
                         0,
                         255,
-                        10360285,
-                        11209276482035980597,
+                        10360710,
+                        10111309770518724237,
                     ),
                     (
                         VarDctXybInverseVariant::NegBPlusBias,
                         61436,
                         0,
                         255,
-                        11087669,
-                        10772712659802390214,
+                        11088184,
+                        11929108587880499072,
                     ),
                 ],
             ),
@@ -2872,35 +2872,35 @@ fn generated_vardct_xyb_inverse_variants_compare_against_oracle_when_available()
                 vec![
                     (
                         VarDctXybInverseVariant::BMinusBias,
-                        2800,
+                        2808,
                         1309,
                         247,
-                        1283108,
-                        5288149016567628284,
+                        1285017,
+                        16033249116048795783,
                     ),
                     (
                         VarDctXybInverseVariant::BPlusBias,
                         60081,
                         83,
                         255,
-                        9377191,
-                        16038912129668714454,
+                        9377249,
+                        3857167745154951576,
                     ),
                     (
                         VarDctXybInverseVariant::NegBMinusBias,
                         61321,
                         0,
                         255,
-                        9928147,
-                        2882951572873066654,
+                        9928842,
+                        16441985464586906903,
                     ),
                     (
                         VarDctXybInverseVariant::NegBPlusBias,
                         61434,
                         0,
                         255,
-                        10906890,
-                        1236329964018549970,
+                        10907514,
+                        1286428232611939582,
                     ),
                 ],
             ),
@@ -2909,35 +2909,35 @@ fn generated_vardct_xyb_inverse_variants_compare_against_oracle_when_available()
                 vec![
                     (
                         VarDctXybInverseVariant::BMinusBias,
-                        3642,
+                        3643,
                         1937,
                         247,
-                        2738815,
-                        4445356743380448339,
+                        2739480,
+                        7493252930738850182,
                     ),
                     (
                         VarDctXybInverseVariant::BPlusBias,
-                        59470,
+                        59464,
                         66,
                         255,
-                        9729723,
-                        5305320873888763497,
+                        9729165,
+                        7570616067918567980,
                     ),
                     (
                         VarDctXybInverseVariant::NegBMinusBias,
-                        61342,
+                        61340,
                         0,
                         255,
-                        10249278,
-                        14410992508284781961,
+                        10249470,
+                        9133659197205528592,
                     ),
                     (
                         VarDctXybInverseVariant::NegBPlusBias,
                         61436,
                         0,
                         255,
-                        11081607,
-                        912333921255605732,
+                        11082170,
+                        15865241037781375455,
                     ),
                 ],
             ),
@@ -2949,32 +2949,32 @@ fn generated_vardct_xyb_inverse_variants_compare_against_oracle_when_available()
                         3653,
                         1936,
                         249,
-                        2743867,
-                        17321932127469049327,
+                        2744679,
+                        2239561600297608234,
                     ),
                     (
                         VarDctXybInverseVariant::BPlusBias,
-                        59471,
+                        59465,
                         66,
                         255,
-                        9734139,
-                        17857732805395840889,
+                        9733636,
+                        4368006638114235584,
                     ),
                     (
                         VarDctXybInverseVariant::NegBMinusBias,
-                        61344,
+                        61342,
                         0,
                         255,
-                        10252375,
-                        10536681780899653441,
+                        10252583,
+                        11453515593054450160,
                     ),
                     (
                         VarDctXybInverseVariant::NegBPlusBias,
                         61436,
                         0,
                         255,
-                        11082520,
-                        2803169213890053142,
+                        11083054,
+                        4437692378497589929,
                     ),
                 ],
             ),
@@ -3187,9 +3187,9 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
     assert_eq!(
         xyb_summary,
         vec![
-            (61440, 9385032682031128660),
-            (61440, 17430404850075690185),
-            (61440, 17171691956582291503),
+            (61440, 8098615359666622216),
+            (61440, 11569692353460441796),
+            (61440, 12268745198817451740),
         ]
     );
     assert_eq!(
@@ -3201,9 +3201,9 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
     assert_eq!(
         rgb_summary,
         vec![
-            (61440, 17558200003336331986),
-            (61440, 9963166331175387351),
-            (61440, 5897739493444197146),
+            (61440, 16015692318636981017),
+            (61440, 7254549911123281274),
+            (61440, 4751782425829869953),
         ]
     );
     assert_eq!(
@@ -3214,8 +3214,8 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
     );
     if let Some(metrics) = final_metrics {
         assert_eq!(metrics.max_abs_error, 248);
-        assert_eq!(metrics.sum_abs_error, 2741641);
-        assert_eq!(metrics.checksum, 14373725793394978252);
+        assert_eq!(metrics.sum_abs_error, 2742408);
+        assert_eq!(metrics.checksum, 1068308688117112698);
         assert_eq!(metrics.anchors, vec![0, 0, 0, 147, 113, 243, 253, 255, 255]);
         assert_eq!(
             metrics.reference_anchors,
@@ -3227,8 +3227,8 @@ fn generated_progressive_ac_vardct_exposes_pass_payloads_when_available() {
     assert_eq!(
         pass0_summary,
         (
-            179399,
-            16089766586120071512,
+            179409,
+            13506913772334891402,
             vec![1, 1, 1, 7, 129, 50, 248, 255, 255],
         )
     );
@@ -3328,8 +3328,8 @@ fn generated_vardct_nondefault_qf_context_map_decodes_coefficients_when_availabl
     ];
     let metrics = srgb8_oracle_metrics(&srgb, &reference, &anchor_indices);
     assert_eq!(metrics.max_abs_error, 255);
-    assert_eq!(metrics.sum_abs_error, 62_571_873);
-    assert_eq!(metrics.checksum, 8858212537434057211);
+    assert_eq!(metrics.sum_abs_error, 62_570_488);
+    assert_eq!(metrics.checksum, 10939400536361335844);
     assert_eq!(metrics.anchors, vec![55, 146, 76, 103]);
     assert_eq!(metrics.reference_anchors, vec![77, 133, 52, 100]);
 }
@@ -3869,8 +3869,8 @@ fn generated_vardct_intensity_target_scales_opsin_plan_when_available() {
     ];
     let metrics = srgb8_oracle_metrics(&srgb8_image, &reference, &anchor_indices);
     assert_eq!(metrics.max_abs_error, 247);
-    assert_eq!(metrics.sum_abs_error, 3029972);
-    assert_eq!(metrics.checksum, 11792708887090831593);
+    assert_eq!(metrics.sum_abs_error, 3029699);
+    assert_eq!(metrics.checksum, 18200788080454481854);
     assert_eq!(metrics.anchors, [0, 0, 0, 160, 109, 224, 253, 255, 255]);
     assert_eq!(
         metrics.reference_anchors,
@@ -4009,9 +4009,9 @@ fn generated_vardct_no_gaborish_skips_filter_when_available() {
     assert_eq!(
         xyb_summary,
         vec![
-            (61440, 18164562279880390674),
-            (61440, 16006166379818944225),
-            (61440, 10193039600311712553),
+            (61440, 6308066631706377914),
+            (61440, 1381164687529722900),
+            (61440, 14678675351480520769),
         ]
     );
     assert_eq!(
@@ -4023,9 +4023,9 @@ fn generated_vardct_no_gaborish_skips_filter_when_available() {
     assert_eq!(
         rgb_summary,
         vec![
-            (61440, 17194785628176345748),
-            (61440, 6363896110045871487),
-            (61440, 10768354042181478703),
+            (61440, 5441725983074524155),
+            (61440, 12834366229438258390),
+            (61440, 9731536551099301313),
         ]
     );
     assert_eq!(
@@ -4035,8 +4035,8 @@ fn generated_vardct_no_gaborish_skips_filter_when_available() {
         ]
     );
     assert_eq!(metrics.max_abs_error, 247);
-    assert_eq!(metrics.sum_abs_error, 1283108);
-    assert_eq!(metrics.checksum, 5288149016567628284);
+    assert_eq!(metrics.sum_abs_error, 1285017);
+    assert_eq!(metrics.checksum, 16033249116048795783);
     assert_eq!(metrics.anchors, vec![0, 0, 0, 125, 130, 131, 255, 255, 255]);
     assert_eq!(
         metrics.reference_anchors,
@@ -4174,9 +4174,9 @@ fn generated_vardct_epf_three_runs_all_filter_passes_when_available() {
     assert_eq!(
         xyb_summary,
         vec![
-            (61440, 5678912476486536306),
-            (61440, 15215069537770981613),
-            (61440, 9366229310652208452),
+            (61440, 16305079945099412019),
+            (61440, 5824101085315985772),
+            (61440, 17338165963749234613),
         ]
     );
     assert_eq!(
@@ -4188,9 +4188,9 @@ fn generated_vardct_epf_three_runs_all_filter_passes_when_available() {
     assert_eq!(
         rgb_summary,
         vec![
-            (61440, 2628679995457061104),
-            (61440, 17887184052528622254),
-            (61440, 3749973273917355863),
+            (61440, 11384426289849295303),
+            (61440, 16903482560458357507),
+            (61440, 9200248807026906968),
         ]
     );
     assert_eq!(
@@ -4200,8 +4200,8 @@ fn generated_vardct_epf_three_runs_all_filter_passes_when_available() {
         ]
     );
     assert_eq!(metrics.max_abs_error, 247);
-    assert_eq!(metrics.sum_abs_error, 2738815);
-    assert_eq!(metrics.checksum, 4445356743380448339);
+    assert_eq!(metrics.sum_abs_error, 2739480);
+    assert_eq!(metrics.checksum, 7493252930738850182);
     assert_eq!(metrics.anchors, vec![0, 0, 0, 147, 113, 243, 252, 255, 255]);
     assert_eq!(
         metrics.reference_anchors,
@@ -4341,9 +4341,9 @@ fn generated_vardct_epf_disabled_keeps_gaborish_when_available() {
     assert_eq!(
         xyb_summary,
         vec![
-            (61440, 15644227229374045733),
-            (61440, 17677627500508994491),
-            (61440, 6649870606892803532),
+            (61440, 12269277033378628287),
+            (61440, 9496292744817164213),
+            (61440, 3781209364293880766),
         ]
     );
     assert_eq!(
@@ -4355,9 +4355,9 @@ fn generated_vardct_epf_disabled_keeps_gaborish_when_available() {
     assert_eq!(
         rgb_summary,
         vec![
-            (61440, 4381433769947646154),
-            (61440, 4347080451413147414),
-            (61440, 9232705628476803454),
+            (61440, 16920807268649032305),
+            (61440, 4834085275386977745),
+            (61440, 16752506764159204022),
         ]
     );
     assert_eq!(
@@ -4367,8 +4367,8 @@ fn generated_vardct_epf_disabled_keeps_gaborish_when_available() {
         ]
     );
     assert_eq!(metrics.max_abs_error, 249);
-    assert_eq!(metrics.sum_abs_error, 2743867);
-    assert_eq!(metrics.checksum, 17321932127469049327);
+    assert_eq!(metrics.sum_abs_error, 2744679);
+    assert_eq!(metrics.checksum, 2239561600297608234);
     assert_eq!(metrics.anchors, vec![0, 0, 0, 147, 113, 243, 253, 255, 255]);
     assert_eq!(
         metrics.reference_anchors,

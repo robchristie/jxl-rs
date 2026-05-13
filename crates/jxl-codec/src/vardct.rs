@@ -7553,17 +7553,11 @@ fn default_dct4_quant_weights(channel: usize) -> Result<Vec<f32>> {
 }
 
 fn default_dct4x8_quant_weights(width: usize, height: usize, channel: usize) -> Result<Vec<f32>> {
-    let base = quant_weights_from_bands(
-        width.min(8),
-        height.min(8),
-        &DCT4X8_QUANT_BANDS[0][channel][..4],
-    )?;
+    let base = quant_weights_from_bands(8, 4, &DCT4X8_QUANT_BANDS[0][channel][..4])?;
     let mut weights = vec![0.0; width * height];
     for y in 0..height {
         for x in 0..width {
-            let source_x = x.min(width.min(8) - 1);
-            let source_y = y.min(height.min(8) - 1);
-            weights[y * width + x] = base[source_y * width.min(8) + source_x];
+            weights[y * width + x] = base[(y / 2).min(3) * 8 + x.min(7)];
         }
     }
     Ok(weights)
@@ -10529,6 +10523,20 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn dct4x8_default_quant_weights_duplicate_reference_rows() {
+        let base = quant_weights_from_bands(8, 4, &DCT4X8_QUANT_BANDS[0][0][..4]).unwrap();
+        let weights = default_dct4x8_quant_weights(8, 8, 0).unwrap();
+
+        for y in 0..8 {
+            for x in 0..8 {
+                assert_eq!(weights[y * 8 + x], base[(y / 2) * 8 + x]);
+            }
+        }
+        assert_eq!(&weights[0..8], &weights[8..16]);
+        assert_eq!(&weights[16..24], &weights[24..32]);
     }
 
     #[test]

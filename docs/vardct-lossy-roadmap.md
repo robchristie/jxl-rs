@@ -175,13 +175,19 @@ Progress:
 
 ### Milestone 5: AC Coefficient Decoding and Dequantization
 
-Status: pending.
+Status: in progress.
 
 Focus:
 
 - Complete common AC token decode, coefficient ordering, context selection,
   nonzero counts, sign/unpack logic, quant matrices, dequantization, and
   malformed coefficient-stream tests.
+
+Progress:
+
+- Matched libjxl's default DCT4X8/DCT8X4 quant-table construction by deriving
+  the 8x8 table from a 4x8 base and duplicating coefficient rows, instead of
+  interpolating an 8x8 table directly.
 
 ### Milestone 6: Inverse Transforms and Block Strategies
 
@@ -292,8 +298,8 @@ Focus:
   full low-frequency coefficient rectangle from the decoded DC image using the
   same reinterpreting-DCT resampling factors as libjxl. This substantially
   improves several generated XYB/RGBA oracle metrics (for example the common
-  public RGB fixture sum-absolute error drops from `7_696_330` to `2_741_641`,
-  and the multigroup fixture drops from `174_532_848` to `940_536`), but
+  public RGB fixture sum-absolute error drops from `7_696_330` to about
+  `2.7M`, and the multigroup fixture drops from `174_532_848` to `940_536`), but
   JPEG-color-transform and subsampled YCbCr fixtures still have large errors and
   milestone-3 conformance remains open. Focused codec/public fixture tests pass
   with updated regression snapshots.
@@ -338,3 +344,9 @@ Focus:
   AC dequantization. Default fixtures are expected to stay unchanged, but
   custom-transform files now use their encoded quant-bias values instead of
   the hard-coded defaults.
+- 2026-05-13: Advanced milestone 5 by correcting default DCT4X8/DCT8X4
+  dequant matrices to match libjxl's 4x8-base row-duplication layout. This
+  changes affected regression snapshots only slightly: the common RGB public
+  fixture sum is now `2_742_408`, and the non-default QF codec fixture sum is
+  now `62_570_488`. Milestone-3 fidelity remains far above the tight
+  acceptance tolerance.

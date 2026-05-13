@@ -5500,8 +5500,8 @@ mod tests {
                 metrics,
                 Srgb8OracleMetrics {
                     max_abs_error: 248,
-                    sum_abs_error: 2_741_641,
-                    checksum: 12_257_301_707_036_551_247,
+                    sum_abs_error: 2_742_408,
+                    checksum: 7_982_944_585_289_099_343,
                     anchors: vec![0, 38, 255],
                     reference_anchors: vec![0, 21, 255],
                 }
@@ -6172,8 +6172,8 @@ mod tests {
                 metrics,
                 Srgb8OracleMetrics {
                     max_abs_error: 142,
-                    sum_abs_error: 16_384,
-                    checksum: 7_746_607_339_007_545_050,
+                    sum_abs_error: 16_125,
+                    checksum: 3_002_000_813_101_256_410,
                     anchors: vec![0, 0, 230],
                     reference_anchors: vec![3, 0, 249],
                 }
