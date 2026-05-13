@@ -10540,6 +10540,38 @@ mod tests {
     }
 
     #[test]
+    fn afv_default_quant_weights_match_reference_layout() {
+        let weights4x8 = quant_weights_from_bands(8, 4, &DCT4X8_QUANT_BANDS[0][0][..4]).unwrap();
+        let weights4x4 = quant_weights_from_bands(4, 4, &DCT4_QUANT_BANDS[0][0][..4]).unwrap();
+        let weights = default_afv_quant_weights(0).unwrap();
+        let afv = AFV_WEIGHTS[0];
+
+        assert_eq!(weights[0], 1.0);
+        assert_eq!(weights[8], afv[0]);
+        assert_eq!(weights[1], afv[1]);
+        assert_eq!(weights[16], afv[2]);
+        assert_eq!(weights[2], afv[3]);
+        assert_eq!(weights[18], afv[4]);
+
+        for y in 0..4 {
+            for x in 0..8 {
+                if x == 0 && y == 0 {
+                    continue;
+                }
+                assert_eq!(weights[(2 * y + 1) * 8 + x], weights4x8[y * 8 + x]);
+            }
+        }
+        for y in 0..4 {
+            for x in 0..4 {
+                if x == 0 && y == 0 {
+                    continue;
+                }
+                assert_eq!(weights[(2 * y) * 8 + 2 * x + 1], weights4x4[y * 4 + x]);
+            }
+        }
+    }
+
+    #[test]
     fn small_vardct_special_transforms_match_reference_layouts() {
         let mut identity = [0.0f32; DCT_BLOCK_SIZE];
         identity[0] = 1.0;

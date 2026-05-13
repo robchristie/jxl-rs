@@ -350,3 +350,7 @@ Focus:
   fixture sum is now `2_742_408`, and the non-default QF codec fixture sum is
   now `62_570_488`. Milestone-3 fidelity remains far above the tight
   acceptance tolerance.
+- 2026-05-13: Added focused unit coverage for the default AFV quant-table
+  layout, including the special AFV weights plus the embedded DCT4X8 and DCT4
+  weight placement rules used by libjxl. This improves milestone-5/6 regression
+  coverage, but does not yet close the public RGB8 or grayscale16 fidelity gaps.
