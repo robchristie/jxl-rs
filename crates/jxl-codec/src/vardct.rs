@@ -2468,7 +2468,7 @@ fn upsampling_weights<'a>(
         1 => 15,
         2 => 55,
         3 => 210,
-        _ => unreachable!(),
+        _ => return Err(Error::Unsupported("VarDCT frame upsampling")),
     };
     if weights.len() != expected_len {
         return Err(Error::InvalidCodestream(
@@ -4710,7 +4710,9 @@ fn read_vardct_ac_quant_encoding(
                 decoded,
             )?))
         }
-        _ => unreachable!(),
+        _ => Err(Error::InvalidCodestream(
+            "invalid VarDCT AC quant matrix encoding",
+        )),
     }
 }
 

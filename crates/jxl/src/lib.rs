@@ -3321,7 +3321,7 @@ fn upsampling_weights<'a>(
         1 => 15,
         2 => 55,
         3 => 210,
-        _ => unreachable!(),
+        _ => return Ok(None),
     };
     if weights.len() != expected_len {
         return Err(Error::InvalidCodestream(
@@ -9053,6 +9053,23 @@ mod tests {
         assert_eq!(scale_sample_to_u16(65_535, 16), 65_535);
         assert_eq!(scale_sample_to_u16(128, 8), 32_896);
         assert_eq!(scale_sample_to_u16(1, 1), 65_535);
+    }
+
+    #[test]
+    fn alpha_upsampling_weights_report_precise_errors() {
+        assert_eq!(upsampling_weights(4, None), Ok(None));
+        assert_eq!(
+            upsampling_weights(
+                1,
+                Some(&CustomTransformData {
+                    upsampling2_weights: Some(vec![1.0; 14]),
+                    ..CustomTransformData::default()
+                }),
+            ),
+            Err(Error::InvalidCodestream(
+                "invalid custom upsampling weight count"
+            ))
+        );
     }
 
     #[test]

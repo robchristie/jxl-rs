@@ -139,6 +139,10 @@ Progress:
 - Added unit coverage pinning precise errors for unsupported chroma upsampling,
   unsupported frame upsampling, invalid custom upsampling weight counts, and
   invalid AC strategies.
+- Replaced the remaining non-test `unreachable!()` sites in the audited public
+  alpha upsampling, VarDCT upsampling/quant-matrix, and modular pass bracket
+  paths with explicit `Result` errors.
+- Added public API unit coverage for invalid alpha upsampling weights.
 
 ### Milestone 3: Baseline VarDCT RGB8 Still Decode
 
@@ -240,3 +244,9 @@ Focus:
   upsampling and strategy edge cases. The required gates pass after this added
   coverage: `cargo fmt --all -- --check`, `cargo check --workspace`,
   `cargo test -p jxl-codec --lib`, and `cargo test --workspace`.
+- 2026-05-13: Removed the remaining non-test `unreachable!()` hits found in the
+  audited public/VarDCT/modular reconstruction files and added
+  `alpha_upsampling_weights_report_precise_errors`. Focused public and codec
+  tests pass, and the required gates pass: `cargo fmt --all -- --check`,
+  `cargo check --workspace`, `cargo test -p jxl-codec --lib`, and
+  `cargo test --workspace`.

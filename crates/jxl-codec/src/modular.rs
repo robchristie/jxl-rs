@@ -4297,7 +4297,7 @@ fn pass_downsampling_bracket(passes: &crate::frame::Passes, pass: usize) -> Resu
         }
         max_shift = min_shift - 1;
     }
-    unreachable!()
+    Err(Error::InvalidCodestream("invalid pass index"))
 }
 
 fn shifted_size(size: u32, shift: i32) -> Result<u32> {
