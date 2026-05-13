@@ -1307,6 +1307,115 @@ fn decoded_channels_from_vardct_srgb16(
     })
 }
 
+fn decoded_gray_channels_from_vardct_xyb_srgb8(
+    codestream: &jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+    pass: Option<usize>,
+) -> Result<DecodedChannels> {
+    let plan = first_frame_vardct_plan(codestream)?;
+    let xyb = match pass {
+        Some(pass) => jxl_codec::assemble_vardct_xyb_image_for_pass(plan, pass)?,
+        None => jxl_codec::assemble_vardct_xyb_image(plan)?,
+    }
+    .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+    let rgb = jxl_codec::xyb_image_to_linear_rgb(&xyb, &plan.opsin_params);
+    let samples = vardct_linear_rgb_to_gray_srgb8_samples(&rgb);
+    let channel = DecodedChannel {
+        width: rgb.width,
+        height: rgb.height,
+        hshift: 0,
+        vshift: 0,
+        bit_depth: 8,
+        samples: ChannelData::U8(samples),
+    };
+    let channel = if let Some(region) = region {
+        crop_decoded_channel(channel, region)?
+    } else {
+        channel
+    };
+    Ok(DecodedChannels {
+        width: channel.width,
+        height: channel.height,
+        color_channels: 1,
+        alpha: None,
+        bit_depth: 8,
+        channels: vec![channel],
+    })
+}
+
+fn decoded_gray_channels_from_vardct_xyb_srgb16(
+    codestream: &jxl_codec::Codestream,
+    region: Option<jxl_codec::ImageRegion>,
+    pass: Option<usize>,
+) -> Result<DecodedChannels> {
+    let plan = first_frame_vardct_plan(codestream)?;
+    let xyb = match pass {
+        Some(pass) => jxl_codec::assemble_vardct_xyb_image_for_pass(plan, pass)?,
+        None => jxl_codec::assemble_vardct_xyb_image(plan)?,
+    }
+    .ok_or(Error::Unsupported("VarDCT image reconstruction"))?;
+    let rgb = jxl_codec::xyb_image_to_linear_rgb(&xyb, &plan.opsin_params);
+    let samples = vardct_linear_rgb_to_gray_srgb16_samples(&rgb);
+    let channel = DecodedChannel {
+        width: rgb.width,
+        height: rgb.height,
+        hshift: 0,
+        vshift: 0,
+        bit_depth: 16,
+        samples: ChannelData::U16(samples),
+    };
+    let channel = if let Some(region) = region {
+        crop_decoded_channel(channel, region)?
+    } else {
+        channel
+    };
+    Ok(DecodedChannels {
+        width: channel.width,
+        height: channel.height,
+        color_channels: 1,
+        alpha: None,
+        bit_depth: 16,
+        channels: vec![channel],
+    })
+}
+
+fn vardct_linear_rgb_to_gray_srgb8_samples(rgb: &jxl_codec::VarDctRgbImage) -> Vec<u8> {
+    (0..rgb.channels[0].len())
+        .map(|index| linear_sample_to_srgb8(linear_rgb_luma(rgb, index)))
+        .collect()
+}
+
+fn vardct_linear_rgb_to_gray_srgb16_samples(rgb: &jxl_codec::VarDctRgbImage) -> Vec<u16> {
+    (0..rgb.channels[0].len())
+        .map(|index| linear_sample_to_srgb16(linear_rgb_luma(rgb, index)))
+        .collect()
+}
+
+fn linear_rgb_luma(rgb: &jxl_codec::VarDctRgbImage, index: usize) -> f32 {
+    0.2126f32.mul_add(
+        rgb.channels[0][index],
+        0.7152f32.mul_add(rgb.channels[1][index], 0.0722f32 * rgb.channels[2][index]),
+    )
+}
+
+fn linear_sample_to_srgb8(sample: f32) -> u8 {
+    linear_sample_to_srgb(sample, u8::MAX as f32) as u8
+}
+
+fn linear_sample_to_srgb16(sample: f32) -> u16 {
+    linear_sample_to_srgb(sample, u16::MAX as f32) as u16
+}
+
+fn linear_sample_to_srgb(sample: f32, max: f32) -> u32 {
+    let sample = sample.clamp(0.0, 1.0);
+    let encoded = if sample <= 0.003_130_8 {
+        12.92 * sample
+    } else {
+        1.055 * sample.powf(1.0 / 2.4) - 0.055
+    };
+    encoded.mul_add(max, 0.0).round().clamp(0.0, max) as u32
+}
+
 fn vardct_srgb8_gray_sample(rgb: &[u8]) -> u8 {
     ((2_126u32 * u32::from(rgb[0])
         + 7_152u32 * u32::from(rgb[1])
@@ -1587,8 +1696,14 @@ fn decode_vardct_channels_codestream(
 ) -> Result<DecodedChannels> {
     let orientation = codestream.metadata.orientation;
     let color_channels = codestream.metadata.num_color_channels() as usize;
-    let image = vardct_srgb8_image_from_codestream(codestream, region, vardct_pass)?;
-    let mut channels = decoded_channels_from_vardct_srgb8(image, color_channels)?;
+    let mut channels = if color_channels == 1
+        && first_frame_color_transform(codestream)? == jxl_codec::ColorTransform::Xyb
+    {
+        decoded_gray_channels_from_vardct_xyb_srgb8(codestream, region, vardct_pass)?
+    } else {
+        let image = vardct_srgb8_image_from_codestream(codestream, region, vardct_pass)?;
+        decoded_channels_from_vardct_srgb8(image, color_channels)?
+    };
     append_vardct_extra_channels(&mut channels, codestream, region, vardct_pass)?;
     orient_decoded_channels(channels, orientation)
 }
@@ -1600,8 +1715,14 @@ fn decode_vardct_channels_codestream_rgb16(
 ) -> Result<DecodedChannels> {
     let orientation = codestream.metadata.orientation;
     let color_channels = codestream.metadata.num_color_channels() as usize;
-    let image = vardct_srgb16_image_from_codestream(codestream, region, vardct_pass)?;
-    let mut channels = decoded_channels_from_vardct_srgb16(image, color_channels)?;
+    let mut channels = if color_channels == 1
+        && first_frame_color_transform(codestream)? == jxl_codec::ColorTransform::Xyb
+    {
+        decoded_gray_channels_from_vardct_xyb_srgb16(codestream, region, vardct_pass)?
+    } else {
+        let image = vardct_srgb16_image_from_codestream(codestream, region, vardct_pass)?;
+        decoded_channels_from_vardct_srgb16(image, color_channels)?
+    };
     append_vardct_extra_channels(&mut channels, codestream, region, vardct_pass)?;
     orient_decoded_channels(channels, orientation)
 }
@@ -4828,8 +4949,8 @@ mod tests {
             metrics,
             Srgb8OracleMetrics {
                 max_abs_error: 45_211,
-                sum_abs_error: 86_222_319,
-                checksum: 1_812_636_933_834_582_889,
+                sum_abs_error: 86_222_328,
+                checksum: 15_588_358_362_548_513_641,
                 anchors: vec![
                     0, 0, 0, 65_535, 63_095, 63_095, 63_095, 65_535, 51_670, 51_670, 51_670,
                     65_535,
