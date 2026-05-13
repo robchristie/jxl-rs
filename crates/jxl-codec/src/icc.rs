@@ -44,11 +44,14 @@ pub fn read_icc_profile(reader: &mut BitReader<'_>) -> Result<Vec<u8>> {
 
 fn unpredict_icc(encoded: &[u8]) -> Result<Vec<u8>> {
     let mut position = 0;
-    let output_size = decode_varint(encoded, &mut position)? as usize;
-    if output_size > ICC_DECODED_LIMIT {
+    let output_size = decode_varint(encoded, &mut position)?;
+    if output_size > ICC_DECODED_LIMIT as u64 {
         return Err(Error::InvalidCodestream("decoded ICC profile is too large"));
     }
-    let commands_size = decode_varint(encoded, &mut position)? as usize;
+    let output_size = usize::try_from(output_size)
+        .map_err(|_| Error::InvalidCodestream("decoded ICC profile is too large"))?;
+    let commands_size =
+        decode_varint_usize(encoded, &mut position, "ICC commands size is too large")?;
     let mut command_position = position;
     check_bounds(position, commands_size, encoded.len())?;
     let commands_end = command_position + commands_size;
@@ -204,13 +207,21 @@ fn unpredict_icc(encoded: &[u8]) -> Result<Vec<u8>> {
         command_position += 1;
         match command {
             COMMAND_INSERT => {
-                let count = decode_varint(encoded, &mut command_position)? as usize;
+                let count = decode_varint_usize(
+                    encoded,
+                    &mut command_position,
+                    "ICC command size is too large",
+                )?;
                 check_bounds(position, count, encoded.len())?;
                 result.extend_from_slice(&encoded[position..position + count]);
                 position += count;
             }
             COMMAND_SHUFFLE2 | COMMAND_SHUFFLE4 => {
-                let count = decode_varint(encoded, &mut command_position)? as usize;
+                let count = decode_varint_usize(
+                    encoded,
+                    &mut command_position,
+                    "ICC command size is too large",
+                )?;
                 check_bounds(position, count, encoded.len())?;
                 let mut shuffled = encoded[position..position + count].to_vec();
                 if command == COMMAND_SHUFFLE2 {
@@ -235,7 +246,11 @@ fn unpredict_icc(encoded: &[u8]) -> Result<Vec<u8>> {
                 }
                 let mut stride = width;
                 if flags & 16 != 0 {
-                    stride = decode_varint(encoded, &mut command_position)? as usize;
+                    stride = decode_varint_usize(
+                        encoded,
+                        &mut command_position,
+                        "ICC predictor stride is too large",
+                    )?;
                     if stride < width {
                         return Err(Error::InvalidCodestream("invalid ICC predictor stride"));
                     }
@@ -244,7 +259,11 @@ fn unpredict_icc(encoded: &[u8]) -> Result<Vec<u8>> {
                     return Err(Error::InvalidCodestream("invalid ICC predictor stride"));
                 }
 
-                let count = decode_varint(encoded, &mut command_position)? as usize;
+                let count = decode_varint_usize(
+                    encoded,
+                    &mut command_position,
+                    "ICC command size is too large",
+                )?;
                 check_bounds(position, count, encoded.len())?;
                 let mut shuffled = encoded[position..position + count].to_vec();
                 if width > 1 {
@@ -290,6 +309,11 @@ fn unpredict_icc(encoded: &[u8]) -> Result<Vec<u8>> {
     Ok(result)
 }
 
+fn decode_varint_usize(input: &[u8], position: &mut usize, msg: &'static str) -> Result<usize> {
+    let value = decode_varint(input, position)?;
+    usize::try_from(value).map_err(|_| Error::InvalidCodestream(msg))
+}
+
 fn validate_icc_size(icc: &[u8]) -> Result<()> {
     if icc.len() < 4 {
         return Err(Error::InvalidCodestream("ICC profile is too short"));
@@ -313,6 +337,9 @@ fn decode_varint(input: &[u8], position: &mut usize) -> Result<u64> {
             .get(*position)
             .ok_or(Error::InvalidCodestream("truncated ICC varint"))?;
         *position += 1;
+        if index == 9 && byte > 1 {
+            return Err(Error::InvalidCodestream("ICC varint overflow"));
+        }
         result |= u64::from(byte & 127) << (7 * index);
         if byte & 128 == 0 {
             return Ok(result);
@@ -538,6 +565,72 @@ fn icc_ans_context(index: usize, previous: u8, second_previous: u8) -> usize {
         0
     } else {
         1 + byte_kind1(previous) + byte_kind2(second_previous) * 8
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unpredict_icc_rejects_decoded_size_above_limit_before_narrowing() {
+        let encoded = encode_varint(ICC_DECODED_LIMIT as u64 + 1);
+
+        assert_eq!(
+            unpredict_icc(&encoded).unwrap_err(),
+            Error::InvalidCodestream("decoded ICC profile is too large")
+        );
+    }
+
+    #[test]
+    fn decode_varint_accepts_max_u64() {
+        let mut position = 0;
+
+        assert_eq!(
+            decode_varint(&encode_varint(u64::MAX), &mut position).unwrap(),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn decode_varint_rejects_u64_overflow() {
+        let mut position = 0;
+        let mut encoded = vec![0xff; 9];
+        encoded.push(2);
+
+        assert_eq!(
+            decode_varint(&encoded, &mut position).unwrap_err(),
+            Error::InvalidCodestream("ICC varint overflow")
+        );
+    }
+
+    #[cfg(target_pointer_width = "32")]
+    #[test]
+    fn decode_varint_usize_rejects_values_that_do_not_fit_usize() {
+        let mut position = 0;
+        let encoded = encode_varint(u64::from(u32::MAX) + 1);
+
+        assert_eq!(
+            decode_varint_usize(&encoded, &mut position, "ICC command size is too large")
+                .unwrap_err(),
+            Error::InvalidCodestream("ICC command size is too large")
+        );
+    }
+
+    fn encode_varint(mut value: u64) -> Vec<u8> {
+        let mut encoded = Vec::new();
+        loop {
+            let mut byte = (value & 127) as u8;
+            value >>= 7;
+            if value != 0 {
+                byte |= 128;
+            }
+            encoded.push(byte);
+            if value == 0 {
+                break;
+            }
+        }
+        encoded
     }
 }
 

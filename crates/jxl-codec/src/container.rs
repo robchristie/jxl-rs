@@ -39,7 +39,8 @@ impl BoxRecord {
     }
 
     pub fn total_size(&self) -> Option<u64> {
-        self.content_size.map(|size| size + self.header_size)
+        self.content_size
+            .and_then(|size| size.checked_add(self.header_size))
     }
 }
 
@@ -391,6 +392,18 @@ mod tests {
             next_box_offset(&record, u64::MAX).unwrap_err(),
             Error::InvalidContainer("box offset overflow")
         );
+    }
+
+    #[test]
+    fn box_record_total_size_returns_none_on_overflow() {
+        let record = BoxRecord {
+            box_type: *b"free",
+            header_size: 16,
+            content_size: Some(u64::MAX),
+            offset: 0,
+        };
+
+        assert_eq!(record.total_size(), None);
     }
 
     fn container_with_ftyp(ftyp_contents: &[u8]) -> Vec<u8> {

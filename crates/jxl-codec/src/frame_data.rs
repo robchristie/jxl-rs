@@ -80,7 +80,8 @@ pub fn read_frame_data(
             "frame payload is not byte-aligned",
         ));
     }
-    let payload_start_offset = codestream_base_offset + reader.bytes_consumed_floor();
+    let payload_start_offset =
+        frame_payload_start_offset(codestream_base_offset, reader.bytes_consumed_floor())?;
     let mut sections = Vec::with_capacity(toc.entries.len());
     for entry in &toc.entries {
         let offset = usize::try_from(entry.size)
@@ -108,6 +109,15 @@ pub fn read_frame_data(
         payload_start_offset,
         payload_size,
     })
+}
+
+fn frame_payload_start_offset(
+    codestream_base_offset: usize,
+    bytes_consumed: usize,
+) -> Result<usize> {
+    codestream_base_offset
+        .checked_add(bytes_consumed)
+        .ok_or(Error::InvalidCodestream("frame payload offset overflow"))
 }
 
 pub fn num_toc_entries(
@@ -467,6 +477,14 @@ mod tests {
         assert_eq!(
             num_toc_entries(usize::MAX, 1, 2).unwrap_err(),
             Error::InvalidCodestream("TOC entry count overflow")
+        );
+    }
+
+    #[test]
+    fn rejects_frame_payload_start_offset_overflow() {
+        assert_eq!(
+            frame_payload_start_offset(usize::MAX, 1).unwrap_err(),
+            Error::InvalidCodestream("frame payload offset overflow")
         );
     }
 
