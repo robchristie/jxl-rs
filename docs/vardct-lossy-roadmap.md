@@ -42,12 +42,16 @@ Audit date: 2026-05-13.
 
 ### Known Gaps
 
-- The roadmap file itself was missing before this milestone.
 - Current public oracle comparisons are primarily regression checks for the
   current implementation. Several generated lossy RGB/gray tests still allow
   large errors against `djxl`, so the milestone 3 acceptance tolerance
   (RGBA8 max absolute channel error <= 2 and mean <= 0.25) is not yet met for
   common generated images.
+- The generated JPEG-origin YCbCr/None VarDCT fixtures exercise libjxl's
+  JPEG-transcode-style color-transform paths and keep loose regression metrics.
+  They are useful coverage for those color paths, but they are not evidence
+  that JPEG reconstruction is supported or that milestone-3 RGB8 conformance is
+  met.
 - Full JPEG XL color management is not implemented. Public output explicitly
   supports only the currently handled sRGB/XYB/direct/YCbCr paths and should
   keep returning precise `Error::Unsupported` messages for unsupported
@@ -80,9 +84,6 @@ Existing harnesses:
 
 Harness gaps to close:
 
-- Add a named tiny-fixture matrix for generated lossy VarDCT cases. The first
-  matrix should include 1x1, 2x2, 8x8, 16x16, and 32x32 RGB gradients, plus
-  grayscale and alpha variants where `cjxl` emits VarDCT.
 - Document tolerances in each oracle test. Keep loose regression tolerances only
   where they describe known incomplete decode quality, and add failing-work
   notes instead of presenting them as conformance.
@@ -280,3 +281,10 @@ Focus:
   4:2:0/axis/odd-dimension VarDCT fixture tests pass; the common generated
   JPEG-color-transform and subsampled YCbCr oracle metrics remain above the
   milestone-3 tight tolerance, so conformance work remains open.
+- 2026-05-13: Rechecked the JPEG-origin fixture mode against the local libjxl
+  `cjxl` help. The current `--allow_jpeg_reconstruction=0` argument does not
+  disable JPEG-transcode-style VarDCT color-transform paths in this build; the
+  newer `--lossless_jpeg=0` path makes these particular inputs encode as
+  modular/pixel fixtures instead. Kept the existing fixtures as explicit loose
+  YCbCr/None color-transform coverage and documented that they are not JPEG
+  reconstruction support or milestone-3 acceptance evidence.
