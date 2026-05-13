@@ -194,7 +194,7 @@ Focus:
 
 ### Milestone 7: XYB Inverse and Color Output
 
-Status: pending.
+Status: in progress.
 
 Focus:
 
@@ -333,3 +333,8 @@ Focus:
   the non-default QF codec fixture sum moved from `62_572_812` to
   `62_571_873`, but the remaining RGB8 and gray16 fidelity gaps still point at
   AC/dequant/transform/color-output work.
+- 2026-05-13: Started milestone 7 custom opsin coverage by threading parsed
+  VarDCT quant biases from `OpsinInverseMatrix` through opsin parameters and
+  AC dequantization. Default fixtures are expected to stay unchanged, but
+  custom-transform files now use their encoded quant-bias values instead of
+  the hard-coded defaults.

@@ -838,6 +838,7 @@ pub struct VarDctOpsinParams {
     pub inverse_matrix: [[f32; 3]; 3],
     pub opsin_biases: [f32; 3],
     pub opsin_biases_cbrt: [f32; 3],
+    pub quant_biases: [f32; 4],
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1919,6 +1920,7 @@ fn final_vardct_spatial_grid_for_group(
         &plan.frame.chroma_subsampling,
         plan.frame.x_qm_scale,
         plan.frame.b_qm_scale,
+        plan.opsin_params.quant_biases,
         &plan.dc_group_metadata,
     )?;
     spatialize_vardct_ac_grid(
@@ -2867,12 +2869,23 @@ fn vardct_opsin_params(
         .as_ref()
         .map(|opsin| opsin.opsin_biases)
         .unwrap_or(DEFAULT_OPSIN_BIASES);
-    vardct_opsin_params_from_matrix(matrix, opsin_biases, metadata.tone_mapping.intensity_target)
+    let quant_biases = transform_data
+        .opsin_inverse_matrix
+        .as_ref()
+        .map(|opsin| opsin.quant_biases)
+        .unwrap_or(DEFAULT_QUANT_BIASES);
+    vardct_opsin_params_from_matrix(
+        matrix,
+        opsin_biases,
+        quant_biases,
+        metadata.tone_mapping.intensity_target,
+    )
 }
 
 fn vardct_opsin_params_from_matrix(
     mut inverse_matrix: [[f32; 3]; 3],
     opsin_biases: [f32; 3],
+    quant_biases: [f32; 4],
     intensity_target: f32,
 ) -> VarDctOpsinParams {
     let intensity_scale = 255.0 / intensity_target;
@@ -2886,6 +2899,7 @@ fn vardct_opsin_params_from_matrix(
         inverse_matrix,
         opsin_biases,
         opsin_biases_cbrt,
+        quant_biases,
     }
 }
 
@@ -4434,6 +4448,7 @@ fn read_vardct_ac_group_metadata_from_reader(
                                     &frame_header.chroma_subsampling,
                                     frame_header.x_qm_scale,
                                     frame_header.b_qm_scale,
+                                    DEFAULT_QUANT_BIASES,
                                     dc_groups,
                                 )
                                 .ok();
@@ -5924,6 +5939,7 @@ fn dequantize_vardct_ac_grid(
     chroma_subsampling: &YCbCrChromaSubsampling,
     x_qm_scale: u32,
     b_qm_scale: u32,
+    quant_biases: [f32; 4],
     dc_groups: &[VarDctDcGroupMetadata],
 ) -> Result<VarDctAcDequantizedGrid> {
     let global = global.ok_or(Error::Unsupported("VarDCT global metadata"))?;
@@ -5999,8 +6015,9 @@ fn dequantize_vardct_ac_grid(
                     local_position,
                 )?;
                 let quantized_y = grid.per_channel[1].coefficients[y_index];
-                let dequant_y =
-                    adjust_quant_bias(1, quantized_y) * y_matrix[local_position] * y_scale;
+                let dequant_y = adjust_quant_bias(1, quantized_y, quant_biases)
+                    * y_matrix[local_position]
+                    * y_scale;
                 write_dequantized_coefficient(
                     &mut dequantized.per_channel[1],
                     output_index,
@@ -6018,8 +6035,9 @@ fn dequantize_vardct_ac_grid(
                     local_position,
                 )?;
                 let quantized_x = grid.per_channel[0].coefficients[x_index];
-                let dequant_x_cc =
-                    adjust_quant_bias(0, quantized_x) * x_matrix[local_position] * x_scale;
+                let dequant_x_cc = adjust_quant_bias(0, quantized_x, quant_biases)
+                    * x_matrix[local_position]
+                    * x_scale;
                 write_dequantized_coefficient(
                     &mut dequantized.per_channel[0],
                     output_index,
@@ -6033,8 +6051,9 @@ fn dequantize_vardct_ac_grid(
                     local_position,
                 )?;
                 let quantized_b = grid.per_channel[2].coefficients[b_index];
-                let dequant_b_cc =
-                    adjust_quant_bias(2, quantized_b) * b_matrix[local_position] * b_scale;
+                let dequant_b_cc = adjust_quant_bias(2, quantized_b, quant_biases)
+                    * b_matrix[local_position]
+                    * b_scale;
                 write_dequantized_coefficient(
                     &mut dequantized.per_channel[2],
                     output_index,
@@ -7334,18 +7353,12 @@ fn vardct_quant_field_for_group(
     Ok(quant_field)
 }
 
-fn adjust_quant_bias(channel: usize, quantized: i32) -> f32 {
-    const BIASES: [f32; 4] = [
-        1.0 - 0.05465007330715401,
-        1.0 - 0.07005449891748593,
-        1.0 - 0.049935103337343655,
-        0.145,
-    ];
+fn adjust_quant_bias(channel: usize, quantized: i32, biases: [f32; 4]) -> f32 {
     match quantized {
         0 => 0.0,
-        1 => BIASES[channel],
-        -1 => -BIASES[channel],
-        value => value as f32 - BIASES[3] / value as f32,
+        1 => biases[channel],
+        -1 => -biases[channel],
+        value => value as f32 - biases[3] / value as f32,
     }
 }
 
@@ -7910,6 +7923,12 @@ const EPF_MIN_SIGMA: f32 = -3.905243;
 const FRAME_FLAG_USE_DC_FRAME: u64 = 32;
 const FRAME_FLAG_SKIP_ADAPTIVE_DC_SMOOTHING: u64 = 128;
 const DEFAULT_DC_QUANT: [f32; 3] = [1.0 / 4096.0, 1.0 / 512.0, 1.0 / 256.0];
+const DEFAULT_QUANT_BIASES: [f32; 4] = [
+    1.0 - 0.05465007330715401,
+    1.0 - 0.07005449891748593,
+    1.0 - 0.049935103337343655,
+    0.145,
+];
 const EPF_PLUS_OFFSETS: [(isize, isize); 5] = [(0, 0), (-1, 0), (0, -1), (1, 0), (0, 1)];
 const DEFAULT_OPSIN_BIASES: [f32; 3] = [-0.0037930732, -0.0037930732, -0.0037930732];
 const DEFAULT_INVERSE_OPSIN_MATRIX: [[f32; 3]; 3] = [
@@ -10121,6 +10140,7 @@ mod tests {
         vardct_opsin_params_from_matrix(
             DEFAULT_INVERSE_OPSIN_MATRIX,
             DEFAULT_OPSIN_BIASES,
+            DEFAULT_QUANT_BIASES,
             ImageMetadata::default().tone_mapping.intensity_target,
         )
     }
@@ -11219,6 +11239,7 @@ mod tests {
         let opsin = vardct_opsin_params_from_matrix(
             [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
             [-8.0, -27.0, -64.0],
+            DEFAULT_QUANT_BIASES,
             510.0,
         );
 
@@ -11228,6 +11249,7 @@ mod tests {
         );
         assert_eq!(opsin.opsin_biases, [-8.0, -27.0, -64.0]);
         assert_eq!(opsin.opsin_biases_cbrt, [-2.0, -3.0, -4.0]);
+        assert_eq!(opsin.quant_biases, DEFAULT_QUANT_BIASES);
     }
 
     #[test]
@@ -11251,6 +11273,17 @@ mod tests {
         );
         assert_eq!(opsin.opsin_biases, [-1.0, -8.0, -27.0]);
         assert_eq!(opsin.opsin_biases_cbrt, [-1.0, -2.0, -3.0]);
+        assert_eq!(opsin.quant_biases, [0.1, 0.2, 0.3, 0.4]);
+    }
+
+    #[test]
+    fn adjust_quant_bias_uses_custom_quant_biases() {
+        let biases = [0.1, 0.2, 0.3, 0.4];
+
+        assert_eq!(adjust_quant_bias(0, 0, biases), 0.0);
+        assert_eq!(adjust_quant_bias(0, 1, biases), 0.1);
+        assert_eq!(adjust_quant_bias(1, -1, biases), -0.2);
+        assert!((adjust_quant_bias(2, 4, biases) - 3.9).abs() < f32::EPSILON);
     }
 
     #[test]
