@@ -158,7 +158,10 @@ fn extract_container_codestream(input: &[u8]) -> Result<ExtractedCodestream> {
                 if box_index != 2 {
                     return Err(Error::InvalidContainer("ftyp box must come second"));
                 }
-                if contents.len() < 12 || &contents[..4] != b"jxl " {
+                if record.header_size != 8
+                    || record.content_size != Some(12)
+                    || contents != b"jxl \0\0\0\0jxl "
+                {
                     return Err(Error::InvalidContainer("invalid ftyp box"));
                 }
                 saw_ftyp = true;
@@ -204,11 +207,7 @@ fn extract_container_codestream(input: &[u8]) -> Result<ExtractedCodestream> {
 
         boxes.push(record);
         cursor = match parsed.record().content_size {
-            Some(size) => {
-                parsed.record().offset as usize
-                    + parsed.record().header_size as usize
-                    + size as usize
-            }
+            Some(size) => next_box_offset(parsed.record(), size)?,
             None => input.len(),
         };
     }
@@ -228,6 +227,19 @@ fn extract_container_codestream(input: &[u8]) -> Result<ExtractedCodestream> {
         container: Some(Container { boxes }),
         codestream,
     })
+}
+
+fn next_box_offset(record: &BoxRecord, content_size: u64) -> Result<usize> {
+    u64_to_usize(record.offset, "box offset overflow")?
+        .checked_add(u64_to_usize(record.header_size, "box offset overflow")?)
+        .and_then(|start| {
+            start.checked_add(u64_to_usize(content_size, "box offset overflow").ok()?)
+        })
+        .ok_or(Error::InvalidContainer("box offset overflow"))
+}
+
+fn u64_to_usize(value: u64, msg: &'static str) -> Result<usize> {
+    usize::try_from(value).map_err(|_| Error::InvalidContainer(msg))
 }
 
 fn read_box(input: &[u8], offset: usize) -> Result<ContainerBox<'_>> {
@@ -259,13 +271,17 @@ fn read_box(input: &[u8], offset: usize) -> Result<ContainerBox<'_>> {
         size => Some(u64::from(size) - header_size),
     };
 
+    let header_size_usize = u64_to_usize(header_size, "box offset overflow")?;
     let content_start = offset
-        .checked_add(header_size as usize)
+        .checked_add(header_size_usize)
         .ok_or(Error::InvalidContainer("box offset overflow"))?;
     let content_end = match content_size {
-        Some(size) => content_start
-            .checked_add(size as usize)
-            .ok_or(Error::InvalidContainer("box offset overflow"))?,
+        Some(size) => {
+            let size = u64_to_usize(size, "box offset overflow")?;
+            content_start
+                .checked_add(size)
+                .ok_or(Error::InvalidContainer("box offset overflow"))?
+        }
         None => input.len(),
     };
 
@@ -307,5 +323,88 @@ mod tests {
         assert_eq!(extracted.format, FileFormat::NakedCodestream);
         assert!(extracted.container.is_none());
         assert_eq!(extracted.codestream, input);
+    }
+
+    #[test]
+    fn extracts_container_with_exact_ftyp() {
+        let input = container_with_ftyp(b"jxl \0\0\0\0jxl ");
+        let extracted = extract_codestream(&input).unwrap();
+
+        assert_eq!(extracted.format, FileFormat::Container);
+        assert_eq!(extracted.codestream, [0xff, 0x0a]);
+    }
+
+    #[test]
+    fn rejects_ftyp_with_extra_bytes() {
+        let input = container_with_ftyp(b"jxl \0\0\0\0jxl extra");
+
+        assert_eq!(
+            extract_codestream(&input).unwrap_err(),
+            Error::InvalidContainer("invalid ftyp box")
+        );
+    }
+
+    #[test]
+    fn rejects_ftyp_with_nonzero_minor_version() {
+        let input = container_with_ftyp(b"jxl \0\0\0\x01jxl ");
+
+        assert_eq!(
+            extract_codestream(&input).unwrap_err(),
+            Error::InvalidContainer("invalid ftyp box")
+        );
+    }
+
+    #[test]
+    fn rejects_ftyp_missing_compatible_brand() {
+        let input = container_with_ftyp(b"jxl \0\0\0\0bad ");
+
+        assert_eq!(
+            extract_codestream(&input).unwrap_err(),
+            Error::InvalidContainer("invalid ftyp box")
+        );
+    }
+
+    #[test]
+    fn rejects_ftyp_not_second() {
+        let mut input = Vec::new();
+        push_box(&mut input, *b"JXL ", &[0x0d, 0x0a, 0x87, 0x0a]);
+        push_box(&mut input, *b"free", &[]);
+        push_box(&mut input, *b"ftyp", b"jxl \0\0\0\0jxl ");
+        push_box(&mut input, *b"jxlc", &[0xff, 0x0a]);
+
+        assert_eq!(
+            extract_codestream(&input).unwrap_err(),
+            Error::InvalidContainer("ftyp box must come second")
+        );
+    }
+
+    #[test]
+    fn rejects_box_offset_overflow() {
+        let record = BoxRecord {
+            box_type: *b"free",
+            header_size: 16,
+            content_size: Some(u64::MAX),
+            offset: 1,
+        };
+
+        assert_eq!(
+            next_box_offset(&record, u64::MAX).unwrap_err(),
+            Error::InvalidContainer("box offset overflow")
+        );
+    }
+
+    fn container_with_ftyp(ftyp_contents: &[u8]) -> Vec<u8> {
+        let mut input = Vec::new();
+        push_box(&mut input, *b"JXL ", &[0x0d, 0x0a, 0x87, 0x0a]);
+        push_box(&mut input, *b"ftyp", ftyp_contents);
+        push_box(&mut input, *b"jxlc", &[0xff, 0x0a]);
+        input
+    }
+
+    fn push_box(output: &mut Vec<u8>, box_type: [u8; 4], contents: &[u8]) {
+        let size = u32::try_from(8 + contents.len()).unwrap();
+        output.extend_from_slice(&size.to_be_bytes());
+        output.extend_from_slice(&box_type);
+        output.extend_from_slice(contents);
     }
 }

@@ -109,6 +109,9 @@ fn parse_roi(value: &str) -> Result<jxl::Rect, String> {
     let [x, y, width, height]: [u32; 4] = fields
         .try_into()
         .map_err(|_| "ROI must have four comma-separated fields: x,y,width,height".to_string())?;
+    if width == 0 || height == 0 {
+        return Err("ROI width and height must be nonzero".to_string());
+    }
     Ok(jxl::Rect {
         x,
         y,
@@ -136,4 +139,21 @@ fn write_pam16(mut writer: impl Write, image: &jxl::Rgba16Image) -> io::Result<(
         writer.write_all(&sample.to_be_bytes())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_roi_rejects_zero_width_or_height() {
+        assert_eq!(
+            parse_roi("1,2,0,4").unwrap_err(),
+            "ROI width and height must be nonzero"
+        );
+        assert_eq!(
+            parse_roi("1,2,3,0").unwrap_err(),
+            "ROI width and height must be nonzero"
+        );
+    }
 }

@@ -7,10 +7,12 @@ const ICC_HEADER_SIZE: usize = 128;
 const ICC_DECODED_LIMIT: usize = 1 << 28;
 
 pub fn read_icc_profile(reader: &mut BitReader<'_>) -> Result<Vec<u8>> {
-    let encoded_size = reader.read_u64()? as usize;
-    if encoded_size > ICC_DECODED_LIMIT {
+    let encoded_size = reader.read_u64()?;
+    if encoded_size > ICC_DECODED_LIMIT as u64 {
         return Err(Error::InvalidCodestream("encoded ICC profile is too large"));
     }
+    let encoded_size = usize::try_from(encoded_size)
+        .map_err(|_| Error::InvalidCodestream("encoded ICC profile is too large"))?;
 
     let (code, context_map) = decode_histograms(reader, NUM_ICC_CONTEXTS, false)?;
     let mut symbol_reader = AnsSymbolReader::new(code, reader, 0)?;

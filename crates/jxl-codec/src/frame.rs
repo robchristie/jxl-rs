@@ -349,7 +349,7 @@ pub fn read_frame_header(
     metadata: &ImageMetadata,
 ) -> Result<FrameHeader> {
     if reader.read_bool()? {
-        return Ok(default_frame_header(image_width, image_height, metadata));
+        return default_frame_header(image_width, image_height, metadata);
     }
 
     let frame_type =
@@ -450,10 +450,14 @@ pub fn read_frame_header(
                 return Err(Error::InvalidCodestream("zero-sized custom frame"));
             }
             if frame_type == FrameType::Regular || frame_type == FrameType::SkipProgressive {
-                is_partial_frame = frame_origin.x0 > 0
-                    || frame_origin.y0 > 0
-                    || (frame_size.width as i32 + frame_origin.x0) < image_width as i32
-                    || (frame_size.height as i32 + frame_origin.y0) < image_height as i32;
+                let frame_rect = validate_frame_rectangle(
+                    frame_origin,
+                    frame_size,
+                    image_width,
+                    image_height,
+                    metadata.animation.is_none(),
+                )?;
+                is_partial_frame = frame_rect.is_partial;
             }
         }
     }
@@ -513,7 +517,7 @@ pub fn read_frame_header(
         chroma_subsampling.max_h_shift,
         chroma_subsampling.max_v_shift,
         encoding == FrameEncoding::Modular,
-    );
+    )?;
 
     Ok(FrameHeader {
         encoding,
@@ -548,12 +552,12 @@ fn default_frame_header(
     image_width: u32,
     image_height: u32,
     metadata: &ImageMetadata,
-) -> FrameHeader {
+) -> Result<FrameHeader> {
     let frame_size = FrameSize {
         width: image_width,
         height: image_height,
     };
-    FrameHeader {
+    Ok(FrameHeader {
         encoding: FrameEncoding::VarDct,
         frame_type: FrameType::Regular,
         flags: 0,
@@ -586,8 +590,36 @@ fn default_frame_header(
         name: String::new(),
         loop_filter: LoopFilter::default(),
         extensions: 0,
-        group_layout: compute_group_layout(frame_size, 0, 1, 1, 0, 0, false),
+        group_layout: compute_group_layout(frame_size, 0, 1, 1, 0, 0, false)?,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ValidatedFrameRectangle {
+    is_partial: bool,
+}
+
+fn validate_frame_rectangle(
+    origin: FrameOrigin,
+    size: FrameSize,
+    image_width: u32,
+    image_height: u32,
+    require_canvas_containment: bool,
+) -> Result<ValidatedFrameRectangle> {
+    let x0 = i64::from(origin.x0);
+    let y0 = i64::from(origin.y0);
+    let x1 = x0 + i64::from(size.width);
+    let y1 = y0 + i64::from(size.height);
+    let image_width = i64::from(image_width);
+    let image_height = i64::from(image_height);
+
+    if require_canvas_containment && (x0 < 0 || y0 < 0 || x1 > image_width || y1 > image_height) {
+        return Err(Error::InvalidCodestream("frame rectangle outside image"));
     }
+
+    Ok(ValidatedFrameRectangle {
+        is_partial: x0 > 0 || y0 > 0 || x1 < image_width || y1 < image_height,
+    })
 }
 
 fn read_chroma_subsampling(reader: &mut BitReader<'_>) -> Result<YCbCrChromaSubsampling> {
@@ -835,6 +867,76 @@ mod tests {
         assert!(frame.is_last);
         assert_eq!(frame.group_layout.group_dim, 256);
         assert_eq!(frame.group_layout.num_groups, 2);
+    }
+
+    #[test]
+    fn validates_frame_rectangle_inside_canvas() {
+        let rect = validate_frame_rectangle(
+            FrameOrigin { x0: 10, y0: 20 },
+            FrameSize {
+                width: 30,
+                height: 40,
+            },
+            100,
+            100,
+            true,
+        )
+        .unwrap();
+
+        assert!(rect.is_partial);
+    }
+
+    #[test]
+    fn rejects_negative_frame_rectangle_origin() {
+        assert_eq!(
+            validate_frame_rectangle(
+                FrameOrigin { x0: -1, y0: 0 },
+                FrameSize {
+                    width: 10,
+                    height: 10,
+                },
+                100,
+                100,
+                true,
+            )
+            .unwrap_err(),
+            Error::InvalidCodestream("frame rectangle outside image")
+        );
+    }
+
+    #[test]
+    fn rejects_frame_rectangle_outside_canvas() {
+        assert_eq!(
+            validate_frame_rectangle(
+                FrameOrigin { x0: 90, y0: 0 },
+                FrameSize {
+                    width: 11,
+                    height: 10,
+                },
+                100,
+                100,
+                true,
+            )
+            .unwrap_err(),
+            Error::InvalidCodestream("frame rectangle outside image")
+        );
+    }
+
+    #[test]
+    fn allows_animation_frame_rectangle_outside_canvas() {
+        let rect = validate_frame_rectangle(
+            FrameOrigin { x0: -5, y0: 0 },
+            FrameSize {
+                width: 110,
+                height: 10,
+            },
+            100,
+            100,
+            false,
+        )
+        .unwrap();
+
+        assert!(rect.is_partial);
     }
 
     #[test]

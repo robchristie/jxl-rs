@@ -412,6 +412,11 @@ impl Decoder {
         if self.options.threads == ThreadingMode::Threads(0) {
             return Err(Error::Unsupported("zero decoder threads"));
         }
+        if let Some(roi) = self.options.roi
+            && (roi.width == 0 || roi.height == 0)
+        {
+            return Err(Error::InvalidCodestream("empty decode region"));
+        }
         Ok(())
     }
 
@@ -3715,6 +3720,28 @@ mod tests {
         assert_eq!(
             zero_threads_decoder.decode_rgba8(&bytes),
             Err(Error::Unsupported("zero decoder threads"))
+        );
+
+        let zero_width_roi_decoder = Decoder::new().roi(Rect {
+            x: 0,
+            y: 0,
+            width: 0,
+            height: 1,
+        });
+        assert_eq!(
+            zero_width_roi_decoder.decode(&bytes),
+            Err(Error::InvalidCodestream("empty decode region"))
+        );
+
+        let zero_height_roi_decoder = Decoder::new().roi(Rect {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 0,
+        });
+        assert_eq!(
+            zero_height_roi_decoder.decode_rgba8(&bytes),
+            Err(Error::InvalidCodestream("empty decode region"))
         );
 
         let vardct_pass_decoder = Decoder::new().vardct_pass(0);

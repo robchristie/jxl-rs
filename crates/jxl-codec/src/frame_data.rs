@@ -6,6 +6,7 @@ use std::ops::Range;
 
 const BLOCK_DIM: u32 = 8;
 const PERMUTATION_CONTEXTS: usize = 8;
+const MAX_TOC_ENTRIES: u32 = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameData {
@@ -71,7 +72,7 @@ pub fn read_frame_data(
         frame_header.group_layout.num_groups as usize,
         frame_header.group_layout.num_dc_groups as usize,
         frame_header.passes.num_passes as usize,
-    );
+    )?;
     let toc = read_toc(reader, toc_entries, &frame_header.group_layout)?;
 
     if !reader.is_byte_aligned() {
@@ -109,15 +110,25 @@ pub fn read_frame_data(
     })
 }
 
-pub fn num_toc_entries(num_groups: usize, num_dc_groups: usize, num_passes: usize) -> usize {
+pub fn num_toc_entries(
+    num_groups: usize,
+    num_dc_groups: usize,
+    num_passes: usize,
+) -> Result<usize> {
     if num_groups == 1 && num_passes == 1 {
-        1
+        Ok(1)
     } else {
-        2 + num_dc_groups + num_groups * num_passes
+        let ac_entries = num_groups
+            .checked_mul(num_passes)
+            .ok_or(Error::InvalidCodestream("TOC entry count overflow"))?;
+        2usize
+            .checked_add(num_dc_groups)
+            .and_then(|entries| entries.checked_add(ac_entries))
+            .ok_or(Error::InvalidCodestream("TOC entry count overflow"))
     }
 }
 
-pub fn compute_frame_group_layout(header: &FrameHeader) -> FrameGroupLayout {
+pub fn compute_frame_group_layout(header: &FrameHeader) -> Result<FrameGroupLayout> {
     compute_group_layout(
         header.frame_size,
         header.dc_level,
@@ -137,7 +148,7 @@ pub(crate) fn compute_group_layout(
     max_h_shift: u8,
     max_v_shift: u8,
     modular_mode: bool,
-) -> FrameGroupLayout {
+) -> Result<FrameGroupLayout> {
     if dc_level != 0 {
         let divisor = 1u32 << (3 * dc_level);
         frame_size.width = frame_size.width.div_ceil(divisor);
@@ -166,16 +177,29 @@ pub(crate) fn compute_group_layout(
     let groups_y = ysize.div_ceil(group_dim);
     let dc_groups_x = xsize_blocks.div_ceil(group_dim);
     let dc_groups_y = ysize_blocks.div_ceil(group_dim);
-    FrameGroupLayout {
+    let num_groups = checked_group_count(groups_x, groups_y, "group count overflow")?;
+    if num_groups > MAX_TOC_ENTRIES {
+        return Err(Error::InvalidCodestream("too many frame groups"));
+    }
+    let num_dc_groups = checked_group_count(dc_groups_x, dc_groups_y, "DC group count overflow")?;
+    if num_dc_groups > MAX_TOC_ENTRIES {
+        return Err(Error::InvalidCodestream("too many frame DC groups"));
+    }
+    Ok(FrameGroupLayout {
         group_dim,
         groups_x,
         groups_y,
-        num_groups: groups_x * groups_y,
+        num_groups,
         dc_group_dim: group_dim * BLOCK_DIM,
         dc_groups_x,
         dc_groups_y,
-        num_dc_groups: dc_groups_x * dc_groups_y,
-    }
+        num_dc_groups,
+    })
+}
+
+fn checked_group_count(x: u32, y: u32, overflow_msg: &'static str) -> Result<u32> {
+    x.checked_mul(y)
+        .ok_or(Error::InvalidCodestream(overflow_msg))
 }
 
 fn read_toc(
@@ -183,7 +207,7 @@ fn read_toc(
     toc_entries: usize,
     group_layout: &FrameGroupLayout,
 ) -> Result<FrameToc> {
-    if toc_entries == 0 || toc_entries > 65_536 {
+    if toc_entries == 0 || toc_entries > MAX_TOC_ENTRIES as usize {
         return Err(Error::InvalidCodestream("invalid TOC entry count"));
     }
 
@@ -395,6 +419,54 @@ mod tests {
         assert_eq!(
             section_payload(&codestream, &section).unwrap_err(),
             Error::InvalidCodestream("frame section outside codestream")
+        );
+    }
+
+    #[test]
+    fn rejects_group_count_overflow_before_toc() {
+        assert_eq!(
+            compute_group_layout(
+                FrameSize {
+                    width: 1 << 30,
+                    height: 1 << 30,
+                },
+                0,
+                1,
+                1,
+                0,
+                0,
+                false,
+            )
+            .unwrap_err(),
+            Error::InvalidCodestream("group count overflow")
+        );
+    }
+
+    #[test]
+    fn rejects_too_many_frame_groups_before_toc() {
+        assert_eq!(
+            compute_group_layout(
+                FrameSize {
+                    width: 65_537 * 256,
+                    height: 1,
+                },
+                0,
+                1,
+                1,
+                0,
+                0,
+                false,
+            )
+            .unwrap_err(),
+            Error::InvalidCodestream("too many frame groups")
+        );
+    }
+
+    #[test]
+    fn rejects_toc_entry_count_overflow() {
+        assert_eq!(
+            num_toc_entries(usize::MAX, 1, 2).unwrap_err(),
+            Error::InvalidCodestream("TOC entry count overflow")
         );
     }
 
