@@ -325,6 +325,8 @@ pub struct VarDctFrameMetadata {
     pub height: u32,
     pub coded_width: u32,
     pub coded_height: u32,
+    pub skip_adaptive_dc_smoothing: bool,
+    pub uses_dc_frame: bool,
     pub upsampling: u32,
     pub color_transform: ColorTransform,
     pub chroma_subsampling: YCbCrChromaSubsampling,
@@ -1875,6 +1877,7 @@ fn dc_only_spatial_grid_for_group(
         metadata,
         &plan.frame.chroma_subsampling,
         &plan.dc_group_metadata,
+        Some(&plan.frame),
         dc_multiplier,
     )
     .map(Some)
@@ -1893,9 +1896,6 @@ fn final_vardct_spatial_grid_for_group(
         })
         .collect::<Vec<_>>();
     passes.sort_by_key(|metadata| metadata.payload.pass);
-    if passes.len() <= 1 {
-        return Ok(None);
-    }
 
     let Some(mut merged) = passes
         .first()
@@ -1927,6 +1927,7 @@ fn final_vardct_spatial_grid_for_group(
         final_metadata,
         &plan.frame.chroma_subsampling,
         &plan.dc_group_metadata,
+        Some(&plan.frame),
     )
     .map(Some)
 }
@@ -3334,6 +3335,8 @@ pub fn read_vardct_frame_metadata(
         height: frame_header.frame_size.height,
         coded_width,
         coded_height,
+        skip_adaptive_dc_smoothing: frame_header.flags & FRAME_FLAG_SKIP_ADAPTIVE_DC_SMOOTHING != 0,
+        uses_dc_frame: frame_header.flags & FRAME_FLAG_USE_DC_FRAME != 0,
         upsampling: frame_header.upsampling,
         color_transform: frame_header.color_transform,
         chroma_subsampling: frame_header.chroma_subsampling.clone(),
@@ -4442,6 +4445,7 @@ fn read_vardct_ac_group_metadata_from_reader(
                                             &metadata,
                                             &frame_header.chroma_subsampling,
                                             dc_groups,
+                                            None,
                                         )
                                         .ok()
                                     });
@@ -4454,6 +4458,7 @@ fn read_vardct_ac_group_metadata_from_reader(
                                                 &metadata,
                                                 &frame_header.chroma_subsampling,
                                                 dc_groups,
+                                                None,
                                             )
                                             .ok()
                                         })
@@ -6061,6 +6066,7 @@ fn spatialize_vardct_ac_grid(
     metadata: &VarDctAcGroupMetadata,
     chroma_subsampling: &YCbCrChromaSubsampling,
     dc_groups: &[VarDctDcGroupMetadata],
+    frame: Option<&VarDctFrameMetadata>,
 ) -> Result<VarDctAcSpatialGrid> {
     spatialize_vardct_ac_grid_with_dc_multiplier(
         grid,
@@ -6068,6 +6074,7 @@ fn spatialize_vardct_ac_grid(
         metadata,
         chroma_subsampling,
         dc_groups,
+        frame,
         1.0,
     )
 }
@@ -6078,12 +6085,13 @@ fn spatialize_vardct_ac_grid_with_dc_multiplier(
     metadata: &VarDctAcGroupMetadata,
     chroma_subsampling: &YCbCrChromaSubsampling,
     dc_groups: &[VarDctDcGroupMetadata],
+    frame: Option<&VarDctFrameMetadata>,
     dc_multiplier: f32,
 ) -> Result<VarDctAcSpatialGrid> {
     let blocks = vardct_ac_blocks_for_group(metadata, dc_groups)?;
     let dc_grid = global
         .map(|global| {
-            vardct_dc_coefficients_for_group(metadata, global, chroma_subsampling, dc_groups)
+            vardct_dc_coefficients_for_group(metadata, global, chroma_subsampling, dc_groups, frame)
         })
         .transpose()?;
     let channel_block_shapes = vardct_group_channel_block_shapes(
@@ -6374,8 +6382,29 @@ fn vardct_dc_coefficients_for_group(
     global: &VarDctGlobalMetadata,
     chroma_subsampling: &YCbCrChromaSubsampling,
     dc_groups: &[VarDctDcGroupMetadata],
+    frame: Option<&VarDctFrameMetadata>,
 ) -> Result<VarDctDcCoefficientGrid> {
-    const DEFAULT_DC_QUANT: [f32; 3] = [1.0 / 4096.0, 1.0 / 512.0, 1.0 / 256.0];
+    if let Some(frame) = frame
+        && frame.chroma_subsampling.is_444()
+    {
+        let mut coefficients = vardct_dc_coefficients_for_frame_444(global, frame, dc_groups)?;
+        if vardct_adaptive_dc_smoothing_enabled(frame) {
+            let dc_quant = global.dc_dequant.coefficients.unwrap_or(DEFAULT_DC_QUANT);
+            let dc_factors = dc_quant.map(|quant| global.quantizer.inv_quant_dc * quant);
+            apply_vardct_adaptive_dc_smoothing(&mut coefficients, dc_factors);
+        }
+        return select_vardct_dc_coefficients_for_group(&coefficients, metadata);
+    }
+
+    vardct_dc_coefficients_for_group_unsmoothed(metadata, global, chroma_subsampling, dc_groups)
+}
+
+fn vardct_dc_coefficients_for_group_unsmoothed(
+    metadata: &VarDctAcGroupMetadata,
+    global: &VarDctGlobalMetadata,
+    chroma_subsampling: &YCbCrChromaSubsampling,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<VarDctDcCoefficientGrid> {
     let dc_group = vardct_dc_group_for_ac_group(metadata, dc_groups)?;
     let var_dct_dc = dc_group
         .var_dct_dc
@@ -6447,11 +6476,168 @@ fn vardct_dc_coefficients_for_group(
     })
 }
 
+fn vardct_dc_coefficients_for_frame_444(
+    global: &VarDctGlobalMetadata,
+    frame: &VarDctFrameMetadata,
+    dc_groups: &[VarDctDcGroupMetadata],
+) -> Result<VarDctDcCoefficientGrid> {
+    let width_blocks = frame.coded_width.div_ceil(8) as usize;
+    let height_blocks = frame.coded_height.div_ceil(8) as usize;
+    let len = width_blocks
+        .checked_mul(height_blocks)
+        .ok_or(Error::InvalidCodestream("VarDCT DC image is too large"))?;
+    let mut raw_per_channel = [vec![0.0; len], vec![0.0; len], vec![0.0; len]];
+    let dc_quant = global.dc_dequant.coefficients.unwrap_or(DEFAULT_DC_QUANT);
+
+    for dc_group in dc_groups {
+        let var_dct_dc = dc_group
+            .var_dct_dc
+            .as_ref()
+            .ok_or(Error::Unsupported("VarDCT DC coefficients"))?;
+        let group_x = (dc_group.payload.group.x / 8) as usize;
+        let group_y = (dc_group.payload.group.y / 8) as usize;
+        let group_width = dc_group.payload.group.width.div_ceil(8) as usize;
+        let group_height = dc_group.payload.group.height.div_ceil(8) as usize;
+        let extra_precision_scale = dc_group
+            .extra_precision_bits
+            .map(|bits| 1.0f32 / (1u32 << bits as u32) as f32)
+            .unwrap_or(1.0);
+
+        for output_channel in 0..3 {
+            let modular_channel_index = vardct_modular_channel_for_color_channel(output_channel)?;
+            let channel = var_dct_dc
+                .channels
+                .iter()
+                .find(|channel| channel.channel_index == modular_channel_index)
+                .ok_or(Error::Unsupported("VarDCT DC coefficients"))?;
+            let scale =
+                global.quantizer.inv_quant_dc * dc_quant[output_channel] * extra_precision_scale;
+            for y in 0..group_height {
+                let output_y = group_y + y;
+                if output_y >= height_blocks {
+                    continue;
+                }
+                for x in 0..group_width {
+                    let output_x = group_x + x;
+                    if output_x >= width_blocks {
+                        continue;
+                    }
+                    let sample = modular_channel_sample_shifted(channel, x, y)?;
+                    raw_per_channel[output_channel][output_y * width_blocks + output_x] =
+                        sample as f32 * scale;
+                }
+            }
+        }
+    }
+
+    let dc_factors = [
+        global.color_correlation.base_correlation_x
+            + global.color_correlation.ytox_dc as f32
+                / global.color_correlation.color_factor as f32,
+        0.0,
+        global.color_correlation.base_correlation_b
+            + global.color_correlation.ytob_dc as f32
+                / global.color_correlation.color_factor as f32,
+    ];
+    let mut per_channel = [vec![0.0; len], vec![0.0; len], vec![0.0; len]];
+    for index in 0..len {
+        let y = raw_per_channel[1][index];
+        per_channel[1][index] = y;
+        per_channel[0][index] = raw_per_channel[0][index] + y * dc_factors[0];
+        per_channel[2][index] = raw_per_channel[2][index] + y * dc_factors[2];
+    }
+
+    Ok(VarDctDcCoefficientGrid {
+        width_blocks,
+        height_blocks,
+        per_channel,
+    })
+}
+
+fn select_vardct_dc_coefficients_for_group(
+    frame_grid: &VarDctDcCoefficientGrid,
+    metadata: &VarDctAcGroupMetadata,
+) -> Result<VarDctDcCoefficientGrid> {
+    let width_blocks = metadata.payload.group.width.div_ceil(8).min(256 / 8) as usize;
+    let height_blocks = metadata.payload.group.height.div_ceil(8).min(256 / 8) as usize;
+    let x0 = (metadata.payload.group.x / 8) as usize;
+    let y0 = (metadata.payload.group.y / 8) as usize;
+    let mut per_channel = [
+        vec![0.0; width_blocks * height_blocks],
+        vec![0.0; width_blocks * height_blocks],
+        vec![0.0; width_blocks * height_blocks],
+    ];
+    for channel in 0..3 {
+        for y in 0..height_blocks {
+            for x in 0..width_blocks {
+                let source_x = x0 + x;
+                let source_y = y0 + y;
+                if source_x >= frame_grid.width_blocks || source_y >= frame_grid.height_blocks {
+                    return Err(Error::InvalidCodestream("invalid VarDCT DC coefficient"));
+                }
+                per_channel[channel][y * width_blocks + x] =
+                    frame_grid.per_channel[channel][source_y * frame_grid.width_blocks + source_x];
+            }
+        }
+    }
+    Ok(VarDctDcCoefficientGrid {
+        width_blocks,
+        height_blocks,
+        per_channel,
+    })
+}
+
+fn vardct_adaptive_dc_smoothing_enabled(frame: &VarDctFrameMetadata) -> bool {
+    !frame.skip_adaptive_dc_smoothing && !frame.uses_dc_frame
+}
+
+fn apply_vardct_adaptive_dc_smoothing(grid: &mut VarDctDcCoefficientGrid, dc_factors: [f32; 3]) {
+    const W1: f32 = 0.20345139757231578;
+    const W2: f32 = 0.0334829185968739;
+    const W0: f32 = 1.0 - 4.0 * (W1 + W2);
+
+    let width = grid.width_blocks;
+    let height = grid.height_blocks;
+    if width <= 2 || height <= 2 {
+        return;
+    }
+
+    let input = grid.per_channel.clone();
+    let mut output = input.clone();
+    for y in 1..height - 1 {
+        for x in 1..width - 1 {
+            let index = y * width + x;
+            let mut smoothed = [0.0f32; 3];
+            let mut gap = 0.5f32;
+            for channel in 0..3 {
+                let plane = &input[channel];
+                let top = (y - 1) * width;
+                let row = y * width;
+                let bottom = (y + 1) * width;
+                let corner = plane[top + x - 1]
+                    + plane[top + x + 1]
+                    + plane[bottom + x - 1]
+                    + plane[bottom + x + 1];
+                let side =
+                    plane[row + x - 1] + plane[row + x + 1] + plane[top + x] + plane[bottom + x];
+                let center = plane[index];
+                smoothed[channel] = W2.mul_add(corner, W1.mul_add(side, W0 * center));
+                gap = gap.max(((center - smoothed[channel]) / dc_factors[channel]).abs());
+            }
+            let factor = (3.0 - 4.0 * gap).max(0.0);
+            for channel in 0..3 {
+                let center = input[channel][index];
+                output[channel][index] = (smoothed[channel] - center).mul_add(factor, center);
+            }
+        }
+    }
+    grid.per_channel = output;
+}
+
 fn vardct_dc_coefficient_diagnostics_for_group(
     plan: &VarDctDecodePlan,
     metadata: &VarDctAcGroupMetadata,
 ) -> Result<VarDctDcCoefficientDiagnostics> {
-    const DEFAULT_DC_QUANT: [f32; 3] = [1.0 / 4096.0, 1.0 / 512.0, 1.0 / 256.0];
     let global = plan
         .global
         .as_ref()
@@ -6466,6 +6652,7 @@ fn vardct_dc_coefficient_diagnostics_for_group(
         global,
         &plan.frame.chroma_subsampling,
         &plan.dc_group_metadata,
+        Some(&plan.frame),
     )?;
     let dc_quant = global.dc_dequant.coefficients.unwrap_or(DEFAULT_DC_QUANT);
     let width_blocks = metadata.payload.group.width.div_ceil(8).min(256 / 8) as usize;
@@ -7720,6 +7907,9 @@ const DEFAULT_GABORISH_WEIGHTS: [f32; 6] = [
 const GLOBAL_SCALE_DENOMINATOR: f32 = 65_536.0;
 const EPF_INV_SIGMA_NUMERATOR: f32 = -1.1715729;
 const EPF_MIN_SIGMA: f32 = -3.905243;
+const FRAME_FLAG_USE_DC_FRAME: u64 = 32;
+const FRAME_FLAG_SKIP_ADAPTIVE_DC_SMOOTHING: u64 = 128;
+const DEFAULT_DC_QUANT: [f32; 3] = [1.0 / 4096.0, 1.0 / 512.0, 1.0 / 256.0];
 const EPF_PLUS_OFFSETS: [(isize, isize); 5] = [(0, 0), (-1, 0), (0, -1), (1, 0), (0, 1)];
 const DEFAULT_OPSIN_BIASES: [f32; 3] = [-0.0037930732, -0.0037930732, -0.0037930732];
 const DEFAULT_INVERSE_OPSIN_MATRIX: [[f32; 3]; 3] = [
@@ -9972,6 +10162,8 @@ mod tests {
             height: 128,
             coded_width: 256,
             coded_height: 128,
+            skip_adaptive_dc_smoothing: false,
+            uses_dc_frame: false,
             upsampling: 1,
             color_transform: ColorTransform::Xyb,
             chroma_subsampling: YCbCrChromaSubsampling::default(),
@@ -10859,6 +11051,31 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_dc_smoothing_filters_low_gap_interior_blocks() {
+        let mut grid = VarDctDcCoefficientGrid {
+            width_blocks: 3,
+            height_blocks: 3,
+            per_channel: [
+                vec![0.0, 0.0, 0.0, 0.0, 0.10, 0.0, 0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0, 0.0, 0.20, 0.0, 0.0, 0.0, 0.0],
+                vec![0.0, 0.0, 0.0, 0.0, -0.10, 0.0, 0.0, 0.0, 0.0],
+            ],
+        };
+
+        apply_vardct_adaptive_dc_smoothing(&mut grid, [1.0, 1.0, 1.0]);
+
+        let center_weight = 1.0 - 4.0 * (0.20345139757231578 + 0.0334829185968739);
+        assert!((grid.per_channel[0][4] - 0.10 * center_weight).abs() < 1.0e-7);
+        assert!((grid.per_channel[1][4] - 0.20 * center_weight).abs() < 1.0e-7);
+        assert!((grid.per_channel[2][4] - -0.10 * center_weight).abs() < 1.0e-7);
+        for channel in 0..3 {
+            for index in [0, 1, 2, 3, 5, 6, 7, 8] {
+                assert_eq!(grid.per_channel[channel][index], 0.0);
+            }
+        }
+    }
+
+    #[test]
     fn epf_stage1_directional_sads_match_reference_kernel() {
         let channels = [
             (0..25).map(|sample| sample as f32).collect::<Vec<_>>(),
@@ -11190,6 +11407,8 @@ mod tests {
             height,
             coded_width: width,
             coded_height: height,
+            skip_adaptive_dc_smoothing: false,
+            uses_dc_frame: false,
             upsampling: 1,
             color_transform: ColorTransform::Xyb,
             chroma_subsampling: YCbCrChromaSubsampling::default(),

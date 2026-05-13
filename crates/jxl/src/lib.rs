@@ -5713,10 +5713,10 @@ mod tests {
             assert_eq!(
                 metrics,
                 Srgb8OracleMetrics {
-                    max_abs_error: 18,
-                    sum_abs_error: 940_536,
-                    checksum: 2_774_858_083_406_069_691,
-                    anchors: vec![0, 0, 254],
+                    max_abs_error: 14,
+                    sum_abs_error: 764_386,
+                    checksum: 5_720_197_582_906_474_427,
+                    anchors: vec![0, 1, 254],
                     reference_anchors: vec![0, 4, 254],
                 }
             );

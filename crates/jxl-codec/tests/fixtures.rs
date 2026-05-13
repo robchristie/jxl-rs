@@ -3328,8 +3328,8 @@ fn generated_vardct_nondefault_qf_context_map_decodes_coefficients_when_availabl
     ];
     let metrics = srgb8_oracle_metrics(&srgb, &reference, &anchor_indices);
     assert_eq!(metrics.max_abs_error, 255);
-    assert_eq!(metrics.sum_abs_error, 62_572_812);
-    assert_eq!(metrics.checksum, 17840368709977292605);
+    assert_eq!(metrics.sum_abs_error, 62_571_873);
+    assert_eq!(metrics.checksum, 8858212537434057211);
     assert_eq!(metrics.anchors, vec![55, 146, 76, 103]);
     assert_eq!(metrics.reference_anchors, vec![77, 133, 52, 100]);
 }

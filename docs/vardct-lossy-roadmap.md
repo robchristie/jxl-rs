@@ -157,12 +157,21 @@ Focus:
 
 ### Milestone 4: DC Path and Low-Frequency Correctness
 
-Status: pending.
+Status: in progress.
 
 Focus:
 
 - Verify DC group decoding, DC dequantization, color correlation, and LF image
   assembly against reference behavior and keep progressive pass behavior green.
+
+Progress:
+
+- Added the libjxl adaptive DC smoothing stage to final and DC-only 4:4:4
+  VarDCT reconstruction when the frame does not set `SkipAdaptiveDCSmoothing`
+  or `UseDcFrame`. Added focused unit coverage for the smoothing kernel. The
+  generated multigroup public fixture improves to max absolute error `14` and
+  sum absolute error `764_386`, and the non-default QF codec fixture sum drops
+  to `62_571_873`, but these are still above milestone-3 acceptance tolerance.
 
 ### Milestone 5: AC Coefficient Decoding and Dequantization
 
@@ -316,3 +325,11 @@ Focus:
   path runs for generated grayscale16 VarDCT output, but the captured metrics
   remain far outside the intended RGBA16 conformance tolerance, so the
   grayscale high-bit-depth reconstruction path still needs algorithmic work.
+- 2026-05-13: Implemented adaptive DC smoothing for final/DC-only 4:4:4
+  VarDCT reconstruction, matching libjxl's placement after DC dequantization
+  and before AC reconstruction for frames that do not skip the feature. Added a
+  focused codec unit test for the smoothing kernel. The generated multigroup
+  public fixture improved from max/sum `18`/`940_536` to `14`/`764_386`, and
+  the non-default QF codec fixture sum moved from `62_572_812` to
+  `62_571_873`, but the remaining RGB8 and gray16 fidelity gaps still point at
+  AC/dequant/transform/color-output work.
